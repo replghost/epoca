@@ -80,7 +80,11 @@ video-overlay sweeping which Brave does not have.
 - [ ] EasyList + EasyPrivacy + AdGuard Base → `epoca-rules-*` lists
 - [ ] Cosmetic compiler: `##` rules → CSS injection via `WKUserScript` (document_end)
 - [ ] `window.open` block: `createWebViewWith` delegate denial + document_start override
-- [ ] Shield icon: network-blocked + popup-blocked counts per tab
+- [ ] **Shield status UI** — design a clear way to show the user whether the shield is
+  active for the current site (blocked count, network vs cosmetic breakdown) and let
+  them toggle per-site exceptions without confusion. Current globe icon is white/static;
+  backend infrastructure (`toggle_site_exception`, `blocked_count`, `ShieldGlobal`) is
+  ready. Needs UX design before wiring up. (Backlogged 2026-03-03)
 - [ ] Settings page: toggle lists, per-domain exceptions
 - [ ] Background update loop (6-hour interval)
 - [ ] uBlock Annoyances + Fanboy Annoyance lists (cookie banners, overlay ads)

@@ -82,7 +82,7 @@ If unsure, ask rather than assume.
 ### Content Blocking (epoca-shield)
 - EasyList / EasyPrivacy rules compiled to WKContentRuleList JSON and installed on each WebView
 - Cosmetic hiding (document_end_script): overlay sweeper, cookie consent auto-dismiss
-- **Per-site exception toggle**: Eye/EyeOff button in URL bar suffix; calls `ShieldManager::toggle_site_exception(hostname)` via `cx.update_global::<ShieldGlobal>`; `ToggleSiteShield` GPUI action
+- **Per-site exception toggle**: Clicking the globe button in the URL bar calls `ShieldManager::toggle_site_exception(hostname)` via `cx.update_global::<ShieldGlobal>`; `ToggleSiteShield` GPUI action. Globe color changes green↔red as feedback. No separate Eye button.
 - **Shield cosmetic count**: `epocaShield` WKScriptMessageHandler (`EpocaShieldHandler` ObjC, `SHIELD_CHANNEL`, `drain_shield_events()`); stored in `WebViewTab.blocked_count`; displayed as green number next to globe
 - **Shield badge**: Globe icon color — green (#44bb6699) = active, red (#cc444499) = site excepted, muted = no shield. Computed from `ShieldGlobal` + `hostname_from_url()` each render
 - **6-hour list refresh**: `init_shield` bootstrap thread loops with 6-hour sleep, re-fetches EasyList/EasyPrivacy, updates `COMPILED_CONFIG`

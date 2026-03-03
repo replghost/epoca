@@ -785,56 +785,7 @@ impl Workbench {
                     .on_click(cx.listener(Self::reload_page)),
             );
 
-        // ── URL bar — shield badge + blocked count + Eye toggle ───────────
-        // Globe color: green = shield active, red = site excepted, muted = no shield.
-        let active_hostname = self.active_tab().and_then(|t| match &t.kind {
-            TabKind::WebView { url } => Some(hostname_from_url(url).to_string()),
-            _ => None,
-        });
-        let (shield_active, site_excepted) = {
-            let g = cx.try_global::<crate::shield::ShieldGlobal>();
-            match (g, &active_hostname) {
-                (Some(g), Some(host)) => {
-                    let excepted = g.0.is_fully_disabled_for(host);
-                    (true, excepted)
-                }
-                (Some(_), None) => (true, false),
-                _ => (false, false),
-            }
-        };
-        let globe_color: gpui::Rgba = if site_excepted {
-            rgba(0xcc444499)  // red — shield off for this site
-        } else if shield_active {
-            rgba(0x44bb6699)  // green — shield on
-        } else {
-            rgba(0xffffff55)  // muted — no shield loaded yet
-        };
-        // Blocked count for the active tab (reads from WebViewTab entity)
-        let active_blocked: u32 = self.active_tab()
-            .and_then(|t| t.entity.clone().downcast::<WebViewTab>().ok())
-            .map(|e| e.read(cx).blocked_count)
-            .unwrap_or(0);
-        // Eye/EyeOff button — only shown for WebView tabs
-        let eye_icon = if site_excepted { IconName::EyeOff } else { IconName::Eye };
-        let show_eye = active_hostname.is_some();
-        let url_suffix = div()
-            .flex()
-            .items_center()
-            .gap(px(2.0))
-            .pr(px(2.0))
-            .when(active_blocked > 0, |d| d.child(
-                div()
-                    .text_xs()
-                    .text_color(rgba(0x44bb6699))
-                    .child(SharedString::from(active_blocked.to_string()))
-            ))
-            .when(show_eye, |d| d.child(
-                Button::new("shield-eye")
-                    .ghost()
-                    .compact()
-                    .icon(eye_icon)
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_site_shield(cx)))
-            ));
+        // ── URL bar ───────────────────────────────────────────────────────
         let url_row = div()
             .mx(px(8.0))
             .mt(px(4.0))
@@ -845,8 +796,7 @@ impl Workbench {
             .border_color(rgba(0xffffff22))
             .child(
                 Input::new(&self.url_input)
-                    .prefix(Icon::new(IconName::Globe).size(px(13.0)).text_color(globe_color))
-                    .suffix(url_suffix)
+                    .prefix(Icon::new(IconName::Globe).size(px(13.0)))
                     .cleanable(true),
             );
 
