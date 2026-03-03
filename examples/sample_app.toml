@@ -1,0 +1,35 @@
+# Sample declarative app for zhost
+# This is rendered directly by the host — no sandbox needed.
+
+[app]
+title = "Weather Widget"
+
+[node]
+kind = "VStack"
+gap = 8
+
+[[node.children]]
+kind = "Text"
+content = "Weather Widget"
+style = "heading"
+
+[[node.children]]
+kind = "Divider"
+
+[[node.children]]
+kind = "HStack"
+gap = 16
+
+  [[node.children.children]]
+  kind = "Text"
+  content = "Temperature: 24 C"
+
+  [[node.children.children]]
+  kind = "Text"
+  content = "Humidity: 65%"
+
+[[node.children]]
+kind = "Button"
+label = "Refresh"
+variant = "primary"
+on_click = "refresh"

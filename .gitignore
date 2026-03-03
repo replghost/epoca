@@ -1,0 +1,52 @@
+# Rust / Cargo
+# /target covers the workspace root build dir; **/target covers sub-projects
+# like guest/counter/ that have their own separate Cargo.toml + target dir.
+/target
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock is committed for binary crates (reproducible builds)
+
+# Epoca-specific build artifacts
+# *.polkavm covers compiled guest binaries everywhere EXCEPT the examples/
+# directory, where pre-built binaries are committed so demos work out of the box.
+*.polkavm
+!examples/*.polkavm
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Android build artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
+*.iml
+# Signing keystores — never commit private keys
+*.jks
+*.keystore
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Logs
+*.log
+
+# macOS package / distribution artifacts
+*.dmg
+*.pkg
+dist/

@@ -1,0 +1,27 @@
+[package]
+name = "epoca-android"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "epoca-android-preview"
+path = "src/main.rs"
+
+[features]
+default = []
+android = ["winit/android-native-activity"]
+
+[dependencies]
+epoca-protocol = { path = "../epoca-protocol" }
+epoca-dsl = { path = "../epoca-dsl" }
+wgpu = "23"
+winit = "0.30"
+cosmic-text = "0.12"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.4"
+log = { workspace = true }
+env_logger = { workspace = true }
+anyhow = { workspace = true }

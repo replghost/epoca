@@ -1,0 +1,29 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'com.zhost.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.zhost.app"
+        // minSdk 24: Android 7.0 — Vulkan 1.0 support starts here.
+        // Covers 95%+ of active devices.
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    // The native .so files are built by cargo-ndk and placed in jniLibs.
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['src/main/jniLibs']
+        }
+    }
+}

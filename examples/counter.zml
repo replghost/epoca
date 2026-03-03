@@ -1,0 +1,13 @@
+-- Counter widget
+state
+  count = 0
+
+VStack gap=12
+  Text "Count: {count}" style=heading
+  HStack gap=8
+    Button "+" variant=primary
+      on click
+        count = count + 1
+    Button "-"
+      on click
+        count = count - 1

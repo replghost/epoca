@@ -1,0 +1,21 @@
+[package]
+name = "epoca"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "epoca"
+path = "src/main.rs"
+
+[dependencies]
+epoca-core = { path = "../epoca-core" }
+epoca-sandbox = { path = "../epoca-sandbox" }
+epoca-protocol = { path = "../epoca-protocol" }
+epoca-broker = { path = "../epoca-broker" }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+gpui-component-assets = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+sentry = { workspace = true }

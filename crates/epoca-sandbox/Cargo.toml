@@ -1,0 +1,12 @@
+[package]
+name = "epoca-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+epoca-protocol = { path = "../epoca-protocol" }
+polkavm = { workspace = true }
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+postcard = { version = "1", features = ["alloc"] }

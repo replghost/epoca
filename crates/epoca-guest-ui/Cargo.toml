@@ -1,0 +1,8 @@
+[package]
+name = "epoca-guest-ui"
+version.workspace = true
+edition.workspace = true
+description = "Ergonomic UI builder functions for Epoca PolkaVM guest apps"
+
+[dependencies]
+epoca-protocol = { path = "../epoca-protocol", default-features = false }

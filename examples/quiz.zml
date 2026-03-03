@@ -1,0 +1,33 @@
+-- Quick math quiz
+state
+  score = 0
+  total = 0
+  feedback = ""
+  show_feedback = false
+
+VStack gap=12
+  Text "Math Quiz" style=heading
+  Text "Score: {score} / {total}"
+  Divider
+
+  Text "What is 7 x 8?"
+  HStack gap=8
+    Button "54"
+      on click
+        feedback = "Wrong! 7 x 8 = 56"
+        total = total + 1
+        show_feedback = true
+    Button "56" variant=primary
+      on click
+        score = score + 1
+        feedback = "Correct!"
+        total = total + 1
+        show_feedback = true
+    Button "48"
+      on click
+        feedback = "Wrong! 7 x 8 = 56"
+        total = total + 1
+        show_feedback = true
+
+  Divider
+  Text "{feedback}" visible=show_feedback

@@ -1,0 +1,24 @@
+-- Tip splitter
+state
+  bill = 50
+  tip_pct = 15
+  people = 2
+  tip = 0
+  total = 0
+  per_person = 0
+
+VStack gap=12
+  Text "Tip Splitter" style=heading
+  Divider
+  Input bind=bill placeholder="Bill amount"
+  Input bind=tip_pct placeholder="Tip %"
+  Input bind=people placeholder="Number of people"
+  Button "Calculate" variant=primary
+    on click
+      tip = bill * tip_pct / 100
+      total = bill + tip
+      per_person = total / people
+  Divider
+  Text "Tip: {tip}"
+  Text "Total: {total}"
+  Text "Per person: {per_person}"

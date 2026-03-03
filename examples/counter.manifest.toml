@@ -1,0 +1,6 @@
+[permissions]
+network = []
+geolocation = "none"
+camera = false
+gpu = "none"
+storage = "0"

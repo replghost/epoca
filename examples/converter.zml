@@ -1,0 +1,14 @@
+-- Currency converter
+state
+  amount = 100
+  rate = 1.35
+  result = 135
+
+VStack gap=12
+  Text "USD to EUR Converter" style=heading
+  Divider
+  Input bind=amount placeholder="Amount in USD"
+  Button "Convert" variant=primary
+    on click
+      result = amount * rate
+  Text "Result: {result} EUR"

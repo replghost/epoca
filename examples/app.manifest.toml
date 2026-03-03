@@ -1,0 +1,8 @@
+# Example app manifest — declares permissions for the capability broker.
+
+[permissions]
+network = ["api.weather.com", "cdn.weather.com"]
+geolocation = "coarse"
+camera = false
+gpu = "2d"
+storage = "1MB"

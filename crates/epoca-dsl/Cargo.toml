@@ -1,0 +1,8 @@
+[package]
+name = "epoca-dsl"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+epoca-protocol = { path = "../epoca-protocol" }
+indexmap = { workspace = true }
