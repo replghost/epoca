@@ -986,6 +986,31 @@ document.addEventListener('click',function(e){
 },true);
 })();"#;
 
+/// Injected into every page. When ⌘-click opens a background tab a green
+/// expanding ring radiates from the click point — macOS "notification sent"
+/// feedback. Fires only on cmd-click (not cmd-shift-click, which is foreground).
+const RIPPLE_SCRIPT: &str = r#"(function(){
+if(window.__epocaRipple)return;
+window.__epocaRipple=true;
+document.addEventListener('click',function(e){
+  if(!e.metaKey||e.shiftKey)return;
+  var el=e.target;while(el&&el.tagName!=='A')el=el.parentElement;
+  if(!el||!el.href)return;
+  var r=document.createElement('div');
+  var x=e.clientX,y=e.clientY,sz=48;
+  r.style.cssText='position:fixed;pointer-events:none;border-radius:50%;'
+    +'border:2px solid #44bb66;background:rgba(68,187,102,0.10);'
+    +'left:'+(x-sz/2)+'px;top:'+(y-sz/2)+'px;'
+    +'width:'+sz+'px;height:'+sz+'px;'
+    +'transform:scale(0.1);opacity:1;z-index:2147483647;'
+    +'transition:transform 400ms cubic-bezier(0.25,0.46,0.45,0.94),opacity 380ms ease-out;';
+  document.body.appendChild(r);
+  r.getBoundingClientRect();
+  r.style.transform='scale(4.5)';r.style.opacity='0';
+  setTimeout(function(){r.remove();},420);
+},true);
+})();"#;
+
 /// Injected into every page at document creation time. Styles the WebKit
 /// scrollbar to match the dark chrome look (same technique Arc uses).
 const SCROLLBAR_CSS_SCRIPT: &str = r#"(function(){
@@ -1257,6 +1282,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         let webview_ptr = obj as usize;
         crate::shield::register_nav_handler(uc);
         crate::shield::register_meta_handler(uc, webview_ptr);
+        crate::shield::register_shield_handler(uc, webview_ptr);
         webview_ptr
     }
 }
@@ -1281,6 +1307,8 @@ pub struct WebViewTab {
     /// Raw WKWebView pointer (cast to usize) used to route title-change events
     /// from `TITLE_CHANNEL` back to the correct `TabEntry` in Workbench.
     pub webview_ptr: usize,
+    /// Running count of cosmetic elements hidden by the shield on this tab.
+    pub blocked_count: u32,
 }
 
 impl WebViewTab {
@@ -1352,6 +1380,7 @@ impl WebViewTab {
             .with_initialization_script(TITLE_TRACKER_SCRIPT)
             .with_initialization_script(LINK_STATUS_SCRIPT)
             .with_initialization_script(CMD_CLICK_SCRIPT)
+            .with_initialization_script(RIPPLE_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)
@@ -1387,6 +1416,7 @@ impl WebViewTab {
             _omnibox_subscription,
             sidebar_blocker_ptr,
             webview_ptr,
+            blocked_count: 0,
         }
     }
 

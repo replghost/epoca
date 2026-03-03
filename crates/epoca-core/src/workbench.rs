@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -130,6 +130,17 @@ pub struct Workbench {
     /// localStorage, or cache is shared between tabs or sessions.
     /// Defeats per-tab metered paywalls and cross-tab tracking.
     pub isolated_tabs: bool,
+}
+
+/// Extract the hostname from a URL string without pulling in the `url` crate.
+/// e.g. "https://example.com/path" → "example.com"
+fn hostname_from_url(url: &str) -> &str {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let host = rest.split('/').next().unwrap_or(rest);
+    host.split(':').next().unwrap_or(host)
 }
 
 impl Workbench {
@@ -333,6 +344,23 @@ impl Workbench {
             }
             if changed { cx.notify(); }
         }
+        // Drain shield cosmetic-count events (epocaShield WKScriptMessageHandler)
+        let shield_events = crate::shield::drain_shield_events();
+        if !shield_events.is_empty() {
+            let mut changed = false;
+            for (ev_ptr, count) in shield_events {
+                for tab in &mut self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        let wv_ptr = entity.read(cx).webview_ptr;
+                        if wv_ptr == ev_ptr {
+                            entity.update(cx, |wv, _| wv.blocked_count += count);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed { cx.notify(); }
+        }
     }
 
     fn close_omnibox(&mut self, cx: &mut Context<Self>) {
@@ -516,6 +544,24 @@ impl Workbench {
     pub fn set_isolated_tabs(&mut self, isolated: bool, cx: &mut Context<Self>) {
         self.isolated_tabs = isolated;
         cx.notify();
+    }
+
+    /// Toggle the shield exception for the active tab's hostname.
+    /// Eye icon in URL bar calls this; globe turns red when excepted.
+    fn toggle_site_shield(&mut self, cx: &mut Context<Self>) {
+        let hostname = self
+            .active_tab()
+            .and_then(|t| match &t.kind {
+                TabKind::WebView { url } => Some(hostname_from_url(url).to_string()),
+                _ => None,
+            });
+        if let Some(host) = hostname {
+            if host.is_empty() { return; }
+            cx.update_global::<crate::shield::ShieldGlobal, _>(|g, _| {
+                g.0.toggle_site_exception(&host);
+            });
+            cx.notify();
+        }
     }
 
     pub fn reload_active_tab(&mut self, hard: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -739,7 +785,56 @@ impl Workbench {
                     .on_click(cx.listener(Self::reload_page)),
             );
 
-        // ── URL bar ───────────────────────────────────────────────────────
+        // ── URL bar — shield badge + blocked count + Eye toggle ───────────
+        // Globe color: green = shield active, red = site excepted, muted = no shield.
+        let active_hostname = self.active_tab().and_then(|t| match &t.kind {
+            TabKind::WebView { url } => Some(hostname_from_url(url).to_string()),
+            _ => None,
+        });
+        let (shield_active, site_excepted) = {
+            let g = cx.try_global::<crate::shield::ShieldGlobal>();
+            match (g, &active_hostname) {
+                (Some(g), Some(host)) => {
+                    let excepted = g.0.is_fully_disabled_for(host);
+                    (true, excepted)
+                }
+                (Some(_), None) => (true, false),
+                _ => (false, false),
+            }
+        };
+        let globe_color: gpui::Rgba = if site_excepted {
+            rgba(0xcc444499)  // red — shield off for this site
+        } else if shield_active {
+            rgba(0x44bb6699)  // green — shield on
+        } else {
+            rgba(0xffffff55)  // muted — no shield loaded yet
+        };
+        // Blocked count for the active tab (reads from WebViewTab entity)
+        let active_blocked: u32 = self.active_tab()
+            .and_then(|t| t.entity.clone().downcast::<WebViewTab>().ok())
+            .map(|e| e.read(cx).blocked_count)
+            .unwrap_or(0);
+        // Eye/EyeOff button — only shown for WebView tabs
+        let eye_icon = if site_excepted { IconName::EyeOff } else { IconName::Eye };
+        let show_eye = active_hostname.is_some();
+        let url_suffix = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .pr(px(2.0))
+            .when(active_blocked > 0, |d| d.child(
+                div()
+                    .text_xs()
+                    .text_color(rgba(0x44bb6699))
+                    .child(SharedString::from(active_blocked.to_string()))
+            ))
+            .when(show_eye, |d| d.child(
+                Button::new("shield-eye")
+                    .ghost()
+                    .compact()
+                    .icon(eye_icon)
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_site_shield(cx)))
+            ));
         let url_row = div()
             .mx(px(8.0))
             .mt(px(4.0))
@@ -750,7 +845,8 @@ impl Workbench {
             .border_color(rgba(0xffffff22))
             .child(
                 Input::new(&self.url_input)
-                    .prefix(Icon::new(IconName::Globe).size(px(13.0)))
+                    .prefix(Icon::new(IconName::Globe).size(px(13.0)).text_color(globe_color))
+                    .suffix(url_suffix)
                     .cleanable(true),
             );
 
@@ -1147,6 +1243,7 @@ impl Render for Workbench {
                     }))
                     .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
             }
 
             // ---- Overlay: sidebar slides in as a modal over full-width content ----
@@ -1264,6 +1361,7 @@ impl Render for Workbench {
                     }))
                     .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
                             return;

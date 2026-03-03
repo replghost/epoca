@@ -33,6 +33,27 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   init script + `EpocaNavHandler` ObjC `WKScriptMessageHandler` + `NAV_CHANNEL` drain in
   Workbench. `Workbench.open_links_in_background: bool` (default `true`). (2026-03-03)
 
+- **Cmd-click ripple** — Green expanding ring (`#44bb66`) radiates from the click point when
+  a background tab is opened via ⌘-click. 400ms, non-blocking. `RIPPLE_SCRIPT` init script,
+  idempotent via `window.__epocaRipple` guard. (2026-03-03)
+
+- **Shield badge on globe icon** — Globe icon in URL bar turns green (`#44bb6699`) when the
+  shield is active, red (`#cc444499`) when the site is excepted, muted when no shield is
+  loaded. Color derived from `ShieldGlobal` state + hostname lookup each render. (2026-03-03)
+
+- **Cosmetic blocked count in URL bar** — Small green number next to globe shows how many
+  elements the shield hid on the current page. Sourced from `epocaShield` WKScriptMessageHandler
+  (`EpocaShieldHandler` ObjC class, `SHIELD_CHANNEL`, `drain_shield_events()`), stored in
+  `WebViewTab.blocked_count`. (2026-03-03)
+
+- **Per-site shield exception toggle** — Eye/EyeOff button in URL bar suffix toggles the
+  shield exception for the active tab's hostname. Calls `ShieldManager::toggle_site_exception()`
+  via `ShieldGlobal`. Globe turns red when site is excepted. `ToggleSiteShield` GPUI action. (2026-03-03)
+
+- **6-hour background filter list refresh** — `init_shield` bootstrap thread now loops,
+  sleeping 6 hours between re-fetches of EasyList/EasyPrivacy, keeping rules fresh without
+  a restart. Updates `COMPILED_CONFIG` static; applies to newly opened tabs. (2026-03-03)
+
 ---
 
 ## [0.0.1] — 2026-02-12
@@ -46,12 +67,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   to sidebar-free region without changing the page viewport (no content reflow).
   `EpocaSidebarBlocker` NSView intercepts hit-testing in the sidebar overlay region.
 
-- **Content blocking (epoca-shield)** — Six-layer pipeline: DNS CNAME uncloaking,
-  WKContentRuleList (EasyList + EasyPrivacy, 45k-rule bucket splitting), NavigationDelegate,
+- **Content blocking (epoca-shield)** — Four-layer pipeline:
+  WKContentRuleList (EasyList + EasyPrivacy, 45k-rule bucket splitting),
   document_start JS (fingerprint countermeasures), document_end JS (overlay sweeper, cookie
-  consent auto-dismiss), GPUI shield UI. Per-site exception toggle (Eye/EyeOff in URL bar
-  popover). Shield badge (green/red) on globe icon inside URL bar. Blocked count via
-  `epocaShield` WKScriptMessageHandler. 6-hour background list refresh.
+  consent auto-dismiss), cosmetic count reporting via `epocaShield` WKScriptMessageHandler.
+  _Not yet implemented: DNS CNAME uncloaking (hickory-dns), WKNavigationDelegate layer._
 
 - **Omnibox** — ⌘T opens floating search/URL input. Accepts URLs, local file paths
   (`.toml`, `.zml`, `.polkavm`), and search queries (DuckDuckGo fallback).

@@ -111,4 +111,23 @@ impl ShieldManager {
             .map(|e| e.disable_network_rules && e.disable_cosmetic && e.disable_fingerprint)
             .unwrap_or(false)
     }
+
+    /// Toggle the full site exception for a hostname on/off.
+    /// If an exception exists, removes it (shield re-enabled).
+    /// If no exception exists, inserts a full-disable exception.
+    pub fn toggle_site_exception(&mut self, hostname: &str) {
+        if self.exceptions.contains_key(hostname) {
+            self.exceptions.remove(hostname);
+        } else {
+            self.exceptions.insert(
+                hostname.to_string(),
+                SiteException {
+                    disable_network_rules: true,
+                    disable_cosmetic: true,
+                    disable_fingerprint: true,
+                    disable_popup_block: true,
+                },
+            );
+        }
+    }
 }

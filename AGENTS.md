@@ -77,12 +77,15 @@ If unsure, ask rather than assume.
   3. `drain_nav_events()` called every render frame from `process_pending_nav()` in Workbench
   4. `open_webview_background()` for background opens; `open_webview()` for foreground
 - `Workbench.open_links_in_background: bool` (default: `true`)
+- **Ripple animation**: `RIPPLE_SCRIPT` init script shows green expanding ring (`#44bb66`) at the ⌘-click point when a background tab opens; 400ms; idempotent via `window.__epocaRipple`
 
 ### Content Blocking (epoca-shield)
 - EasyList / EasyPrivacy rules compiled to WKContentRuleList JSON and installed on each WebView
-- Per-site exceptions: Eye/EyeOff toggle in URL bar popover calls `toggle_site_exception()`
-- Shield blocked-count displayed in URL bar via `epocaShield` WKScriptMessageHandler
 - Cosmetic hiding (document_end_script): overlay sweeper, cookie consent auto-dismiss
+- **Per-site exception toggle**: Eye/EyeOff button in URL bar suffix; calls `ShieldManager::toggle_site_exception(hostname)` via `cx.update_global::<ShieldGlobal>`; `ToggleSiteShield` GPUI action
+- **Shield cosmetic count**: `epocaShield` WKScriptMessageHandler (`EpocaShieldHandler` ObjC, `SHIELD_CHANNEL`, `drain_shield_events()`); stored in `WebViewTab.blocked_count`; displayed as green number next to globe
+- **Shield badge**: Globe icon color — green (#44bb6699) = active, red (#cc444499) = site excepted, muted = no shield. Computed from `ShieldGlobal` + `hostname_from_url()` each render
+- **6-hour list refresh**: `init_shield` bootstrap thread loops with 6-hour sleep, re-fetches EasyList/EasyPrivacy, updates `COMPILED_CONFIG`
 
 ### Link Status Bar (Arc-style)
 - `LINK_STATUS_SCRIPT` injected into every WebView as an initialization script
