@@ -147,7 +147,11 @@ video-overlay sweeping which Brave does not have.
 - [ ] Mute tab audio
 
 ### UI / UX
-- [ ] Crash reporting: wire up Sentry DSN (SDK already integrated — set `SENTRY_DSN` env var to activate)
+- [ ] **Crash reporting** — use compile-time env var: `option_env!("SENTRY_DSN").unwrap_or("")` in `main.rs` so debug/source builds send nothing; set `SENTRY_DSN` in CI for official releases only.
+  - Sentry UI: set rate limit (e.g. 1000 events/min) to prevent quota abuse
+  - Sentry UI: enable inbound filters (no stack trace, legacy platforms)
+  - Add opt-out flag or env var so users can disable crash reporting at runtime
+  - README: document crash reporting transparently — "Official builds include Sentry; source builds do not unless you set `SENTRY_DSN` yourself" (see Zed, Lapce for examples)
 - [ ] Keyboard shortcut system (⌘T new tab → omnibox, ⌘W close tab, ⌘L focus URL)
 - [ ] Per-tab favicon fetched and displayed (replace static IconName::Globe)
 - [ ] Dark/light mode toggle (system follow already works via WKWebView theme)
@@ -207,8 +211,8 @@ video-overlay sweeping which Brave does not have.
 ## P1 — Security & Sandboxing (QA/Architect review findings)
 
 ### Critical security gaps
-- [ ] **PolkaVM gas limit** — `SandboxConfig` has no `max_gas_per_update`; a looping guest `update()` blocks the main thread forever. Add `max_gas_per_update: u64` (default 50M) and call `instance.set_gas()` before each `call_update`. `CallError::NotEnoughGas` → show "app timed out" error to user.
-- [ ] **App ID collision via filename** — two `counter.zml` files in different directories share the same broker permission set. Use canonical path (or Blake3 hash of path + content) as app_id in `DeclarativeAppTab` and `SandboxAppTab`.
+- [x] **PolkaVM gas limit** — `SandboxConfig` has no `max_gas_per_update`; a looping guest `update()` blocks the main thread forever. Add `max_gas_per_update: u64` (default 50M) and call `instance.set_gas()` before each `call_update`. `CallError::NotEnoughGas` → show "app timed out" error to user.
+- [x] **App ID collision via filename** — two `counter.zml` files in different directories share the same broker permission set. Use canonical path (or Blake3 hash of path + content) as app_id in `DeclarativeAppTab` and `SandboxAppTab`.
 - [ ] **ZML actions not broker-checked at execution time** — `exec_actions` runs actions without consulting the broker. Add per-action broker checks for fetch/storage/clipboard before the capability is implemented to avoid accidental escalation.
 - [ ] **Network fetch is fully stubbed** — broker allows fetch but nothing executes. When implementing: run on background thread (GPUI background executor), cap response size (10 MB), reject redirect chains outside declared domain.
 - [ ] **Permission store in cwd** — `epoca_permissions.json` lives in the working directory; any local process can escalate permissions by editing it. Move to `~/Library/Application Support/Epoca/` on macOS; add note about future read-only admin policy layer at `/Library/Managed Preferences/`.
@@ -223,7 +227,7 @@ video-overlay sweeping which Brave does not have.
 ## P2 — Architecture (Architect review findings)
 
 ### Tab system
-- [ ] **`TabBehavior` / `NavHandler` trait** — `Workbench` calls `entity.downcast::<WebViewTab>()` in every navigation method. Add a `NavHandler` trait (or vtable struct) stored in `TabEntry` so adding a new navigable tab type requires zero changes in `workbench.rs`. (Already partially implemented — eliminates all downcast call sites.)
+- [x] **`TabBehavior` / `NavHandler` trait** — `Workbench` calls `entity.downcast::<WebViewTab>()` in every navigation method. Add a `NavHandler` trait (or vtable struct) stored in `TabEntry` so adding a new navigable tab type requires zero changes in `workbench.rs`. (Implemented — eliminates all downcast call sites.)
 - [ ] **`TabKind` closed enum** — adding split-view, PiP, WASM, or AI tabs requires a new variant and a new match arm everywhere. Long-term, migrate to a trait-based or capability-flag model.
 - [ ] **Pause PolkaVM poll for inactive tabs** — each `SandboxAppTab` spawns an unconditional 33 ms timer. With 20 open tabs = 600 ms of wakeups/sec. Skip `call_update` when the tab is not the active one.
 
