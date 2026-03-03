@@ -1,6 +1,9 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use crate::shield::init_shield;
+
+// ── Workbench-scoped actions ────────────────────────────────────────────────
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -118,6 +121,10 @@ pub struct Workbench {
 
     // Broker
     broker: Arc<Mutex<CapabilityBroker>>,
+
+    // Background-tab settings
+    /// When true, cmd-click opens tabs in the background (no active switch).
+    open_links_in_background: bool,
 }
 
 impl Workbench {
@@ -158,6 +165,7 @@ impl Workbench {
             _omnibox_subscription,
             omnibox_pending_nav: None,
             broker: Arc::new(Mutex::new(broker)),
+            open_links_in_background: true,
         }
     }
 
@@ -291,6 +299,15 @@ impl Workbench {
             self.omnibox_open = false;
             cx.set_global(OmniboxOpen(false));
             self.navigate_or_open(&text, window, cx);
+        }
+        // Drain cmd-click / new-tab events from JS
+        let new_tabs = crate::shield::drain_nav_events();
+        for (url, focus) in new_tabs {
+            if focus || !self.open_links_in_background {
+                self.open_webview(url, window, cx);
+            } else {
+                self.open_webview_background(url, window, cx);
+            }
         }
     }
 
@@ -440,6 +457,32 @@ impl Workbench {
         self.active_tab_id = Some(id);
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(url_clone, window, inner_cx));
+        cx.notify();
+    }
+
+    /// Open a new WebView tab in the background without switching to it.
+    /// The active tab stays focused; the new tab is appended to the tab list.
+    pub fn open_webview_background(
+        &mut self,
+        url: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.alloc_id();
+        let title = url_to_title(&url);
+        let url_clone = url.clone();
+        let entity = cx.new(|cx| WebViewTab::new(url, window, cx));
+        let nav = WebViewTab::nav_handler(entity.clone());
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::WebView { url: url_clone },
+            title,
+            icon: IconName::Globe,
+            entity: entity.into(),
+            pinned: false,
+            nav: Some(nav),
+        });
+        // Do NOT change active_tab_id — stay on current tab.
         cx.notify();
     }
 
@@ -1048,6 +1091,16 @@ impl Render for Workbench {
                     .child(self.render_sidebar(window, cx))
                     .child(content)
                     .children(omnibox)
+                    .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+                    .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+                        if let Some(id) = this.active_tab_id {
+                            this.close_tab(id, window, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &FocusUrlBar, window, _cx| {
+                        let focus_handle = this.url_input.focus_handle(_cx);
+                        window.focus(&focus_handle);
+                    }))
             }
 
             // ---- Overlay: sidebar slides in as a modal over full-width content ----
@@ -1153,6 +1206,16 @@ impl Render for Workbench {
                     .children(sidebar)
                     .children(fullscreen_bar)
                     .children(omnibox)
+                    .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
+                    .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
+                        if let Some(id) = this.active_tab_id {
+                            this.close_tab(id, window, cx);
+                        }
+                    }))
+                    .on_action(cx.listener(|this, _: &FocusUrlBar, window, _cx| {
+                        let focus_handle = this.url_input.focus_handle(_cx);
+                        window.focus(&focus_handle);
+                    }))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
                             return;

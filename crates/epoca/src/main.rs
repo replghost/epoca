@@ -1,7 +1,10 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use epoca_core::workbench::Workbench;
+use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar};
+
+// App-level actions (not workbench-scoped)
+actions!(epoca, [Quit, NewWindow]);
 
 /// Determines what to open based on the CLI argument.
 enum OpenTarget {
@@ -53,6 +56,44 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+
+        // ── Keyboard shortcuts ───────────────────────────────────────────────
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-t", NewTab, None),
+            KeyBinding::new("cmd-w", CloseActiveTab, None),
+            KeyBinding::new("cmd-l", FocusUrlBar, None),
+        ]);
+
+        // ── macOS menu bar ───────────────────────────────────────────────────
+        cx.set_menus(vec![
+            Menu {
+                name: "Epoca".into(),
+                items: vec![
+                    MenuItem::os_submenu("Services", SystemMenuType::Services),
+                    MenuItem::separator(),
+                    MenuItem::action("Quit Epoca", Quit),
+                ],
+            },
+            Menu {
+                name: "File".into(),
+                items: vec![
+                    MenuItem::action("New Tab", NewTab),
+                    MenuItem::action("New Window", NewWindow),
+                    MenuItem::separator(),
+                    MenuItem::action("Close Tab", CloseActiveTab),
+                ],
+            },
+            Menu {
+                name: "View".into(),
+                items: vec![
+                    MenuItem::action("Focus URL Bar", FocusUrlBar),
+                ],
+            },
+        ]);
+
+        // ── App-level action handlers ────────────────────────────────────────
+        cx.on_action::<Quit>(|_, cx| cx.quit());
 
         cx.spawn(async move |cx| {
             let opts = WindowOptions {

@@ -860,6 +860,31 @@ impl Render for SandboxAppTab {
 
 use gpui_component::webview;
 
+/// Intercepted cmd-click on links to open them in a new tab (background).
+/// cmd+shift+click → open with focus (foreground switch).
+/// Idempotent via window.__epocaNavInterceptor.
+const CMD_CLICK_SCRIPT: &str = r#"(function(){
+if(window.__epocaNavInterceptor)return;
+window.__epocaNavInterceptor=true;
+document.addEventListener('click',function(e){
+  if(!e.metaKey)return;
+  var el=e.target;
+  while(el&&el.tagName!=='A')el=el.parentElement;
+  if(!el||!el.href)return;
+  var url=el.href;
+  if(!url||url.startsWith('javascript:'))return;
+  e.preventDefault();
+  e.stopPropagation();
+  var focus=e.shiftKey;
+  if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaNav){
+    window.webkit.messageHandlers.epocaNav.postMessage({
+      type: focus ? 'openInNewTabFocus' : 'openInNewTab',
+      url: url
+    });
+  }
+},true);
+})();"#;
+
 /// Injected into every page at document creation time. Styles the WebKit
 /// scrollbar to match the dark chrome look (same technique Arc uses).
 const SCROLLBAR_CSS_SCRIPT: &str = r#"(function(){
@@ -1123,8 +1148,8 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) {
         if config.is_null() { return; }
         let uc: *mut AnyObject = msg_send![config, userContentController];
         if uc.is_null() { return; }
-        // Log the userContentController address so we can verify it is accessible.
         log::debug!("Shield: WKUserContentController at {:p}", uc);
+        crate::shield::register_nav_handler(uc);
     }
 }
 
@@ -1211,6 +1236,7 @@ impl WebViewTab {
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&url)
             .with_initialization_script(SCROLLBAR_CSS_SCRIPT)
+            .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)

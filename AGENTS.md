@@ -47,3 +47,58 @@ docs/backlog.md     Product backlog + strategy — update when completing featur
 `WebViewTab` observes `OverlayLeftInset` via `cx.observe_global` so GPUI marks it dirty
 and re-paints the native WKWebView frame every animation frame. Do not remove this
 subscription or the native view will get stuck at its last position on sidebar toggle.
+
+---
+
+## Implemented Features — Must Not Regress
+
+This section is the authoritative list of working browser features. Before removing or
+refactoring any code that touches these areas, verify the feature still works.
+If unsure, ask rather than assume.
+
+### Navigation & Tabs
+- **New tab** (⌘T / File > New Tab): opens omnibox for URL entry
+- **Close tab** (⌘W / File > Close Tab): closes active tab, selects adjacent tab
+- **Focus URL bar** (⌘L / View > Focus URL Bar): focuses url_input in the active tab's top bar
+- **Quit** (⌘Q / Epoca > Quit Epoca): calls `cx.quit()`
+- **Tab switching**: clicking a tab in the sidebar activates it and shows its content
+
+### Cmd-Click — Open Link in New Tab
+- **⌘-click any link** → opens in a **background tab** (current tab stays active)
+- **⌘⇧-click any link** → opens in a **foreground tab** (switches to new tab)
+- Implementation pipeline:
+  1. `CMD_CLICK_SCRIPT` (init script in every WebView) intercepts `metaKey` clicks,
+     posts `{type:'openInNewTab', url}` or `{type:'openInNewTabFocus', url}` to
+     `window.webkit.messageHandlers.epocaNav`
+  2. `EpocaNavHandler` ObjC class (registered in `register_nav_handler()` in shield.rs)
+     receives the message and sends `(url, focus: bool)` to `NAV_CHANNEL`
+  3. `drain_nav_events()` called every render frame from `process_pending_nav()` in Workbench
+  4. `open_webview_background()` for background opens; `open_webview()` for foreground
+- `Workbench.open_links_in_background: bool` (default: `true`)
+
+### Content Blocking (epoca-shield)
+- EasyList / EasyPrivacy rules compiled to WKContentRuleList JSON and installed on each WebView
+- Per-site exceptions: Eye/EyeOff toggle in URL bar popover calls `toggle_site_exception()`
+- Shield blocked-count displayed in URL bar via `epocaShield` WKScriptMessageHandler
+- Cosmetic hiding (document_end_script): overlay sweeper, cookie consent auto-dismiss
+
+### URL Bar & Navigation
+- Globe icon with shield badge lives inside the Input border as a prefix (via `Input::prefix()`)
+- Shield badge color: green (#44bb66) = blocking on; red (#cc4444) = site excepted
+- URL bar shows current tab's URL; updates on tab switch and navigation
+- Hand cursor (pointer) on all `<a href>` elements via `a[href]{cursor:pointer!important}` in SCROLLBAR_CSS_SCRIPT
+
+### Sidebar
+- Pinned mode: sidebar in flex flow, fixed width
+- Overlay mode: sidebar slides in over content; hides on mouse-out
+- Fullscreen: mini toolbar with pin button shown when sidebar hidden (no traffic-light trap)
+- WKWebView masked via CALayer (no page reflow) when sidebar overlaps content
+
+---
+
+## Regression Prevention Policy
+- **Before deleting code**: check this list. If the code implements a listed feature, don't delete it.
+- **After a context-window reset**: re-read this file before assuming what is or isn't implemented.
+  The previous session's *summary* may describe planned work that wasn't yet committed.
+  Always `grep` for the relevant function/const to confirm it exists before treating it as done.
+- **New features**: add an entry here when the feature lands and compiles cleanly.

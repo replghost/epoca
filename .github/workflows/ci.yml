@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run library tests
+        # Exclude epoca-android: requires cargo-ndk + Android NDK
+        run: cargo test --lib --workspace --exclude epoca-android
+
+      - name: Run integration tests (shield smoke suite)
+        run: cargo test --test bulk_filter_smoke -p epoca-shield
+
+      - name: Build shield-smoketest binary
+        run: cargo build -p epoca-shield --bin shield-smoketest
+
+      - name: Run shield-smoketest against fixture data
+        # No cached filter lists in CI — pass the fixture dir so the binary
+        # exercises the validator against known-good and known-bad patterns.
+        run: |
+          FIXTURE_DIR=crates/epoca-shield/tests/fixtures
+          cargo run -p epoca-shield --bin shield-smoketest -- --list-dir "$FIXTURE_DIR"
+
+      - name: Build main binary
+        run: cargo build -p epoca
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude epoca-android -- -D warnings

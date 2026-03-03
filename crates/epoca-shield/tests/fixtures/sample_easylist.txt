@@ -1,0 +1,260 @@
+! Epoca Shield Smoke Test Fixture
+! Representative sample of real EasyList / AdGuard filter patterns.
+! Used by tests/bulk_filter_smoke.rs to validate our ABP→WebKit-regex
+! translator does not produce patterns that WebKit's content rule engine rejects.
+!
+! Each section exercises a distinct category of ABP filter syntax.
+! Patterns that should be DROPPED by the parser are clearly annotated.
+[Adblock Plus 2.0]
+
+! ─── 1. Common domain-anchor block rules ────────────────────────────────────
+||doubleclick.net^
+||googleadservices.com^
+||googlesyndication.com^
+||google-analytics.com^
+||adservice.google.com^
+||pagead2.googlesyndication.com^
+||securepubads.g.doubleclick.net^
+||amazon-adsystem.com^
+||ads.twitter.com^
+||analytics.twitter.com^
+||ads.linkedin.com^
+||ads.facebook.com^
+||connect.facebook.net^
+||ads.yahoo.com^
+||adserver.yahoo.com^
+||adsystem.amazon.com^
+||adnxs.com^
+||adsrvr.org^
+||rubiconproject.com^
+||pubmatic.com^
+||openx.net^
+||appnexus.com^
+||criteo.com^
+||moatads.com^
+||scorecardresearch.com^
+||quantserve.com^
+||chartbeat.com^
+||hotjar.com^
+||fullstory.com^
+||mouseflow.com^
+||clarity.ms^
+||amplitude.com^
+||mixpanel.com^
+||segment.com^
+||heap.io^
+||intercom.io^
+||olark.com^
+||livechatinc.com^
+||drift.com^
+||hubspot.com^
+||marketo.com^
+||pardot.com^
+||outbrain.com^
+||taboola.com^
+||revcontent.com^
+||mgid.com^
+||media.net^
+||bidswitch.net^
+||adtech.de^
+||adzerk.net^
+||serving-sys.com^
+||advertising.com^
+||adbrite.com^
+||adroll.com^
+||tremorhub.com^
+||yieldmo.com^
+||sharethrough.com^
+||indexexchange.com^
+||sovrn.com^
+||lijit.com^
+||casalemedia.com^
+||contextweb.com^
+||spotxchange.com^
+||undertone.com^
+||conversantmedia.com^
+||zucks.net^
+||yieldmanager.com^
+
+! ─── 2. Domain-anchor rules with third-party option ─────────────────────────
+||ads.example.com^$third-party
+||tracker.example.com^$third-party
+||cdn.ads.com^$third-party
+||analytics.example.com^$third-party
+||adsystem.example.com^$third-party
+||pixel.example.com^$third-party
+||telemetry.example.com^$third-party
+||events.example.com^$third-party
+||beacon.example.com^$third-party
+||impression.example.com^$third-party
+
+! ─── 3. Domain-anchor rules with resource type options ──────────────────────
+||cdn.ads.com^$script
+||ads.example.com^$script,third-party
+||tracker.com^$xmlhttprequest,third-party
+||cdn.tracking.com^$image,third-party
+||analytics.example.com^$script,~third-party
+||js.tracking.com^$script,image
+||static.ads.com^$stylesheet,third-party
+||media.ads.com^$media,third-party
+||font.ads.com^$font,third-party
+||ws.ads.com^$websocket,third-party
+
+! ─── 4. Domain-anchor rules with domain= option ─────────────────────────────
+||ads.example.com^$domain=news.com
+||tracker.com^$domain=news.com|blog.com
+||ads.example.com^$domain=news.com|tech.com|~safe.com
+||tracker.com^$domain=~mysite.com
+||analytics.com^$third-party,domain=site1.com|site2.com
+
+! ─── 5. Exception (allowlist) rules ─────────────────────────────────────────
+@@||safe.example.com^
+@@||cdn.example.com^$script
+@@||fonts.googleapis.com^$stylesheet
+@@||ajax.googleapis.com^$script
+@@||ajax.aspnetcdn.com^$script
+@@||cdnjs.cloudflare.com^$script
+@@||unpkg.com^$script
+@@||jsdelivr.net^$script
+@@||stackpath.bootstrapcdn.com^$stylesheet
+@@||maxcdn.bootstrapcdn.com^$stylesheet
+
+! ─── 6. Cosmetic rules — these produce no url_pattern ───────────────────────
+##.ad-banner
+##.ads-wrapper
+##.sidebar-ad
+##.bottom-ad
+##.top-ad
+##[class^="ad-"]
+##[id^="ad-"]
+##[class*="-ad-"]
+##[class*="Advertisement"]
+##.promoted-post
+##.sponsored-content
+##.ad-container
+##.ad-unit
+##.ad-label
+##.adsense
+##.AdSense
+##[aria-label="Ads"]
+##[aria-label="Sponsored"]
+##[data-ad-slot]
+##[data-ad-client]
+##.google-ads
+##.GoogleAds
+##.gpt-ad
+##.dfp-ad
+##.dfp-slot
+##ins.adsbygoogle
+##.widget_googleadsbygoogle
+example.com##.promoted-post
+news.example.com##.sponsored-content
+blog.example.com##.ad-unit
+shopping.example.com##.sponsored
+social.example.com##.ad-container
+
+! ─── 7. Wildcard patterns ───────────────────────────────────────────────────
+*/tracking/*
+*/analytics/collect*
+*/pixel.png*
+*/1x1.gif*
+*/ad/*.js$script
+*/ads/*.js$script
+*/banner*.js$script,third-party
+*googletagmanager.com/gtm.js$script
+*/events/track*$xmlhttprequest
+*/conversion/track*
+*/impression/view*
+*/pixel/fire*
+*adserver.example.com*
+*tracking.example.com*
+*/ad-manager/*
+*/ad-network/*
+*/doubleclick/*
+*/adsense/*
+
+! ─── 8. Path/line-anchor patterns ───────────────────────────────────────────
+|https://ad.example.com/
+|https://ads.example.com/pixel
+|https://tracking.example.com/collect
+|https://analytics.example.com/events
+|https://pagead2.googlesyndication.com/pagead/
+|https://tpc.googlesyndication.com/
+|https://ade.googlesyndication.com/
+|https://adservice.google.com/adsid/
+
+! ─── 9. Patterns with hyphens, numbers, TLD variations ─────────────────────
+||ad-server.example.com^
+||ad-delivery.net^$third-party
+||ad123.example.com^
+||ads2.example.com^$third-party
+||ad-tracker.example.com^$script
+||ad-analytics.example.com^$xmlhttprequest
+||tracker123.net^$third-party
+||beacon-01.example.com^$image
+||pixel-server.example.com^$image,third-party
+||events-api.example.com^$xmlhttprequest,third-party
+
+! ─── 10. Multi-option edge cases ────────────────────────────────────────────
+||example.com^$script,image,stylesheet,third-party
+||example.com^$script,image,media,font,websocket
+||example.com^$xmlhttprequest,subdocument,third-party
+||example.com^$ping,third-party
+||ads.example.com^$cookie
+
+! ─── 11. Patterns that exercise the `^` separator at end of domain ──────────
+||ads.example.com^
+||ads.example.co.uk^
+||ads.example.io^
+||ads.example.app^
+||ads.example.dev^
+||tracker.example.org^
+||analytics.example.net^
+
+! ─── 12. Patterns with paths and separators mid-URL ─────────────────────────
+||example.com/ads^
+||example.com/api/v2/tracking^$xmlhttprequest
+||example.com/pixel.gif^$image
+||example.com/beacon.png^$image
+||example.com/conversion^$xmlhttprequest
+
+! ─── 13. Raw regex patterns — MUST ALL BE DROPPED ───────────────────────────
+! These start with `/`. Our parser drops all `/`-prefixed patterns because
+! they are ABP raw-regex syntax that WebKit's restricted engine cannot handle.
+! Every pattern in this section should produce zero FilterRules.
+/addyn|*;adtech;
+/addyn|*|adtech;
+/^https?:\/\/(35|104)\.(\d){1,3}\.(\d){1,3}\.(\d){1,3}\//$popup,third-party
+/^(https?:\/\/)?ad\./
+/banner[0-9]*/
+/\bad\b/
+/\.ad\./
+/ads?\./
+/^https?:\/\/([a-z0-9]+\.)?doubleclick\.net\//
+/adid=[0-9]+/
+/\.ad\.[a-z]{2,3}\//
+/(^|\.)(ad|ads|adserver|adservice)\./
+/^https?:\/\/(ad|ads)\./
+/\/ad[0-9]*\//
+/sponsored-content/
+/advertisement/
+
+! ─── 14. Exception cosmetic rules — skipped by parser ───────────────────────
+example.com#@#.ad-banner
+news.com#@#.promoted
+
+! ─── 15. Comment lines — all skipped ────────────────────────────────────────
+! This is a comment
+! checksum: abcdef12345
+! Version: 2024-01-01T00:00:00Z
+! Expires: 4 days (update frequency)
+! Homepage: https://easylist.to
+! Licence: https://easylist.to/pages/licence.html
+
+! ─── 16. Real EasyList/AdGuard patterns that historically caused errors ──────
+! These are the exact lines (or close variants) that appeared in cached lists
+! and produced "Error while parsing" from WKContentRuleListStore.
+/addyn|*;adtech;
+/^https?:\/\/(35|104)\.(\d){1,3}\.(\d){1,3}\.(\d){1,3}\//$popup,3p
+||35.104.*^$script
+||35.104.0.0/16^$script,third-party
