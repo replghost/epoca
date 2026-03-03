@@ -1,0 +1,14 @@
+# Embed a stable CFBundleIdentifier in the binary at link time.
+# This prevents WKWebView from generating a new WebCrypto Keychain entry
+# on every build (errSecDuplicateItem -25299 / "wants to access keychain" dialog).
+#
+# Without this, the linker derives the code-signing identifier from a hash of
+# the binary, which changes every build → macOS sees a new app → re-prompts
+# for Keychain access and logs -25299 spam.
+#
+# The -sectcreate flag embeds dev-info.plist into the __TEXT,__info_plist
+# section; codesign then reads CFBundleIdentifier from it and uses
+# "com.replghost.epoca" as the stable signing identity.
+
+# (macOS linker args are emitted by crates/epoca/build.rs instead of here,
+# so the Info.plist path can be resolved as an absolute path at build time.)

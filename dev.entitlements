@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Stable keychain access group so WKWebView's WebCrypto master key
+         is stored once and reused across builds.  Without this the random
+         linker-assigned identifier changes every build → errSecDuplicateItem
+         (-25299) → system dialog on every launch. -->
+    <key>keychain-access-groups</key>
+    <array>
+        <string>com.replghost.epoca</string>
+    </array>
+
+    <!-- Allow outbound network connections (required for WKWebView). -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+</dict>
+</plist>

@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar};
+use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload};
 
 // App-level actions (not workbench-scoped)
 actions!(epoca, [Quit, NewWindow]);
@@ -63,6 +63,8 @@ fn main() {
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-w", CloseActiveTab, None),
             KeyBinding::new("cmd-l", FocusUrlBar, None),
+            KeyBinding::new("cmd-r", Reload, None),
+            KeyBinding::new("cmd-shift-r", HardReload, None),
         ]);
 
         // ── macOS menu bar ───────────────────────────────────────────────────
@@ -88,6 +90,9 @@ fn main() {
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Focus URL Bar", FocusUrlBar),
+                    MenuItem::separator(),
+                    MenuItem::action("Reload Page", Reload),
+                    MenuItem::action("Hard Reload", HardReload),
                 ],
             },
         ]);

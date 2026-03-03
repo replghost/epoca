@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -125,6 +125,11 @@ pub struct Workbench {
     // Background-tab settings
     /// When true, cmd-click opens tabs in the background (no active switch).
     open_links_in_background: bool,
+    /// When true, every new WebView tab gets a non-persistent data store
+    /// (WKWebsiteDataStore.nonPersistentDataStore on macOS). No cookies,
+    /// localStorage, or cache is shared between tabs or sessions.
+    /// Defeats per-tab metered paywalls and cross-tab tracking.
+    pub isolated_tabs: bool,
 }
 
 impl Workbench {
@@ -166,6 +171,7 @@ impl Workbench {
             omnibox_pending_nav: None,
             broker: Arc::new(Mutex::new(broker)),
             open_links_in_background: true,
+            isolated_tabs: false,
         }
     }
 
@@ -443,7 +449,8 @@ impl Workbench {
         let id = self.alloc_id();
         let title = url_to_title(&url);
         let url_clone = url.clone();
-        let entity = cx.new(|cx| WebViewTab::new(url, window, cx));
+        let isolated = self.isolated_tabs;
+        let entity = cx.new(|cx| WebViewTab::new(url, isolated, window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -471,7 +478,8 @@ impl Workbench {
         let id = self.alloc_id();
         let title = url_to_title(&url);
         let url_clone = url.clone();
-        let entity = cx.new(|cx| WebViewTab::new(url, window, cx));
+        let isolated = self.isolated_tabs;
+        let entity = cx.new(|cx| WebViewTab::new(url, isolated, window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -484,6 +492,24 @@ impl Workbench {
         });
         // Do NOT change active_tab_id — stay on current tab.
         cx.notify();
+    }
+
+    /// Toggle isolated-tabs mode. Takes effect for all subsequently opened tabs.
+    pub fn set_isolated_tabs(&mut self, isolated: bool, cx: &mut Context<Self>) {
+        self.isolated_tabs = isolated;
+        cx.notify();
+    }
+
+    pub fn reload_active_tab(&mut self, hard: bool, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.active_tab_id {
+            if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
+                if let Ok(entity) = tab.entity.clone().downcast::<crate::tabs::WebViewTab>() {
+                    entity.update(cx, |tab, cx| {
+                        if hard { tab.hard_reload(cx); } else { tab.reload(cx); }
+                    });
+                }
+            }
+        }
     }
 
     pub fn open_declarative_app(
@@ -1101,6 +1127,8 @@ impl Render for Workbench {
                         let focus_handle = this.url_input.focus_handle(_cx);
                         window.focus(&focus_handle);
                     }))
+                    .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
+                    .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
             }
 
             // ---- Overlay: sidebar slides in as a modal over full-width content ----
@@ -1216,6 +1244,8 @@ impl Render for Workbench {
                         let focus_handle = this.url_input.focus_handle(_cx);
                         window.focus(&focus_handle);
                     }))
+                    .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
+                    .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
                             return;

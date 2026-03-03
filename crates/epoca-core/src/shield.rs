@@ -181,3 +181,128 @@ pub fn register_nav_handler(uc: *mut objc2::runtime::AnyObject) {
         let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
     }
 }
+
+// ---------------------------------------------------------------------------
+// Title channel — page title changes reported from TITLE_TRACKER_SCRIPT
+// ---------------------------------------------------------------------------
+
+/// Channel for page title events.
+/// Tuple: (webview_ptr, title) where webview_ptr identifies which tab.
+static TITLE_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+)> = OnceLock::new();
+
+fn title_channel() -> &'static (
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+) {
+    TITLE_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(128);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain all pending title events (called every render frame from Workbench).
+/// Returns `(webview_ptr, title)` pairs.
+pub fn drain_title_events() -> Vec<(usize, String)> {
+    let ch = title_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+/// Register the `epocaMeta` WKScriptMessageHandler on the given
+/// WKUserContentController. The JS side posts:
+///   { type: 'titleChanged', title: '...' }
+///
+/// `webview_ptr` is a raw pointer cast to usize used as a stable identity key
+/// to route the title to the correct tab in Workbench.
+#[cfg(target_os = "macos")]
+pub fn register_meta_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: usize) {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+    use std::collections::HashMap;
+
+    // Map from WKUserContentController pointer → webview_ptr so the static
+    // callback can find the right tab identity without capturing locals.
+    static UC_MAP: LazyLock<Mutex<HashMap<usize, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaMetaHandler") {
+            return c;
+        }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaMetaHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                let body: *mut AnyObject = objc2::msg_send![message, body];
+                if body.is_null() { return; }
+
+                let type_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"type\0".as_ptr() as *const i8
+                ];
+                let title_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"title\0".as_ptr() as *const i8
+                ];
+                let type_val: *mut AnyObject = objc2::msg_send![body, objectForKey: type_key];
+                let title_val: *mut AnyObject = objc2::msg_send![body, objectForKey: title_key];
+                if type_val.is_null() || title_val.is_null() { return; }
+
+                let type_cstr: *const i8 = objc2::msg_send![type_val, UTF8String];
+                let title_cstr: *const i8 = objc2::msg_send![title_val, UTF8String];
+                if type_cstr.is_null() || title_cstr.is_null() { return; }
+
+                let type_str = std::ffi::CStr::from_ptr(type_cstr).to_string_lossy();
+                if type_str != "titleChanged" { return; }
+
+                let title = std::ffi::CStr::from_ptr(title_cstr)
+                    .to_string_lossy()
+                    .to_string();
+                if title.is_empty() { return; }
+
+                // Look up which tab this UC belongs to.
+                let uc_key = uc as usize;
+                if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                    let _ = title_channel().0.try_send((wv_ptr, title));
+                }
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+
+            if let Some(proto) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(proto);
+            }
+
+            builder.register()
+        }
+    });
+
+    // Record the uc → webview_ptr mapping before registering the handler.
+    UC_MAP.lock().unwrap().insert(uc as usize, webview_ptr);
+
+    unsafe {
+        let handler: *mut AnyObject = objc2::msg_send![*cls, new];
+        if handler.is_null() { return; }
+        let name: *mut AnyObject = objc2::msg_send![
+            AnyClass::get("NSString").unwrap(),
+            stringWithUTF8String: b"epocaMeta\0".as_ptr() as *const i8
+        ];
+        let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
+    }
+}

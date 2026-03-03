@@ -60,6 +60,8 @@ If unsure, ask rather than assume.
 - **New tab** (⌘T / File > New Tab): opens omnibox for URL entry
 - **Close tab** (⌘W / File > Close Tab): closes active tab, selects adjacent tab
 - **Focus URL bar** (⌘L / View > Focus URL Bar): focuses url_input in the active tab's top bar
+- **Reload** (⌘R / View > Reload Page): calls `wry::WebView::reload()` on the active WebViewTab
+- **Hard Reload** (⌘⇧R / View > Hard Reload): calls `reloadFromOrigin` (macOS ObjC) — bypasses cache
 - **Quit** (⌘Q / Epoca > Quit Epoca): calls `cx.quit()`
 - **Tab switching**: clicking a tab in the sidebar activates it and shows its content
 
@@ -82,11 +84,27 @@ If unsure, ask rather than assume.
 - Shield blocked-count displayed in URL bar via `epocaShield` WKScriptMessageHandler
 - Cosmetic hiding (document_end_script): overlay sweeper, cookie consent auto-dismiss
 
+### Link Status Bar (Arc-style)
+- `LINK_STATUS_SCRIPT` injected into every WebView as an initialization script
+- Fixed bottom-left frosted-glass pill; fades in on link hover, fades out on mouse-leave
+- Shows raw URL while hovering; "Open in new tab: [url]" while ⌘ held; "Open in new tab → switch: [url]" while ⌘⇧ held
+- Max width 55vw, text truncated with ellipsis; `pointer-events:none` so it never blocks clicks
+- Idempotent via `window.__epocaStatus` guard (safe across SPA navigations)
+
 ### URL Bar & Navigation
 - Globe icon with shield badge lives inside the Input border as a prefix (via `Input::prefix()`)
 - Shield badge color: green (#44bb66) = blocking on; red (#cc4444) = site excepted
 - URL bar shows current tab's URL; updates on tab switch and navigation
 - Hand cursor (pointer) on all `<a href>` elements via `a[href]{cursor:pointer!important}` in SCROLLBAR_CSS_SCRIPT
+
+### Tab Isolation ("Fresh Tab" mode)
+- `Workbench.isolated_tabs: bool` (default: `false`)
+- When `true`, every new WebView tab is opened with `.with_incognito(true)` on the wry WebViewBuilder
+- On macOS this uses `WKWebsiteDataStore.nonPersistentDataStore()` — no cookies, localStorage, IndexedDB, or cache shared between tabs or carried across sessions
+- Effect: metered paywalls reset per-tab (no cross-tab article count), login sessions are tab-local, fingerprinting resets each tab
+- Toggle at runtime via `Workbench::set_isolated_tabs(bool)`; applies to all subsequently opened tabs
+- Existing open tabs are unaffected — they keep their data store until closed and reopened
+- `WebViewTab::new(url, isolated, window, cx)` — `isolated` param is always passed from the owning Workbench
 
 ### Sidebar
 - Pinned mode: sidebar in flex flow, fixed width
@@ -96,9 +114,39 @@ If unsure, ask rather than assume.
 
 ---
 
+---
+
+## Changelog & Release Notes Process
+
+`CHANGELOG.md` at the repo root is the living record of what shipped and when.
+
+### When a feature lands
+1. Verify it compiles and works (`cargo build` passes, manual smoke test if possible).
+2. Add a bullet to `CHANGELOG.md` under `## [Unreleased]` with the date in parentheses:
+   ```
+   - **Feature name** — one-sentence description. Key types/files if non-obvious. (YYYY-MM-DD)
+   ```
+3. Add or update an entry in the **Implemented Features** section above so it's covered by
+   the no-regression policy.
+
+### When cutting a release
+1. Rename `## [Unreleased]` to `## [x.y.z] — YYYY-MM-DD`.
+2. Add a fresh empty `## [Unreleased]` section above it.
+3. Bump the version in `Cargo.toml` (workspace root) to match.
+4. Commit with message `chore: release vx.y.z`.
+
+### What goes in a changelog entry
+- **Do include**: what the user can do that they couldn't before, key implementation types
+  (so future agents can find the code), date landed.
+- **Don't include**: refactors with no user-visible effect, dependency bumps, doc fixes.
+
+---
+
 ## Regression Prevention Policy
-- **Before deleting code**: check this list. If the code implements a listed feature, don't delete it.
-- **After a context-window reset**: re-read this file before assuming what is or isn't implemented.
-  The previous session's *summary* may describe planned work that wasn't yet committed.
-  Always `grep` for the relevant function/const to confirm it exists before treating it as done.
-- **New features**: add an entry here when the feature lands and compiles cleanly.
+- **Before deleting code**: check the Implemented Features list above. If the code implements
+  a listed feature, don't delete it.
+- **After a context-window reset**: re-read this file before assuming what is or isn't
+  implemented. The previous session's *summary* may describe planned work that wasn't yet
+  committed. Always `grep` for the relevant function/const to confirm it exists.
+- **New features**: add an entry to both CHANGELOG.md and the Implemented Features list
+  above when the feature lands and compiles cleanly.

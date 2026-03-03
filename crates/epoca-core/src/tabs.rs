@@ -861,6 +861,107 @@ impl Render for SandboxAppTab {
 use gpui_component::webview;
 
 /// Intercepted cmd-click on links to open them in a new tab (background).
+/// Tracks document.title changes and reports them via the `epocaMeta`
+/// WKScriptMessageHandler. Covers initial load, DOMContentLoaded, SPA
+/// pushState/replaceState, and MutationObserver on <title>.
+/// Idempotent via window.__epocaTitleTracker.
+const TITLE_TRACKER_SCRIPT: &str = r#"(function(){
+if(window.__epocaTitleTracker)return;
+window.__epocaTitleTracker=true;
+function _send(t){
+  if(!t||!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaMeta)return;
+  window.webkit.messageHandlers.epocaMeta.postMessage({type:'titleChanged',title:t});
+}
+function _check(){var t=document.title;if(t)_send(t);}
+// Fire on initial load states
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',_check);
+}else{_check();}
+window.addEventListener('load',_check);
+// MutationObserver on <title> element
+var _titleEl=document.querySelector('title');
+if(_titleEl){new MutationObserver(_check).observe(_titleEl,{childList:true,characterData:true,subtree:true});}
+// Watch for <title> being added dynamically
+new MutationObserver(function(){
+  var el=document.querySelector('title');
+  if(el&&el!==_titleEl){
+    _titleEl=el;
+    new MutationObserver(_check).observe(el,{childList:true,characterData:true,subtree:true});
+    _check();
+  }
+}).observe(document.documentElement,{childList:true,subtree:true});
+// SPA navigation hooks
+(function(){
+  function _wrap(orig){return function(){var r=orig.apply(this,arguments);_check();return r;};}
+  history.pushState=_wrap(history.pushState);
+  history.replaceState=_wrap(history.replaceState);
+  window.addEventListener('popstate',_check);
+})();
+})();"#;
+
+/// Arc-style link status bar: fixed bottom-left pill showing the URL of a
+/// hovered link.  While ⌘ is held, shows "Open in new tab: [url]".
+/// While ⌘⇧ is held, shows "Open in new tab → switch: [url]".
+/// Fades in on hover, fades out on mouse-leave.  Idempotent via window.__epocaStatus.
+const LINK_STATUS_SCRIPT: &str = r#"(function(){
+if(window.__epocaStatus)return;
+window.__epocaStatus=true;
+var _bar=document.createElement('div');
+_bar.id='__epocaStatusBar';
+var _s=_bar.style;
+_s.cssText=[
+  'position:fixed',
+  'bottom:12px',
+  'left:12px',
+  'max-width:55vw',
+  'height:26px',
+  'line-height:26px',
+  'padding:0 10px',
+  'border-radius:13px',
+  'background:rgba(34,34,34,0.92)',
+  'backdrop-filter:blur(8px)',
+  '-webkit-backdrop-filter:blur(8px)',
+  'border:1px solid rgba(255,255,255,0.10)',
+  'color:rgba(180,180,180,0.85)',
+  'font:12px/26px ui-monospace,monospace',
+  'white-space:nowrap',
+  'overflow:hidden',
+  'text-overflow:ellipsis',
+  'pointer-events:none',
+  'z-index:2147483640',
+  'opacity:0',
+  'transition:opacity 0.15s ease',
+  'box-shadow:0 2px 8px rgba(0,0,0,0.4)',
+].join(';');
+document.documentElement.appendChild(_bar);
+var _cur='';
+var _meta=false;
+var _shift=false;
+function _show(url){
+  _cur=url;
+  _bar.textContent=(_meta&&_shift)?'Open in new tab \u2192 switch: '+url:(_meta?'Open in new tab: '+url:url);
+  _bar.style.color=(_meta)?'rgba(220,220,220,0.95)':'rgba(180,180,180,0.85)';
+  _bar.style.opacity='1';
+}
+function _hide(){_cur='';_bar.style.opacity='0';}
+document.addEventListener('mouseover',function(e){
+  var el=e.target;while(el&&el.tagName!=='A')el=el.parentElement;
+  if(el&&el.href&&!el.href.startsWith('javascript:')){_show(el.href);}
+},true);
+document.addEventListener('mouseout',function(e){
+  var el=e.target;while(el&&el.tagName!=='A')el=el.parentElement;
+  if(el&&el.href){_hide();}
+},true);
+document.addEventListener('keydown',function(e){
+  _meta=e.metaKey;_shift=e.shiftKey;
+  if(_cur)_show(_cur);
+},true);
+document.addEventListener('keyup',function(e){
+  _meta=e.metaKey;_shift=e.shiftKey;
+  if(_cur)_show(_cur);
+},true);
+})();"#;
+
 /// cmd+shift+click → open with focus (foreground switch).
 /// Idempotent via window.__epocaNavInterceptor.
 const CMD_CLICK_SCRIPT: &str = r#"(function(){
@@ -1149,7 +1250,10 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) {
         let uc: *mut AnyObject = msg_send![config, userContentController];
         if uc.is_null() { return; }
         log::debug!("Shield: WKUserContentController at {:p}", uc);
+        // Use the WKWebView pointer as a stable tab identity key.
+        let webview_ptr = obj as usize;
         crate::shield::register_nav_handler(uc);
+        crate::shield::register_meta_handler(uc, webview_ptr);
     }
 }
 
@@ -1173,7 +1277,7 @@ pub struct WebViewTab {
 }
 
 impl WebViewTab {
-    pub fn new(url: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(url: String, isolated: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Observe OverlayLeftInset so this entity is marked dirty — and therefore
         // re-painted by GPUI — whenever the sidebar animation moves. Without this,
         // GPUI may skip re-rendering the entity and the native WKWebView frame
@@ -1235,7 +1339,10 @@ impl WebViewTab {
 
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&url)
+            .with_incognito(isolated)
             .with_initialization_script(SCROLLBAR_CSS_SCRIPT)
+            .with_initialization_script(TITLE_TRACKER_SCRIPT)
+            .with_initialization_script(LINK_STATUS_SCRIPT)
             .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
@@ -1332,6 +1439,26 @@ impl WebViewTab {
     /// Call immediately after `cx.new(|cx| WebViewTab::new(...))`.
     pub fn nav_handler(entity: Entity<Self>) -> Box<dyn NavHandler> {
         Box::new(WebViewNavHandler(entity))
+    }
+
+    /// Hard-reload: bypasses cache via `reloadFromOrigin` on macOS.
+    pub fn hard_reload(&self, cx: &mut App) {
+        if let Some(wv_entity) = &self.webview {
+            #[cfg(target_os = "macos")]
+            unsafe {
+                use objc2::msg_send;
+                use objc2::runtime::AnyObject;
+                use gpui_component::wry::WebViewExtMacOS;
+                let raw = wv_entity.read(cx).raw();
+                let wkwebview = raw.webview();
+                let ptr = &*wkwebview as *const _ as *mut AnyObject;
+                let _: () = msg_send![ptr, reloadFromOrigin];
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = wv_entity.read(cx).raw().evaluate_script("location.reload()");
+            }
+        }
     }
 }
 
