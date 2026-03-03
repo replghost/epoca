@@ -8,6 +8,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Live page titles in tab list** — Sidebar shows the actual page title instead of the URL slug.
+  `TITLE_TRACKER_SCRIPT` monitors `document.title` via MutationObserver + SPA navigation hooks,
+  posts via `epocaMeta` WKScriptMessageHandler; `EpocaMetaHandler` ObjC class routes events by
+  WKWebView pointer (`WebViewTab.webview_ptr`); drained each frame in `process_pending_nav`. (2026-03-03)
+
 - **Link status bar** — Arc-style frosted-glass pill fixed at bottom-left of every WebView.
   Shows hovered link URL; updates to "Open in new tab: [url]" while ⌘ held and
   "Open in new tab → switch: [url]" while ⌘⇧ held. Fades in/out smoothly.

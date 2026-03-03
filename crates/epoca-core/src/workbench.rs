@@ -315,6 +315,24 @@ impl Workbench {
                 self.open_webview_background(url, window, cx);
             }
         }
+        // Drain page title events from JS (epocaMeta WKScriptMessageHandler)
+        let title_events = crate::shield::drain_title_events();
+        if !title_events.is_empty() {
+            let mut changed = false;
+            for tab in &mut self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                    let wv_ptr = entity.read(cx).webview_ptr;
+                    if wv_ptr == 0 { continue; }
+                    for (ev_ptr, title) in &title_events {
+                        if *ev_ptr == wv_ptr {
+                            tab.title = title.clone();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed { cx.notify(); }
+        }
     }
 
     fn close_omnibox(&mut self, cx: &mut Context<Self>) {

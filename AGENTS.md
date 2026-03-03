@@ -106,6 +106,15 @@ If unsure, ask rather than assume.
 - Existing open tabs are unaffected — they keep their data store until closed and reopened
 - `WebViewTab::new(url, isolated, window, cx)` — `isolated` param is always passed from the owning Workbench
 
+### Tab Title Tracking
+- Sidebar tab entries show the live page title instead of the URL slug
+- `TITLE_TRACKER_SCRIPT` (init script in every WebView): monitors `document.title` via MutationObserver on `<title>`, `DOMContentLoaded`, `load`, and SPA `pushState`/`replaceState`/`popstate` hooks; posts `{type:'titleChanged', title}` to `window.webkit.messageHandlers.epocaMeta`
+- `EpocaMetaHandler` ObjC class (`register_meta_handler(uc, webview_ptr)` in shield.rs): receives messages, uses `UC_MAP` to route by `WKUserContentController` pointer → `webview_ptr`
+- `TITLE_CHANNEL` static in shield.rs: `SyncSender<(usize, String)>` / `Mutex<Receiver<...>>`, drained each frame by `drain_title_events()`
+- `WebViewTab.webview_ptr: usize` stores the raw WKWebView pointer as identity key
+- `Workbench::process_pending_nav` drains title events and updates `TabEntry.title` on match
+- Idempotent via `window.__epocaTitleTracker` guard (safe across SPA navigations)
+
 ### Sidebar
 - Pinned mode: sidebar in flex flow, fixed width
 - Overlay mode: sidebar slides in over content; hides on mouse-out

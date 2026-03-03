@@ -1237,7 +1237,10 @@ fn apply_webview_corner_radius(wv: &gpui_component::wry::WebView, radius: f64) {
 /// silently dropped but the scripts themselves still execute correctly.
 /// P1 will wire a real handler via a channel to ShieldManager.
 #[cfg(target_os = "macos")]
-fn install_shield_message_handler(wv: &gpui_component::wry::WebView) {
+/// Returns the WKWebView pointer cast to `usize` (used as a stable tab identity
+/// for routing title-change events back to the correct `TabEntry`).
+/// Returns 0 on failure (missing configuration / null pointers).
+fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use gpui_component::wry::WebViewExtMacOS;
@@ -1246,14 +1249,15 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) {
         let wk = wv.webview();
         let obj = &*wk as *const _ as *mut AnyObject;
         let config: *mut AnyObject = msg_send![obj, configuration];
-        if config.is_null() { return; }
+        if config.is_null() { return 0; }
         let uc: *mut AnyObject = msg_send![config, userContentController];
-        if uc.is_null() { return; }
+        if uc.is_null() { return 0; }
         log::debug!("Shield: WKUserContentController at {:p}", uc);
         // Use the WKWebView pointer as a stable tab identity key.
         let webview_ptr = obj as usize;
         crate::shield::register_nav_handler(uc);
         crate::shield::register_meta_handler(uc, webview_ptr);
+        webview_ptr
     }
 }
 
@@ -1274,6 +1278,9 @@ pub struct WebViewTab {
     /// the WKWebView consumes all clicks before GPUI sees them.
     /// Stored as u64 (raw *mut AnyObject) so the struct is Send.
     sidebar_blocker_ptr: u64,
+    /// Raw WKWebView pointer (cast to usize) used to route title-change events
+    /// from `TITLE_CHANNEL` back to the correct `TabEntry` in Workbench.
+    pub webview_ptr: usize,
 }
 
 impl WebViewTab {
@@ -1332,6 +1339,7 @@ impl WebViewTab {
         let mut error = None;
         let mut wv_entity = None;
         let mut sidebar_blocker_ptr: u64 = 0;
+        let mut webview_ptr: usize = 0;
 
         // Pull the current shield config (may be default/empty if bootstrap is
         // still running in the background — that's acceptable for early opens).
@@ -1355,7 +1363,7 @@ impl WebViewTab {
                 apply_webview_corner_radius(&wry_wv, 10.0);
 
                 #[cfg(target_os = "macos")]
-                install_shield_message_handler(&wry_wv);
+                { webview_ptr = install_shield_message_handler(&wry_wv); }
 
                 #[cfg(target_os = "macos")]
                 { sidebar_blocker_ptr = create_sidebar_blocker(&wry_wv); }
@@ -1378,6 +1386,7 @@ impl WebViewTab {
             _inset_subscription,
             _omnibox_subscription,
             sidebar_blocker_ptr,
+            webview_ptr,
         }
     }
 
