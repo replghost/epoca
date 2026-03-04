@@ -150,16 +150,184 @@ video-overlay sweeping which Brave does not have.
 
 ---
 
-## P2 — Programmable Workbench (Epoca's unique value)
+## P1 — PolkaVM App Platform (Epoca's unique value)
 
-### ZML / PolkaVM Guest Apps
+### `.prod` Bundle Format
+Sandboxed PolkaVM apps are packaged as `.prod` files — ZIP archives with a known structure:
+```
+my-app.prod (ZIP)
+├── manifest.toml       # required — declares type, permissions, metadata
+├── app.polkavm          # required — compiled guest binary
+├── icon.png             # optional — app icon (256x256)
+├── assets/              # optional — images, data files
+│   └── ...
+└── signature.toml       # optional — ed25519 signature over manifest + binary hash
+```
+- [ ] **`ProdBundle` loader** — `epoca-sandbox/src/prod_bundle.rs`: parse ZIP, extract manifest, memory-map or load `app.polkavm`, mount `assets/` for `host_asset_read`
+- [ ] **`host_asset_read(name_ptr, name_len, offset, dst_ptr, max_len) -> u32`** — guest reads files from the `.prod` bundle's `assets/` directory
+- [ ] **Bundle signature verification** — ed25519 over `sha256(manifest.toml) + sha256(app.polkavm)`; optional but checked if present
+- [ ] **`open_prod_bundle(path)`** in Workbench — reads `.prod`, dispatches to correct tab type based on `manifest.toml` type field
+
+### Manifest Types
+Three app archetypes, each with different surface area, lifecycle, and host API:
+
+**`type = "application"` — Full Tab App** (extends current `SandboxAppTab`)
+```toml
+[app]
+type = "application"
+id = "com.example.notes"
+name = "Quick Notes"
+version = "1.0.0"
+[permissions]
+network = ["api.example.com"]
+storage = "2mb"
+clipboard = "write"
+```
+- Owns entire tab surface, all 13 node kinds available
+- Lifecycle: `init()` once, `update()` at 30fps while tab visible, pauses when backgrounded
+- [ ] Implement `type = "application"` manifest parsing in `ProdBundle`
+
+**`type = "extension"` — Chat/Context Extension**
+```toml
+[app]
+type = "extension"
+id = "com.example.translate"
+name = "Translate"
+version = "1.0.0"
+[extension]
+surfaces = ["chat", "context-menu"]
+triggers = ["translate", "tr"]
+[permissions]
+network = ["api.deepl.com"]
+```
+- Doesn't own a tab — contributes to host surfaces (chat panel, context menu, command palette)
+- Event-driven lifecycle: `on_invoke(trigger, context) → ViewTree`
+- Restricted node kinds (no full layout freedom, rendered within host chrome)
+- [ ] Design extension host API: `on_invoke`, `on_message`, `InvokeContext`, `Surface` enum
+- [ ] `ExtensionHost` in `epoca-core` — manages loaded extensions, routes triggers
+- [ ] Extension surface integration (chat panel, context menu contributions)
+
+**`type = "widget"` — Dashboard Widget**
+```toml
+[app]
+type = "widget"
+id = "com.example.weather"
+name = "Weather"
+version = "1.0.0"
+[widget]
+sizes = ["small", "medium"]
+refresh = "30m"
+default_size = "small"
+[permissions]
+network = ["api.openweathermap.org"]
+geolocation = "coarse"
+```
+- Fixed-size card on a widget board/dashboard (like macOS Dashboard / iOS widgets)
+- Sizes: `small` (160×160), `medium` (320×160), `large` (320×320)
+- Lifecycle: `init()` once, `refresh()` on interval — NOT continuous 30fps
+- Between refreshes, last ViewTree is cached and rendered statically
+- Limited node kinds: Text, HStack, VStack, Container, Image, Chart, Spacer, Divider (no Input/Button, or tap-to-open-app only)
+- [ ] `WidgetBoard` panel — grid layout of widget cards with host-controlled chrome
+- [ ] `WidgetHost` — manages widget lifecycle, refresh timers, size negotiation
+- [ ] Widget size negotiation protocol (`widget.sizes` in manifest ↔ host available space)
+
+### Guest Host API (all app types)
+Expand the host function surface beyond current `host_set_view`/`host_poll_event`/`host_fetch`/`host_log`:
+- [ ] **Complete `host_fetch`** — currently broker-checked but actual HTTP request is `// TODO` in `tabs.rs:721`. Implement on background thread, cap response 10MB, reject redirect chains outside declared domains
+- [ ] **`host_kv_get(key_ptr, key_len, dst_ptr, max_len) -> u32`** — scoped persistent key-value storage per app_id, backed by `~/.epoca/app-storage/<app_id>/`
+- [ ] **`host_kv_set(key_ptr, key_len, val_ptr, val_len) -> u32`** — write, with broker-checked size limits from `permissions.storage`
+- [ ] **`host_clipboard_write(ptr, len)`** / **`host_clipboard_read(dst_ptr, max_len) -> u32`** — with broker permission check
+- [ ] **`host_time_ms() -> u64`** — monotonic milliseconds since sandbox init
+- [ ] **`host_asset_read`** — read files from `.prod` bundle (see above)
+
+### Framebuffer API (games, emulators, creative tools)
+For guests that do software rendering instead of ViewTree UI:
+```toml
+[app]
+type = "application"
+id = "com.example.doom"
+name = "DOOM"
+[permissions]
+gpu = "2d"
+[sandbox]
+framebuffer = true
+max_gas_per_update = 2000000000
+```
+- [ ] **`host_present_frame(ptr, width, height, stride)`** — guest hands ARGB pixel buffer to host; host converts to BGRA, uploads via GPUI `paint_image`
+- [ ] **`host_poll_input(buf_ptr, buf_len) -> u32`** — keyboard/mouse events as `InputEvent { type: u8, key_code: u8 }` structs
+- [ ] **`FramebufferSandboxInstance`** — variant of `SandboxInstance` with framebuffer host functions instead of ViewTree functions
+- [ ] **`FramebufferAppTab`** — new tab type using `paint_image` to blit pixels, captures GPUI key events → input queue, scales framebuffer to fill bounds
+- [ ] **Gas metering for framebuffer apps** — configurable via `manifest.toml [sandbox]` section; `GasMeteringKind::Async` preferred for perf
+
+### DOOM on PolkaVM (proof of concept)
+Target: doomgeneric (minimal C port, 5 platform callbacks) running in PolkaVM, packaged as `.prod`.
+Architecture: Rust shim (`no_std`, `polkavm_derive`) + C doomgeneric sources linked via `cc` crate in `build.rs`.
+```
+guest/doom/
+├── Cargo.toml           # polkavm-derive + cc build dep
+├── build.rs             # cross-compiles doomgeneric C to riscv32
+├── src/main.rs          # Rust shim: polkavm_import/export glue
+├── c_src/
+│   ├── doomgeneric/     # git subtree of github.com/ozkl/doomgeneric
+│   ├── polkavm_platform.c  # implements DG_Init/DG_DrawFrame/DG_SleepMs/DG_GetTicksMs/DG_GetKey
+│   └── libc_polkavm.c  # minimal libc: malloc (8MB arena bump allocator), memcpy, printf→host_log
+└── doom.prod            # output bundle with doom1.wad in assets/
+```
+- [ ] Create `guest/doom/` workspace member with Rust shim + `build.rs` for C cross-compilation
+- [ ] Patch doomgeneric WAD I/O (`w_wad.c`) to use `host_asset_read` instead of `fopen`/`fread`
+- [ ] Implement libc shim: `malloc`/`free` (8MB static arena bump allocator), `memcpy`/`memset`, `printf`→`host_log`, `exit`→`unimp`
+- [ ] Build pipeline: `cargo +nightly build -Z build-std=core,alloc --target $(polkatool get-target-json-path --bitness 32) --release` then `polkatool link`
+- [ ] Validate 35fps at 320×200 in `FramebufferAppTab` with `doom1.wad` (shareware, ~4MB)
+- [ ] Soft-float: verify clang `-march=rv32emac -mabi=ilp32e` soft-float works for Doom's trig (`cos`/`sin`/`atan2`)
+
+### Scene Graph API (3D, medium-term)
+For GPU-accelerated 3D rendering — guest describes scene, host renders with Metal:
+```rust
+enum SceneNode {
+    Mesh { vertices: AssetRef, indices: AssetRef, material: MaterialId, transform: Mat4 },
+    Camera { fov: f32, near: f32, far: f32, transform: Mat4 },
+    Light { kind: LightKind, color: Color, intensity: f32, transform: Mat4 },
+    Group { children: Vec<SceneNode>, transform: Mat4 },
+}
+```
+- [ ] Design `SceneTree` protocol in `epoca-protocol` (3D equivalent of `ViewTree`)
+- [ ] `host_set_scene(ptr, len)` host function
+- [ ] Metal scene renderer in `epoca-core` (or separate `epoca-3d` crate)
+- [ ] `gpu = "3d"` permission level in broker
+
+### Guest UI Framework (`epoca-guest-ui` evolution)
+The guest UI toolkit is the `no_std` declarative layer guests write against. It produces ViewTree nodes;
+the host renders them natively (GPUI on desktop, wgpu on Android, future: web/iOS).
+
+**Investigate prior art:**
+- [ ] **egui feasibility** — egui is immediate-mode and `std`-dependent; likely not suitable for `no_std` PolkaVM guests, but investigate `egui-miniquad` or `egui` core without backends. Could the retained-mode output (tessellated meshes) be sent over the protocol boundary?
+- [ ] **SwiftUI-like declarative model** — current `epoca-guest-ui` builder API is closest to this. Investigate formalizing: `View` trait, `@State` equivalent via `use_state<T>()`, `ViewModifier` chains, conditional views, `ForEach` for lists
+- [ ] **Iced `widget` core** — Iced separates widget logic from rendering; its `iced_core` is relatively clean. Could its `Widget` trait + `Layout` engine be adapted for `no_std`?
+- [ ] **Xilem/Masonry patterns** — Xilem uses a functional reactive model with tree diffing. Similar to what we do. Study their `View` trait and diff algorithm.
+
+**Framework expansion (regardless of base):**
+- [ ] **Remaining node kinds**: render `List` (scrollable, recycled), `Image` (from assets or URL), `ZStack`, `Table`, `Chart` in `view_bridge.rs` (currently placeholder)
+- [ ] **Semantic styles**: `.caption()`, `.title()`, `.destructive()`, `.secondary()` — host maps to theme
+- [ ] **Layout hints**: `.padding(px)`, `.frame(min_w, max_w)`, `.alignment()`, `.spacing()`
+- [ ] **Navigation**: `push_screen(ViewTree)`, `pop_screen()` for multi-screen apps (host manages a nav stack per tab)
+- [ ] **State management**: `use_state<T>()` or `@State` equivalent — framework handles diffing so guests don't manually track changes
+- [ ] **`ForEach` / list builder** — efficient list construction with stable IDs for diffing
+- [ ] Apply diff patches from `diff_trees()` instead of full re-render (diffing code exists in `epoca-protocol`, currently unused in `ViewBridge::update_tree`)
+
+### ZML / Declarative Apps
 - [ ] ZML hot-reload in dev mode (already partly working)
 - [ ] ZML standard library: fetch(), localStorage, clipboard
 - [ ] ZML layout: flex wrap, grid support
 - [ ] ZML components: Table, Chart, DatePicker, Modal
-- [ ] Guest app marketplace (local directory of `.zml` apps, no central server)
-- [ ] PolkaVM guest: async fetch capability (currently stubbed)
+- [ ] Guest app marketplace (local directory of `.zml` / `.prod` apps, no central server)
+- [ ] ZML ↔ PolkaVM bridge: ZML app delegates compute to a `.polkavm` module (`call(fn_name, args) → result`, not full UI takeover)
 - [ ] ZML ↔ WebView bridge: guest app can open a WebView pane in split view
+
+### App Discovery & Distribution
+- [ ] Local directory scanner: `~/.epoca/apps/` — auto-discovers `.prod` bundles
+- [ ] Open-from-URL: download `.prod` from HTTPS, verify signature, prompt to install
+- [ ] App registry protocol (simple JSON index over HTTPS, no central server required)
+- [ ] `cargo-epoca` CLI: scaffolds guest projects, handles cross-compile + `polkatool link` + `.prod` packaging
 
 ### Split View / Panels
 - [ ] Vertical split: two tabs side-by-side
@@ -239,11 +407,14 @@ video-overlay sweeping which Brave does not have.
 
 ## P3 — Moonshots
 
-- [ ] **WASM guest apps**: compile Rust/TS/Python to WASM, run as sandboxed tabs
+- [ ] **Retro game/emulator ecosystem**: NES, GB, CHIP-8 emulators as `.prod` bundles using framebuffer API — "the app store for sandboxed retro gaming"
+- [ ] **GPU-accelerated 3D apps**: scene graph protocol + Metal renderer for real 3D games in sandboxed tabs
+- [ ] **WASM guest apps**: compile Rust/TS/Python to WASM, run as sandboxed tabs (alternative to PolkaVM for web-origin code)
 - [ ] **Decentralized content**: IPFS/Arweave tab renderer, ENS domain support
 - [ ] **Hardware attestation**: verify page JS via reproducible builds + WASM attestation
 - [ ] **Browser-as-IDE**: CodeEditorTab with LSP support, run local dev servers as tabs
 - [ ] **Physical-world tabs**: NFC/QR scanner as a tab type (mobile)
+- [ ] **Guest-to-guest messaging**: broker-mediated channels between running `.prod` apps
 
 ---
 

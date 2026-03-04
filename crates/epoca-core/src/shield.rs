@@ -754,6 +754,7 @@ pub enum MenuAction {
     OpenInNewTab(String),
     OpenInNewWindow(String),
     OpenInContext(String, String), // (url, context_id)
+    OpenPrivate(String),           // url — open in private/no-context tab
     CopyLink(String),
 }
 

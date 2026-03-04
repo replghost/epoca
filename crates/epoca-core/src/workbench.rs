@@ -460,6 +460,25 @@ impl Workbench {
                     });
                     cx.notify();
                 }
+                crate::shield::MenuAction::OpenPrivate(url) => {
+                    let id = self.alloc_id();
+                    let title = url_to_title(&url);
+                    let url_clone = url.clone();
+                    let entity = cx.new(|cx| WebViewTab::new(url, None, window, cx));
+                    let nav = WebViewTab::nav_handler(entity.clone());
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: TabKind::WebView { url: url_clone },
+                        title,
+                        icon: IconName::Globe,
+                        entity: entity.into(),
+                        pinned: false,
+                        nav: Some(nav),
+                        favicon_url: None,
+                        context_id: None,
+                    });
+                    cx.notify();
+                }
                 crate::shield::MenuAction::CopyLink(url) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(url));
                 }
@@ -533,6 +552,16 @@ impl Workbench {
                         send_menu_action(MenuAction::OpenInContext(url.to_string(), ctx.to_string()));
                     }
                 }
+                unsafe extern "C" fn open_private(
+                    _this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject,
+                ) {
+                    let rep: *mut AnyObject = msg_send![sender, representedObject];
+                    if rep.is_null() { return; }
+                    let cstr: *const i8 = msg_send![rep, UTF8String];
+                    if cstr.is_null() { return; }
+                    let url = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    send_menu_action(MenuAction::OpenPrivate(url));
+                }
 
                 builder.add_method(
                     objc2::sel!(openNewTab:),
@@ -549,6 +578,10 @@ impl Workbench {
                 builder.add_method(
                     objc2::sel!(openInContext:),
                     open_in_context as unsafe extern "C" fn(_, _, _),
+                );
+                builder.add_method(
+                    objc2::sel!(openPrivate:),
+                    open_private as unsafe extern "C" fn(_, _, _),
                 );
 
                 builder.register()
@@ -616,8 +649,26 @@ impl Workbench {
                     .try_global::<crate::settings::SettingsGlobal>()
                     .map(|g| g.settings.contexts.clone())
                     .unwrap_or_default();
+                // Check if the source tab is inside a named context.
+                let source_in_context = self.tabs.iter().any(|t| {
+                    t.entity.clone().downcast::<WebViewTab>().ok()
+                        .map(|e| e.read(cx).webview_ptr == ev.webview_ptr)
+                        .unwrap_or(false)
+                        && t.context_id.is_some()
+                });
                 if !all_contexts.is_empty() {
                     let submenu: *mut AnyObject = msg_send![ns_menu, new];
+                    // "Private Tab" — only when source tab is already in a context
+                    if source_in_context {
+                        let private_item = make_item!(
+                            "Private Tab",
+                            objc2::sel!(openPrivate:),
+                            href_ns
+                        );
+                        let _: () = msg_send![submenu, addItem: private_item];
+                        let sub_sep: *mut AnyObject = msg_send![ns_menu_item, separatorItem];
+                        let _: () = msg_send![submenu, addItem: sub_sep];
+                    }
                     for ctx in &all_contexts {
                         let rep = format!("{}\n{}", ev.href, ctx.id);
                         let rep_ns = nsstr!(&rep);
@@ -776,10 +827,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
 
     fn switch_tab(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.active_tab_id = Some(tab_id);
-        let value = self
-            .tabs
-            .iter()
-            .find(|t| t.id == tab_id)
+        let tab = self.tabs.iter().find(|t| t.id == tab_id);
+        let value = tab
             .map(|tab| match &tab.kind {
                 TabKind::WebView { url } => url.clone(),
                 TabKind::DeclarativeApp { path } => path.clone(),
@@ -788,6 +837,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::Welcome | TabKind::Settings => String::new(),
             })
             .unwrap_or_default();
+        // Sync the context indicator to reflect this tab's context.
+        self.active_context = tab.and_then(|t| t.context_id.clone());
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(value, window, inner_cx));
         cx.notify();
@@ -920,6 +971,38 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.active_tab_id.and_then(|id| {
             self.tabs.iter().find(|t| t.id == id).and_then(|t| t.context_id.clone())
         })
+    }
+
+    /// Switch the active context. If the active tab already has a URL loaded,
+    /// close it and reopen the same URL in a new tab with the chosen context
+    /// (WKWebView data stores can't change after creation).
+    fn switch_context(
+        &mut self,
+        new_ctx: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_context == new_ctx {
+            cx.notify();
+            return;
+        }
+        self.active_context = new_ctx;
+        // If the active tab is a WebView with a real URL, reopen it in the new context.
+        let reopen_url = self.active_tab_id.and_then(|id| {
+            self.tabs.iter().find(|t| t.id == id).and_then(|t| {
+                if let TabKind::WebView { url } = &t.kind {
+                    if !url.is_empty() { Some((id, url.clone())) } else { None }
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some((old_id, url)) = reopen_url {
+            self.close_tab(old_id, window, cx);
+            self.open_webview(url, window, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     /// Toggle the shield exception for the active tab's hostname.
@@ -1228,8 +1311,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .when_some(dot_color, |d, color| {
                     d.child(
                         div()
-                            .w(px(7.0))
-                            .h(px(7.0))
+                            .w(px(6.0))
+                            .h(px(6.0))
                             .rounded_full()
                             .bg(color)
                             .flex_shrink_0(),
@@ -1275,10 +1358,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     .when(is_private, |d| {
                         d.child(Icon::new(IconName::Check).size(px(11.0)).text_color(rgba(0x22c55eff)))
                     })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.active_context = None;
+                    .on_click(cx.listener(|this, _, window, cx| {
                         this.context_picker_open = false;
-                        cx.notify();
+                        this.switch_context(None, window, cx);
                     }))
                     .into_any_element(),
             );
@@ -1302,7 +1384,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .cursor_pointer()
                         .hover(|d| d.bg(rgba(0xffffff14)))
                         .when(is_active, |d| d.bg(rgba(0xffffff0c)))
-                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color).flex_shrink_0())
+                        .child(div().w(px(6.0)).h(px(6.0)).rounded_full().bg(dot_color).flex_shrink_0())
                         .child(
                             div()
                                 .flex_1()
@@ -1313,10 +1395,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .when(is_active, |d| {
                             d.child(Icon::new(IconName::Check).size(px(11.0)).text_color(rgba(0x22c55eff)))
                         })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.active_context = Some(click_id.clone());
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.context_picker_open = false;
-                            cx.notify();
+                            this.switch_context(Some(click_id.clone()), window, cx);
                         }))
                         .into_any_element(),
                 );
@@ -1435,9 +1516,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .cursor_pointer()
                 .when(is_active, |d| d.bg(item_active_bg))
                 .when(!is_active, |d| d.hover(|d| d.bg(item_hover_bg)))
-                // Context dot — 4px colored circle left of icon when tab has a context
+                // Context dot — colored circle left of icon when tab has a context
                 .when_some(context_color, |d, color| {
-                    d.child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(color).flex_shrink_0())
+                    d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color).flex_shrink_0())
                 })
                 .child(
                     Icon::new(icon).size(px(13.0)).text_color(icon_color),
