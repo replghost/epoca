@@ -426,3 +426,118 @@ pub fn register_shield_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: 
         let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
     }
 }
+
+// ---------------------------------------------------------------------------
+// Favicon channel — favicon URL events from epocaFavicon JS handler
+// ---------------------------------------------------------------------------
+
+static FAVICON_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+)> = OnceLock::new();
+
+fn favicon_channel() -> &'static (
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+) {
+    FAVICON_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(128);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain pending favicon URL events (called every render frame from Workbench).
+/// Returns `(webview_ptr, favicon_url)` pairs.
+pub fn drain_favicon_events() -> Vec<(usize, String)> {
+    let ch = favicon_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+/// Register the `epocaFavicon` WKScriptMessageHandler. Receives:
+///   { type: 'faviconFound', url: '...' }
+#[cfg(target_os = "macos")]
+pub fn register_favicon_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: usize) {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+    use std::collections::HashMap;
+
+    static UC_MAP: LazyLock<Mutex<HashMap<usize, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaFaviconHandler") {
+            return c;
+        }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaFaviconHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                let body: *mut AnyObject = objc2::msg_send![message, body];
+                if body.is_null() { return; }
+
+                let type_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"type\0".as_ptr() as *const i8
+                ];
+                let url_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"url\0".as_ptr() as *const i8
+                ];
+                let type_val: *mut AnyObject = objc2::msg_send![body, objectForKey: type_key];
+                let url_val: *mut AnyObject = objc2::msg_send![body, objectForKey: url_key];
+                if type_val.is_null() || url_val.is_null() { return; }
+
+                let type_cstr: *const i8 = objc2::msg_send![type_val, UTF8String];
+                let url_cstr: *const i8 = objc2::msg_send![url_val, UTF8String];
+                if type_cstr.is_null() || url_cstr.is_null() { return; }
+
+                let type_str = std::ffi::CStr::from_ptr(type_cstr).to_string_lossy();
+                if type_str != "faviconFound" { return; }
+
+                let favicon_url = std::ffi::CStr::from_ptr(url_cstr)
+                    .to_string_lossy()
+                    .to_string();
+                if favicon_url.is_empty() { return; }
+
+                let uc_key = uc as usize;
+                if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                    let _ = favicon_channel().0.try_send((wv_ptr, favicon_url));
+                }
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+
+            if let Some(proto) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(proto);
+            }
+
+            builder.register()
+        }
+    });
+
+    UC_MAP.lock().unwrap().insert(uc as usize, webview_ptr);
+
+    unsafe {
+        let handler: *mut AnyObject = objc2::msg_send![*cls, new];
+        if handler.is_null() { return; }
+        let name: *mut AnyObject = objc2::msg_send![
+            AnyClass::get("NSString").unwrap(),
+            stringWithUTF8String: b"epocaFavicon\0".as_ptr() as *const i8
+        ];
+        let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
+    }
+}

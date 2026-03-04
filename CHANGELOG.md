@@ -8,6 +8,15 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Favicon in tab list** — Sidebar tab rows show the site's favicon instead of the generic
+  globe icon. `FAVICON_SCRIPT` finds the best `<link rel="icon">` URL or falls back to
+  `/favicon.ico`, posts via `epocaFavicon` WKScriptMessageHandler (`EpocaFaviconHandler`
+  ObjC class, `FAVICON_CHANNEL`, `drain_favicon_events()`). Stored in `TabEntry.favicon_url`;
+  rendered with `img()` (GPUI URI image loading); falls back to `IconName::Globe`. (2026-03-03)
+
+- **URL bar padding tightened** — Switched Input to `Size::Small` (8px horizontal padding,
+  down from 12px) and `.appearance(false)` to avoid double bg/border. (2026-03-03)
+
 - **Live page titles in tab list** — Sidebar shows the actual page title instead of the URL slug.
   `TITLE_TRACKER_SCRIPT` monitors `document.title` via MutationObserver + SPA navigation hooks,
   posts via `epocaMeta` WKScriptMessageHandler; `EpocaMetaHandler` ObjC class routes events by

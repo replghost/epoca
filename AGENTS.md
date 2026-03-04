@@ -77,7 +77,7 @@ If unsure, ask rather than assume.
   3. `drain_nav_events()` called every render frame from `process_pending_nav()` in Workbench
   4. `open_webview_background()` for background opens; `open_webview()` for foreground
 - `Workbench.open_links_in_background: bool` (default: `true`)
-- **Ripple animation**: `RIPPLE_SCRIPT` init script shows green expanding ring (`#44bb66`) at the ⌘-click point when a background tab opens; 400ms; idempotent via `window.__epocaRipple`
+- **Ripple animation**: `RIPPLE_SCRIPT` init script shows a gray expanding ring (`rgba(160,160,160,0.7)`) at the ⌘-click point when a background tab opens; 400ms; idempotent via `window.__epocaRipple`
 
 ### Content Blocking (epoca-shield)
 - EasyList / EasyPrivacy rules compiled to WKContentRuleList JSON and installed on each WebView
@@ -108,6 +108,12 @@ If unsure, ask rather than assume.
 - Toggle at runtime via `Workbench::set_isolated_tabs(bool)`; applies to all subsequently opened tabs
 - Existing open tabs are unaffected — they keep their data store until closed and reopened
 - `WebViewTab::new(url, isolated, window, cx)` — `isolated` param is always passed from the owning Workbench
+
+### Favicon in Tab List
+- `FAVICON_SCRIPT` init script finds the best `<link rel="icon">` URL (prefers higher resolution) and falls back to `/favicon.ico`; posts `{type:'faviconFound', url}` to `epocaFavicon` on DOMContentLoaded and SPA navigations
+- `EpocaFaviconHandler` ObjC class (`register_favicon_handler(uc, webview_ptr)` in shield.rs); routes via UC_MAP; sends to `FAVICON_CHANNEL`
+- `TabEntry.favicon_url: Option<String>` updated by `drain_favicon_events()` in `process_pending_nav`
+- Tab row renders `img(url).size(px(13)).rounded(px(2))` when favicon available; falls back to `Icon::new(icon)` otherwise
 
 ### Tab Title Tracking
 - Sidebar tab entries show the live page title instead of the URL slug

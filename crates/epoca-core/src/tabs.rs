@@ -40,6 +40,9 @@ pub struct TabEntry {
     pub pinned: bool,
     /// Navigation delegate — `Some` for navigable tabs, `None` for others.
     pub nav: Option<Box<dyn NavHandler>>,
+    /// Favicon URL for WebView tabs — loaded via FAVICON_SCRIPT + epocaFavicon handler.
+    /// None until the page reports its icon; falls back to `icon` field for display.
+    pub favicon_url: Option<String>,
 }
 
 /// The kind of tab that can be opened in the workbench.
@@ -986,6 +989,39 @@ document.addEventListener('click',function(e){
 },true);
 })();"#;
 
+/// Injected into every page. Finds the best favicon URL from <link rel="icon">
+/// elements or falls back to /favicon.ico, then posts it to epocaFavicon.
+/// Fires on DOMContentLoaded and re-fires on SPA navigations.
+const FAVICON_SCRIPT: &str = r#"(function(){
+if(window.__epocaFavicon)return;
+window.__epocaFavicon=true;
+function _epocaSendFavicon(){
+  var best=null,bestSz=0;
+  var links=document.querySelectorAll('link[rel~="icon"],link[rel~="apple-touch-icon"]');
+  for(var i=0;i<links.length;i++){
+    var l=links[i];
+    if(!l.href||!l.href.startsWith('http'))continue;
+    var sz=0;
+    if(l.sizes&&l.sizes.length>0){
+      var s=l.sizes[0]||'';
+      sz=parseInt(s.split('x')[0]||'0',10)||0;
+    }
+    if(!best||sz>bestSz){best=l.href;bestSz=sz;}
+  }
+  if(!best)best=location.origin+'/favicon.ico';
+  if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaFavicon){
+    window.webkit.messageHandlers.epocaFavicon.postMessage({type:'faviconFound',url:best});
+  }
+}
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',_epocaSendFavicon,{once:true});
+}else{_epocaSendFavicon();}
+var _origPush=history.pushState,_origReplace=history.replaceState;
+history.pushState=function(){_origPush.apply(this,arguments);setTimeout(_epocaSendFavicon,200);};
+history.replaceState=function(){_origReplace.apply(this,arguments);setTimeout(_epocaSendFavicon,200);};
+window.addEventListener('popstate',function(){setTimeout(_epocaSendFavicon,200);});
+})();"#;
+
 /// Injected into every page. When ⌘-click opens a background tab a green
 /// expanding ring radiates from the click point — macOS "notification sent"
 /// feedback. Fires only on cmd-click (not cmd-shift-click, which is foreground).
@@ -999,7 +1035,7 @@ document.addEventListener('click',function(e){
   var r=document.createElement('div');
   var x=e.clientX,y=e.clientY,sz=48;
   r.style.cssText='position:fixed;pointer-events:none;border-radius:50%;'
-    +'border:2px solid #44bb66;background:rgba(68,187,102,0.10);'
+    +'border:2px solid rgba(160,160,160,0.7);background:rgba(160,160,160,0.08);'
     +'left:'+(x-sz/2)+'px;top:'+(y-sz/2)+'px;'
     +'width:'+sz+'px;height:'+sz+'px;'
     +'transform:scale(0.1);opacity:1;z-index:2147483647;'
@@ -1283,6 +1319,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_nav_handler(uc);
         crate::shield::register_meta_handler(uc, webview_ptr);
         crate::shield::register_shield_handler(uc, webview_ptr);
+        crate::shield::register_favicon_handler(uc, webview_ptr);
         webview_ptr
     }
 }
@@ -1381,6 +1418,7 @@ impl WebViewTab {
             .with_initialization_script(LINK_STATUS_SCRIPT)
             .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(RIPPLE_SCRIPT)
+            .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)

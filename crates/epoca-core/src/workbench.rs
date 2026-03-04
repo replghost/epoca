@@ -7,6 +7,7 @@ actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, To
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
+use gpui_component::Sizable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Icon, IconName};
@@ -344,6 +345,24 @@ impl Workbench {
             }
             if changed { cx.notify(); }
         }
+        // Drain favicon URL events (epocaFavicon WKScriptMessageHandler)
+        let favicon_events = crate::shield::drain_favicon_events();
+        if !favicon_events.is_empty() {
+            let mut changed = false;
+            for tab in &mut self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                    let wv_ptr = entity.read(cx).webview_ptr;
+                    if wv_ptr == 0 { continue; }
+                    for (ev_ptr, ref url) in &favicon_events {
+                        if *ev_ptr == wv_ptr {
+                            tab.favicon_url = Some(url.clone());
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if changed { cx.notify(); }
+        }
         // Drain shield cosmetic-count events (epocaShield WKScriptMessageHandler)
         let shield_events = crate::shield::drain_shield_events();
         if !shield_events.is_empty() {
@@ -506,6 +525,7 @@ impl Workbench {
             entity: entity.into(),
             pinned: false,
             nav: Some(nav),
+            favicon_url: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -535,6 +555,7 @@ impl Workbench {
             entity: entity.into(),
             pinned: false,
             nav: Some(nav),
+            favicon_url: None,
         });
         // Do NOT change active_tab_id — stay on current tab.
         cx.notify();
@@ -599,6 +620,7 @@ impl Workbench {
             entity: entity.into(),
             pinned: false,
             nav: None,
+            favicon_url: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -628,6 +650,7 @@ impl Workbench {
             entity: entity.into(),
             pinned: false,
             nav: None,
+            favicon_url: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -657,6 +680,7 @@ impl Workbench {
             entity: entity.into(),
             pinned: false,
             nav: None,
+            favicon_url: None,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -786,6 +810,9 @@ impl Workbench {
             );
 
         // ── URL bar ───────────────────────────────────────────────────────
+        // The outer div owns the visual border/bg; Input is appearance=false
+        // so it doesn't add a second bg/border layer. Size::Small reduces
+        // horizontal padding from 12px → 8px, tightening the globe and X gaps.
         let url_row = div()
             .mx(px(8.0))
             .mt(px(4.0))
@@ -796,6 +823,8 @@ impl Workbench {
             .border_color(rgba(0xffffff22))
             .child(
                 Input::new(&self.url_input)
+                    .appearance(false)
+                    .small()
                     .prefix(Icon::new(IconName::Globe).size(px(13.0)))
                     .cleanable(true),
             );
@@ -805,6 +834,7 @@ impl Workbench {
         // into Vecs without naming the concrete type.
         let make_tab_row = |tab_id: u64,
                             icon: IconName,
+                            favicon_url: Option<String>,
                             title: SharedString,
                             is_active: bool,
                             _pinned: bool,
@@ -819,6 +849,11 @@ impl Workbench {
                     this.close_tab(tab_id, window, cx);
                 }));
 
+            let icon_color = if is_active { icon_active } else { icon_muted };
+            // favicon_url is tracked but display requires fetching bytes via
+            // reqwest + gpui::Image::from_bytes (backlogged). Show the fallback
+            // icon for now.
+            let _ = favicon_url;
             div()
                 .id(ElementId::Integer(tab_id))
                 .flex()
@@ -833,9 +868,7 @@ impl Workbench {
                 .when(is_active, |d| d.bg(item_active_bg))
                 .when(!is_active, |d| d.hover(|d| d.bg(item_hover_bg)))
                 .child(
-                    Icon::new(icon)
-                        .size(px(13.0))
-                        .text_color(if is_active { icon_active } else { icon_muted }),
+                    Icon::new(icon).size(px(13.0)).text_color(icon_color),
                 )
                 .child(
                     div()
@@ -862,6 +895,7 @@ impl Workbench {
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
+                    t.favicon_url.clone(),
                     SharedString::from(t.title.clone()),
                     Some(t.id) == self.active_tab_id,
                     true,
@@ -879,6 +913,7 @@ impl Workbench {
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
+                    t.favicon_url.clone(),
                     SharedString::from(t.title.clone()),
                     Some(t.id) == self.active_tab_id,
                     false,
