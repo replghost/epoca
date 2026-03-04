@@ -389,43 +389,72 @@ impl Workbench {
             }
             if changed { cx.notify(); }
         }
-        // Drain right-click context menu events from JS
+        // Drain cursor hover events (link hover → pointer cursor)
+        for (ev_ptr, is_pointer) in crate::shield::drain_cursor_events() {
+            for tab in &mut self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                    if entity.read(cx).webview_ptr == ev_ptr {
+                        entity.update(cx, |wv, ecx| {
+                            if wv.cursor_pointer != is_pointer {
+                                wv.cursor_pointer = is_pointer;
+                                ecx.notify();
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        // Drain right-click context menu events from JS.
+        // Verify the webview_ptr still belongs to a live tab before showing
+        // the menu — a closed tab would leave a dangling pointer.
         let ctx_events = crate::shield::drain_context_menu_events();
         for ev in ctx_events {
+            let alive = self.tabs.iter().any(|t| {
+                t.entity.clone().downcast::<WebViewTab>().ok()
+                    .map(|e| e.read(cx).webview_ptr == ev.webview_ptr)
+                    .unwrap_or(false)
+            });
             #[cfg(target_os = "macos")]
-            self.show_link_context_menu(&ev, cx);
+            if alive {
+                self.show_link_context_menu(&ev, cx);
+            }
         }
         // Drain NSMenu action callbacks
         let menu_actions = crate::shield::drain_menu_actions();
         for action in menu_actions {
             match action {
                 crate::shield::MenuAction::OpenInNewTab(url) => {
+                    // Trigger ripple on the source tab (same feedback as cmd-click).
+                    let origin = crate::shield::take_menu_origin();
+                    if origin.webview_ptr != 0 {
+                        self.trigger_ripple(origin.webview_ptr, origin.x, origin.y, cx);
+                    }
                     self.open_webview_background(url, window, cx);
                 }
                 crate::shield::MenuAction::OpenInNewWindow(url) => {
-                    let url2 = url.clone();
-                    let _ = cx.open_window(
-                        gpui::WindowOptions {
-                            titlebar: Some(gpui::TitlebarOptions {
-                                appears_transparent: true,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        },
-                        |window, cx| {
-                            cx.new(|cx| {
-                                let mut wb = Workbench::new(window, cx);
-                                wb.open_webview(url2, window, cx);
-                                wb
-                            })
-                        },
-                    );
+                    self.open_webview(url, window, cx);
                 }
                 crate::shield::MenuAction::OpenInContext(url, context_id) => {
-                    let saved = self.active_context.clone();
-                    self.active_context = Some(context_id);
-                    self.open_webview_background(url, window, cx);
-                    self.active_context = saved;
+                    // Open directly with the specified context_id — don't use
+                    // open_webview_background() which inherits from the active tab.
+                    let id = self.alloc_id();
+                    let title = url_to_title(&url);
+                    let url_clone = url.clone();
+                    let ctx = Some(context_id);
+                    let entity = cx.new(|cx| WebViewTab::new(url, ctx.clone(), window, cx));
+                    let nav = WebViewTab::nav_handler(entity.clone());
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: TabKind::WebView { url: url_clone },
+                        title,
+                        icon: IconName::Globe,
+                        entity: entity.into(),
+                        pinned: false,
+                        nav: Some(nav),
+                        favicon_url: None,
+                        context_id: ctx,
+                    });
+                    cx.notify();
                 }
                 crate::shield::MenuAction::CopyLink(url) => {
                     cx.write_to_clipboard(ClipboardItem::new_string(url));
@@ -613,13 +642,50 @@ impl Workbench {
             // (logical) pixels, which matches NSView points on macOS.
             let location = NSPoint { x: ev.x, y: ev.y };
 
+            // Store click origin so the OpenInNewTab handler can trigger ripple.
+            crate::shield::set_menu_origin(crate::shield::MenuClickOrigin {
+                webview_ptr: ev.webview_ptr,
+                x: ev.x,
+                y: ev.y,
+            });
+
             // Pop up the menu at the computed position in the WKWebView.
-            let _: () = msg_send![
+            // Returns BOOL — must capture as bool, not ().
+            let _: bool = msg_send![
                 menu,
                 popUpMenuPositioningItem: std::ptr::null::<AnyObject>()
                 atLocation: location
                 inView: wv_ptr
             ];
+        }
+    }
+
+    /// Evaluate the ripple animation JS on the WebView identified by `webview_ptr`.
+    /// Same visual as the cmd-click ripple in RIPPLE_SCRIPT.
+    /// Evaluate the ripple animation JS on the WebView identified by `webview_ptr`.
+    /// Same visual as the cmd-click ripple in RIPPLE_SCRIPT.
+    fn trigger_ripple(&self, webview_ptr: usize, x: f64, y: f64, cx: &App) {
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                if entity.read(cx).webview_ptr == webview_ptr {
+                    let js = format!(
+                        r#"(function(){{var r=document.createElement('div');
+var x={x},y={y},sz=48;
+r.style.cssText='position:fixed;pointer-events:none;border-radius:50%;'
++'border:2px solid rgba(160,160,160,0.7);background:rgba(160,160,160,0.08);'
++'left:'+(x-sz/2)+'px;top:'+(y-sz/2)+'px;'
++'width:'+sz+'px;height:'+sz+'px;'
++'transform:scale(0.1);opacity:1;z-index:2147483647;'
++'transition:transform 400ms cubic-bezier(0.25,0.46,0.45,0.94),opacity 380ms ease-out;';
+document.body.appendChild(r);r.getBoundingClientRect();
+r.style.transform='scale(4.5)';r.style.opacity='0';
+setTimeout(function(){{r.remove();}},420);}})()"#,
+                        x = x, y = y
+                    );
+                    entity.read(cx).evaluate_script(&js, cx);
+                    break;
+                }
+            }
         }
     }
 

@@ -26,6 +26,17 @@ and must not be changed without explicit user approval.
 - New tab types must implement `Panel + EventEmitter<PanelEvent> + Focusable + Render`
 - Always `use gpui::prelude::FluentBuilder` when using `.when()` on divs
 - `InputState::set_value()` not `set_text()`; `Input::new(&entity_ref)` not direct construction
+- **Entity notify rule**: When `entity.update(cx, |model, ecx| { ... })` changes ANY field
+  that affects rendering, you MUST call `ecx.notify()` inside the closure. Without this,
+  GPUI will not re-render the entity and the change is invisible.
+- **GPUI overrides WKWebView cursor**: GPUI calls `[[NSCursor arrowCursor] set]` every paint
+  frame. CSS `cursor:pointer` in WKWebView has no effect. Instead, track hover state via JS →
+  `epocaCursor` channel → `WebViewTab.cursor_pointer: bool` → `.cursor_pointer()` on the GPUI
+  wrapper div. This makes GPUI's own cursor system apply the hand cursor.
+- **ObjC msg_send return types**: Always match the actual ObjC return type. `BOOL` methods
+  must use `let _: bool = msg_send![...]`, NOT `let _: () = ...`. Wrong type = bus error.
+- **NSString creation**: Use `stringWithUTF8String:` (takes `*const i8`), NOT
+  `initWithBytes:length:encoding:` (expects `*const c_void`, causes type mismatch crash).
 
 ## Workspace Structure
 ```
@@ -128,11 +139,19 @@ If unsure, ask rather than assume.
 - Triple-click in the URL bar selects the entire URL (standard browser behavior)
 - `on_mouse_down` on the url_row div checks `click_count >= 3`, dispatches `gpui_component::input::SelectAll`
 
+### Link Cursor (Hand Pointer)
+- GPUI overrides WKWebView's CSS cursor every paint frame — CSS `cursor:pointer` has no effect
+- `CURSOR_TRACKER_SCRIPT` tracks `mouseover`/`mouseout` on `<a>` elements, posts `{pointer: bool}` to `epocaCursor`
+- `EpocaCursorHandler` ObjC class → `CURSOR_CHANNEL` → `drain_cursor_events()` → `WebViewTab.cursor_pointer: bool`
+- `WebViewTab::render()` uses `.when(self.cursor_pointer, |d| d.cursor_pointer())` on the GPUI wrapper div
+- Entity update closure MUST call `ecx.notify()` when changing `cursor_pointer` — otherwise GPUI won't re-render
+
 ### Right-Click Link Context Menu
 - `CONTEXT_MENU_SCRIPT` (init script) intercepts `contextmenu` on `<a>` elements, `preventDefault()`, posts `{href, text, x, y}` to `epocaContextMenu`
 - `EpocaContextMenuHandler` ObjC class (`register_context_menu_handler(uc, webview_ptr)` in shield.rs), routes via `UC_MAP`, sends to `CONTEXT_MENU_CHANNEL`
-- Native NSMenu with: **Open in New Tab** (`open_webview_background`), **Open in New Window** (`cx.open_window`), **Open in Context ▸** (submenu per named context, experimental_contexts), **Copy Link Address** (`cx.write_to_clipboard`)
+- Native NSMenu with: **Open in New Tab** (`open_webview_background` + ripple), **Open in New Window** (`open_webview` foreground, true new-window deferred), **Open in Context ▸** (submenu per named context, experimental_contexts), **Copy Link Address** (`cx.write_to_clipboard`)
 - `EpocaMenuTarget` ObjC class with action selectors routes via `MENU_ACTION_CHANNEL` → `drain_menu_actions()` in `process_pending_nav`
+- **Ripple on "Open in New Tab"**: `set_menu_origin()` stores click position before NSMenu shows; `take_menu_origin()` retrieves it when OpenInNewTab fires; `trigger_ripple()` evaluates ripple JS on the source WebView (same visual as cmd-click ripple)
 - Non-link right-click falls through to native WKWebView context menu
 
 ### Sidebar

@@ -459,6 +459,122 @@ pub fn drain_favicon_events() -> Vec<(usize, String)> {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor channel — link hover state from epocaCursor JS
+// ---------------------------------------------------------------------------
+
+/// Channel for cursor hover events.
+/// Tuple: (webview_ptr, is_pointer) — true when hovering a link.
+static CURSOR_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, bool)>,
+    Mutex<mpsc::Receiver<(usize, bool)>>,
+)> = OnceLock::new();
+
+fn cursor_channel() -> &'static (
+    mpsc::SyncSender<(usize, bool)>,
+    Mutex<mpsc::Receiver<(usize, bool)>>,
+) {
+    CURSOR_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(128);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain pending cursor hover events.
+pub fn drain_cursor_events() -> Vec<(usize, bool)> {
+    let ch = cursor_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+/// Register the `epocaCursor` WKScriptMessageHandler. Receives:
+///   { pointer: true/false }
+#[cfg(target_os = "macos")]
+pub fn register_cursor_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: usize) {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+    use std::collections::HashMap;
+
+    static UC_MAP: LazyLock<Mutex<HashMap<usize, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaCursorHandler") {
+            return c;
+        }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaCursorHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                let body: *mut AnyObject = objc2::msg_send![message, body];
+                if body.is_null() { return; }
+
+                let key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"pointer\0".as_ptr() as *const i8
+                ];
+                let val: *mut AnyObject = objc2::msg_send![body, objectForKey: key];
+                if val.is_null() { return; }
+
+                let is_pointer: bool = objc2::msg_send![val, boolValue];
+
+                // Set NSCursor immediately — GPUI won't override it because
+                // it doesn't receive mouse events over the native WKWebView.
+                let cursor_cls = if is_pointer {
+                    let c: *mut AnyObject = objc2::msg_send![
+                        AnyClass::get("NSCursor").unwrap(), pointingHandCursor
+                    ];
+                    c
+                } else {
+                    let c: *mut AnyObject = objc2::msg_send![
+                        AnyClass::get("NSCursor").unwrap(), arrowCursor
+                    ];
+                    c
+                };
+                let _: () = objc2::msg_send![cursor_cls, set];
+
+                let uc_key = uc as usize;
+                if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                    let _ = cursor_channel().0.try_send((wv_ptr, is_pointer));
+                }
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+
+            if let Some(proto) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(proto);
+            }
+
+            builder.register()
+        }
+    });
+
+    UC_MAP.lock().unwrap().insert(uc as usize, webview_ptr);
+
+    unsafe {
+        let handler: *mut AnyObject = objc2::msg_send![*cls, new];
+        if handler.is_null() { return; }
+        let name: *mut AnyObject = objc2::msg_send![
+            AnyClass::get("NSString").unwrap(),
+            stringWithUTF8String: b"epocaCursor\0".as_ptr() as *const i8
+        ];
+        let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Context menu channel — right-click link events from epocaContextMenu JS
 // ---------------------------------------------------------------------------
 
@@ -612,6 +728,28 @@ pub fn register_context_menu_handler(uc: *mut objc2::runtime::AnyObject, webview
 // ---------------------------------------------------------------------------
 
 /// Actions that can come from the native context menu.
+/// Source position info for triggering ripple animation on the source tab.
+#[derive(Clone, Default)]
+pub struct MenuClickOrigin {
+    pub webview_ptr: usize,
+    pub x: f64,
+    pub y: f64,
+}
+
+/// Stores the click origin from the most recent context menu event so NSMenu
+/// action callbacks can include it for ripple animation.
+static LAST_MENU_ORIGIN: LazyLock<Mutex<MenuClickOrigin>> =
+    LazyLock::new(|| Mutex::new(MenuClickOrigin::default()));
+
+pub fn set_menu_origin(origin: MenuClickOrigin) {
+    *LAST_MENU_ORIGIN.lock().unwrap() = origin;
+}
+
+pub fn take_menu_origin() -> MenuClickOrigin {
+    let mut guard = LAST_MENU_ORIGIN.lock().unwrap();
+    std::mem::take(&mut *guard)
+}
+
 pub enum MenuAction {
     OpenInNewTab(String),
     OpenInNewWindow(String),

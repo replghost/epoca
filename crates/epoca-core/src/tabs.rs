@@ -1052,6 +1052,38 @@ document.addEventListener('click',function(e){
 },true);
 })();"#;
 
+/// Tracks mouse hover over links and posts cursor state to epocaCursor.
+/// GPUI overrides WKWebView's CSS cursor every frame, so we feed the hover
+/// state back through GPUI's own cursor system instead.
+/// Idempotent via window.__epocaCursorTracker guard.
+const CURSOR_TRACKER_SCRIPT: &str = r#"(function(){
+if(window.__epocaCursorTracker)return;
+window.__epocaCursorTracker=true;
+var _onLink=false;
+document.addEventListener('mouseover',function(e){
+  var el=e.target;
+  while(el&&el.tagName!=='A')el=el.parentElement;
+  if(el&&el.href&&!el.href.startsWith('javascript:')){
+    if(!_onLink){
+      _onLink=true;
+      if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaCursor)
+        window.webkit.messageHandlers.epocaCursor.postMessage({pointer:true});
+    }
+  }else if(_onLink){
+    _onLink=false;
+    if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaCursor)
+      window.webkit.messageHandlers.epocaCursor.postMessage({pointer:false});
+  }
+},true);
+document.addEventListener('mouseout',function(e){
+  if(!e.relatedTarget&&_onLink){
+    _onLink=false;
+    if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaCursor)
+      window.webkit.messageHandlers.epocaCursor.postMessage({pointer:false});
+  }
+},true);
+})();"#;
+
 /// Intercepts right-click (contextmenu) on links and posts to epocaContextMenu.
 /// If the click is not on a link, lets the native context menu through.
 /// Idempotent via window.__epocaCtxMenu guard.
@@ -1350,6 +1382,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_shield_handler(uc, webview_ptr);
         crate::shield::register_favicon_handler(uc, webview_ptr);
         crate::shield::register_context_menu_handler(uc, webview_ptr);
+        crate::shield::register_cursor_handler(uc, webview_ptr);
         webview_ptr
     }
 }
@@ -1376,6 +1409,10 @@ pub struct WebViewTab {
     pub webview_ptr: usize,
     /// Running count of cosmetic elements hidden by the shield on this tab.
     pub blocked_count: u32,
+    /// True when the mouse is hovering an `<a href>` link inside the WebView.
+    /// Drives `.cursor_pointer()` on the GPUI wrapper div so GPUI's cursor
+    /// system shows the hand cursor instead of overriding WKWebView's CSS cursor.
+    pub cursor_pointer: bool,
 }
 
 impl WebViewTab {
@@ -1452,6 +1489,7 @@ impl WebViewTab {
             .with_initialization_script(RIPPLE_SCRIPT)
             .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(CONTEXT_MENU_SCRIPT)
+            .with_initialization_script(CURSOR_TRACKER_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)
@@ -1488,6 +1526,7 @@ impl WebViewTab {
             sidebar_blocker_ptr,
             webview_ptr,
             blocked_count: 0,
+            cursor_pointer: false,
         }
     }
 
@@ -1516,6 +1555,12 @@ impl WebViewTab {
             wv.update(cx, |wv, _cx| {
                 wv.load_url(url);
             });
+        }
+    }
+
+    pub fn evaluate_script(&self, js: &str, cx: &App) {
+        if let Some(wv) = &self.webview {
+            let _ = wv.read(cx).raw().evaluate_script(js);
         }
     }
 
