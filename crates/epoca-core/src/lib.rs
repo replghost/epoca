@@ -6,6 +6,9 @@ pub mod shield;
 pub mod settings;
 pub mod chain;
 
+#[cfg(feature = "test-server")]
+pub mod test_server;
+
 /// GPUI global that tells any `WebViewTab` how far to shift its WKWebView
 /// bounds to the right, so the overlay sidebar can occupy that vacated zone
 /// without being obscured by the native view.

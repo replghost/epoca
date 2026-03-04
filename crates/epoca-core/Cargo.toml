@@ -18,6 +18,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 
+[features]
+test-server = []
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { workspace = true }
 objc2-foundation = { version = "0.2", features = ["NSGeometry"] }

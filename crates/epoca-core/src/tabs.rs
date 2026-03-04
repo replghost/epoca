@@ -1383,6 +1383,8 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_favicon_handler(uc, webview_ptr);
         crate::shield::register_context_menu_handler(uc, webview_ptr);
         crate::shield::register_cursor_handler(uc, webview_ptr);
+        #[cfg(feature = "test-server")]
+        crate::test_server::register_test_result_handler(uc, webview_ptr);
         webview_ptr
     }
 }
@@ -1673,9 +1675,25 @@ impl Render for WebViewTab {
                         .child(Label::new(err.clone())),
                 )
         } else if let Some(wv) = &self.webview {
+            let is_pointer = self.cursor_pointer;
             div()
                 .track_focus(&self.focus_handle)
                 .size_full()
+                .child(
+                    // Window-level cursor override during paint phase: bypasses GPUI's
+                    // hitbox hit-testing (which never sees mouse events over the native
+                    // WKWebView NSView sitting above GPUI's Metal layer).
+                    canvas(
+                        |_bounds, _window, _cx| {},
+                        move |_bounds, _, window, _cx| {
+                            if is_pointer {
+                                window.set_window_cursor_style(CursorStyle::PointingHand);
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
+                )
                 .child(wv.clone())
         } else {
             div()

@@ -91,9 +91,9 @@ pub enum SidebarMode {
 /// Arc browser-style workbench.
 pub struct Workbench {
     // Sidebar
-    sidebar_mode: SidebarMode,
+    pub(crate) sidebar_mode: SidebarMode,
     /// 0.0 = fully hidden, 1.0 = fully shown (drives layout + overlay position).
-    sidebar_anim: f32,
+    pub(crate) sidebar_anim: f32,
     /// The value `sidebar_anim` is animating toward (0.0 or 1.0).
     sidebar_target: f32,
     /// Running animation frame task — dropped to cancel.
@@ -105,17 +105,17 @@ pub struct Workbench {
     sidebar_anim_gen: u64,
 
     // Tabs
-    tabs: Vec<TabEntry>,
-    active_tab_id: Option<u64>,
+    pub(crate) tabs: Vec<TabEntry>,
+    pub(crate) active_tab_id: Option<u64>,
     next_tab_id: u64,
 
     // URL bar
-    url_input: Entity<InputState>,
+    pub(crate) url_input: Entity<InputState>,
     _url_subscription: Subscription,
     pending_nav: Option<String>,
 
     // Omnibox
-    omnibox_open: bool,
+    pub(crate) omnibox_open: bool,
     omnibox_input: Entity<InputState>,
     _omnibox_subscription: Subscription,
     omnibox_pending_nav: Option<String>,
@@ -152,6 +152,10 @@ impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Start shield bootstrap in background (list fetch + compile).
         init_shield(cx);
+
+        // Start embedded test server if EPOCA_TEST=1 is set.
+        #[cfg(feature = "test-server")]
+        crate::test_server::maybe_start();
 
         let url_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search or enter URL")
@@ -461,6 +465,10 @@ impl Workbench {
                 }
             }
         }
+
+        // Drain test server commands (no-op unless feature = "test-server")
+        #[cfg(feature = "test-server")]
+        crate::test_server::drain_test_commands(self, window, cx);
     }
 
     /// Show a native NSMenu at the right-click position for a link context menu event.
@@ -783,6 +791,15 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(value, window, inner_cx));
         cx.notify();
+    }
+
+    #[cfg(feature = "test-server")]
+    pub(crate) fn close_tab_by_id(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_tab(tab_id, window, cx);
+    }
+    #[cfg(feature = "test-server")]
+    pub(crate) fn switch_tab_by_id(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.switch_tab(tab_id, window, cx);
     }
 
     fn close_tab(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
