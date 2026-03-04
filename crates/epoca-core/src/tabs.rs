@@ -49,6 +49,7 @@ pub struct TabEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TabKind {
     Welcome,
+    Settings,
     CodeEditor { path: Option<String> },
     SandboxApp { app_id: String },
     DeclarativeApp { path: String },
@@ -1609,4 +1610,642 @@ impl Render for WebViewTab {
                 .child(Label::new("Loading..."))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Settings Panel
+// ---------------------------------------------------------------------------
+
+use crate::settings::{SearchEngine, SettingsGlobal};
+use crate::chain::ChainGlobal;
+use epoca_chain::{ChainId, ChainState, ConnectionBackend};
+use gpui::prelude::FluentBuilder;
+
+pub struct SettingsTab {
+    focus_handle: FocusHandle,
+    _refresh_task: gpui::Task<()>,
+}
+
+impl SettingsTab {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        // Refresh the UI every 2 seconds so chain status updates from background threads are visible.
+        let _refresh_task = cx.spawn(async move |this: WeakEntity<Self>, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            let done = cx
+                .update(|cx| {
+                    if let Some(entity) = this.upgrade() {
+                        entity.update(cx, |_, cx| cx.notify());
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .unwrap_or(true);
+            if done {
+                break;
+            }
+        });
+        Self {
+            focus_handle: cx.focus_handle(),
+            _refresh_task,
+        }
+    }
+}
+
+impl EventEmitter<PanelEvent> for SettingsTab {}
+
+impl Focusable for SettingsTab {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for SettingsTab {
+    fn panel_name(&self) -> &'static str {
+        "SettingsTab"
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Settings"
+    }
+
+    fn dump(&self, _cx: &App) -> PanelState {
+        PanelState::new(self)
+    }
+}
+
+impl Render for SettingsTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let settings = cx
+            .try_global::<SettingsGlobal>()
+            .map(|g| g.settings.clone())
+            .unwrap_or_default();
+
+        let isolated_tabs = settings.isolated_tabs;
+        let shield_enabled = settings.shield_enabled;
+        let experimental_chain = settings.experimental_chain;
+        let enabled_chains = settings.enabled_chains.clone();
+        let search_engine = settings.search_engine;
+        let open_links_in_background = settings.open_links_in_background;
+
+        // Chain statuses snapshot (read once for this render)
+        let chain_statuses: Option<Vec<epoca_chain::ChainStatus>> =
+            cx.try_global::<ChainGlobal>().map(|g| g.client.all_statuses());
+
+        let text_primary = rgba(0xffffffff);
+        let text_secondary = rgba(0xffffffaa);
+        let text_muted = rgba(0xffffff66);
+        let border_color = rgba(0xffffff14);
+        let section_bg = rgba(0xffffff08);
+
+        // ── Section header ────────────────────────────────────────────────────
+        let section_header = |label: &'static str| {
+            div()
+                .text_xs()
+                .text_color(text_muted)
+                .mb(px(4.0))
+                .child(label)
+        };
+
+        // ── Toggle row ────────────────────────────────────────────────────────
+        // We can't use a helper fn with cx.listener here (borrow issues), so
+        // each toggle is built inline below.
+
+        let toggle_pill = |on: bool| {
+            div()
+                .w(px(44.0))
+                .h(px(24.0))
+                .rounded_full()
+                .flex()
+                .items_center()
+                .px(px(2.0))
+                .bg(if on { rgba(0x22c55eff) } else { rgba(0x4b5563ff) })
+                .when(on, |d| d.justify_end())
+                .child(div().w(px(20.0)).h(px(20.0)).rounded_full().bg(gpui::white()))
+        };
+
+        // ── Chain status badge ────────────────────────────────────────────────
+        let status_badge = |state: &ChainState| -> AnyElement {
+            let (dot_color, label) = match state {
+                ChainState::Disconnected => {
+                    return div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(0x6b7280ff)))
+                        .child(div().text_xs().text_color(rgba(0x6b7280ff)).child("Disconnected"))
+                        .into_any_element();
+                }
+                ChainState::Connecting => {
+                    return div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(0xfbbf24ff)))
+                        .child(div().text_xs().text_color(rgba(0xfbbf24ff)).child("Connecting…"))
+                        .into_any_element();
+                }
+                ChainState::Syncing { best_block, peers } => {
+                    let label = if *peers > 0 {
+                        format!("Syncing #{best_block} | {peers} peers")
+                    } else {
+                        format!("Syncing #{best_block}")
+                    };
+                    (rgba(0xfbbf24ff), label)
+                }
+                ChainState::Live { best_block, peers } => {
+                    let label = if *peers > 0 {
+                        format!("Live #{best_block} | {peers} peers")
+                    } else {
+                        format!("Live #{best_block}")
+                    };
+                    (rgba(0x22c55eff), label)
+                }
+                ChainState::Error(_) => {
+                    return div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(0xef4444ff)))
+                        .child(div().text_xs().text_color(rgba(0xef4444ff)).child("Error"))
+                        .into_any_element();
+                }
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color))
+                .child(div().text_xs().text_color(dot_color).child(label))
+                .into_any_element()
+        };
+
+        // ── Assemble ──────────────────────────────────────────────────────────
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .overflow_y_hidden()
+            .px(px(28.0))
+            .py(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(24.0))
+            .child(
+                div()
+                    .text_lg()
+                    .text_color(text_primary)
+                    .child("Settings"),
+            )
+            // ── General section ───────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_header("GENERAL"))
+                    .child(
+                        div()
+                            .rounded(px(8.0))
+                            .bg(section_bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .overflow_hidden()
+                            // Isolated Tabs toggle
+                            .child(
+                                div()
+                                    .id("toggle-isolated")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.isolated_tabs = !g.settings.isolated_tabs;
+                                            g.save();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Isolated Tabs"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Each tab uses a private data store — no cookies, cache, or storage shared between tabs"),
+                                            ),
+                                    )
+                                    .child(toggle_pill(isolated_tabs)),
+                            )
+                            // Divider
+                            .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                            // Open Links in Background toggle
+                            .child(
+                                div()
+                                    .id("toggle-bg-links")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.open_links_in_background =
+                                                !g.settings.open_links_in_background;
+                                            g.save();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Open Links in Background"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Cmd-click opens links without switching tabs"),
+                                            ),
+                                    )
+                                    .child(toggle_pill(open_links_in_background)),
+                            )
+                            // Divider
+                            .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                            // Search engine selector
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Search Engine"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Default search when typing in the address bar"),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .children(SearchEngine::all().iter().map(|&engine| {
+                                                let is_active = engine == search_engine;
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "engine-{}",
+                                                        engine.display_name()
+                                                    )))
+                                                    .min_w(px(72.0))
+                                                    .text_xs()
+                                                    .px(px(8.0))
+                                                    .py(px(4.0))
+                                                    .rounded(px(4.0))
+                                                    .cursor_pointer()
+                                                    .text_color(if is_active {
+                                                        rgba(0xffffffff)
+                                                    } else {
+                                                        text_secondary
+                                                    })
+                                                    .bg(if is_active {
+                                                        rgba(0x22c55eff)
+                                                    } else {
+                                                        rgba(0xffffff14)
+                                                    })
+                                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                                        cx.update_global::<SettingsGlobal, _>(
+                                                            |g, _| {
+                                                                g.settings.search_engine = engine;
+                                                                g.save();
+                                                            },
+                                                        );
+                                                        cx.notify();
+                                                    }))
+                                                    .child(engine.display_name())
+                                            })),
+                                    ),
+                            ),
+                    ),
+            )
+            // ── Privacy section ───────────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_header("PRIVACY & BLOCKING"))
+                    .child(
+                        div()
+                            .rounded(px(8.0))
+                            .bg(section_bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .id("toggle-shield")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.shield_enabled = !g.settings.shield_enabled;
+                                            g.save();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Content Shield"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Block ads and trackers using EasyList + EasyPrivacy"),
+                                            ),
+                                    )
+                                    .child(toggle_pill(shield_enabled)),
+                            ),
+                    ),
+            )
+            // ── Experimental section ──────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_header("EXPERIMENTAL"))
+                    .child(
+                        div()
+                            .rounded(px(8.0))
+                            .bg(section_bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .overflow_hidden()
+                            // Blockchain Light Client master toggle
+                            .child(
+                                div()
+                                    .id("toggle-chain")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.experimental_chain =
+                                                !g.settings.experimental_chain;
+                                            // Disconnect all chains when disabling
+                                            if !g.settings.experimental_chain {
+                                                g.settings.enabled_chains.clear();
+                                            }
+                                            g.save();
+                                        });
+                                        // Stop all chain connections if disabled
+                                        if cx
+                                            .try_global::<SettingsGlobal>()
+                                            .map(|g| !g.settings.experimental_chain)
+                                            .unwrap_or(true)
+                                        {
+                                            if cx.has_global::<ChainGlobal>() {
+                                                cx.update_global::<ChainGlobal, _>(|g, _| {
+                                                    for &id in ChainId::all() {
+                                                        g.client.disconnect(id);
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Blockchain Light Client"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Directly sync chain state from the peer network — no central server required"),
+                                            ),
+                                    )
+                                    .child(toggle_pill(experimental_chain)),
+                            )
+                            // Individual chain rows (only when master toggle is on)
+                            .when(experimental_chain, |d| {
+                                let pol_enabled = enabled_chains.contains("PolkadotAssetHub");
+                                let pas_enabled = enabled_chains.contains("PaseoAssetHub");
+                                let pre_enabled = enabled_chains.contains("Previewnet");
+
+                                let pol_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PolkadotAssetHub))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+                                let pas_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PaseoAssetHub))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+                                let pre_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::Previewnet))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+
+                                d.child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pol-chain",
+                                        "Polkadot Asset Hub",
+                                        pol_enabled,
+                                        status_badge(&pol_state),
+                                        ChainId::PolkadotAssetHub,
+                                        &pol_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pas-chain",
+                                        "Paseo Asset Hub",
+                                        pas_enabled,
+                                        status_badge(&pas_state),
+                                        ChainId::PaseoAssetHub,
+                                        &pas_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pre-chain",
+                                        "Previewnet",
+                                        pre_enabled,
+                                        status_badge(&pre_state),
+                                        ChainId::Previewnet,
+                                        &pre_state,
+                                        cx,
+                                    ))
+                            }),
+                    ),
+            )
+    }
+}
+
+fn chain_row(
+    id: impl Into<ElementId>,
+    label: &'static str,
+    enabled: bool,
+    badge: AnyElement,
+    chain_id: ChainId,
+    state: &ChainState,
+    cx: &mut Context<SettingsTab>,
+) -> impl IntoElement {
+    let text_primary = rgba(0xffffffff);
+    let check_color = if enabled { rgba(0x22c55eff) } else { rgba(0x4b5563ff) };
+
+    // Show first-sync hint for smoldot chains that are still connecting or syncing
+    let show_first_sync_hint = chain_id.backend() == ConnectionBackend::Smoldot
+        && matches!(state, ChainState::Connecting | ChainState::Syncing { .. });
+
+    // Extract error message for inline display
+    let error_msg = match state {
+        ChainState::Error(msg) => Some(msg.clone()),
+        _ => None,
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .px(px(16.0))
+        .py(px(10.0))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.0))
+                // Checkbox indicator — only this is clickable
+                .child(
+                    div()
+                        .id(id.into())
+                        .w(px(16.0))
+                        .h(px(16.0))
+                        .rounded(px(3.0))
+                        .border_1()
+                        .border_color(check_color)
+                        .bg(if enabled { check_color } else { rgba(0x00000000) })
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            let mut now_enabled = false;
+                            cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                let key = format!("{chain_id:?}");
+                                if g.settings.enabled_chains.contains(&key) {
+                                    g.settings.enabled_chains.remove(&key);
+                                    now_enabled = false;
+                                } else {
+                                    g.settings.enabled_chains.insert(key);
+                                    now_enabled = true;
+                                }
+                                g.save();
+                            });
+                            if cx.has_global::<ChainGlobal>() {
+                                cx.update_global::<ChainGlobal, _>(|g, _| {
+                                    if now_enabled {
+                                        g.client.connect(chain_id);
+                                    } else {
+                                        g.client.disconnect(chain_id);
+                                    }
+                                });
+                            }
+                            cx.notify();
+                        }))
+                        .when(enabled, |d| {
+                            d.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(gpui::white())
+                                    .child("✓"),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_sm()
+                        .text_color(text_primary)
+                        .child(label),
+                )
+                .child(badge),
+        )
+        .when(show_first_sync_hint, |d| {
+            d.child(
+                div()
+                    .pl(px(28.0))
+                    .pt(px(2.0))
+                    .text_xs()
+                    .text_color(rgba(0xffffff55))
+                    .child("Initial sync may take a few minutes"),
+            )
+        })
+        .when_some(error_msg, |d, msg| {
+            d.child(
+                div()
+                    .pl(px(28.0))
+                    .pt(px(2.0))
+                    .text_xs()
+                    .text_color(rgba(0xef444499))
+                    .child(msg),
+            )
+        })
 }

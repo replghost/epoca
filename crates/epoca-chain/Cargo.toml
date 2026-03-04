@@ -1,0 +1,12 @@
+[package]
+name = "epoca-chain"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+tungstenite = { version = "0.24", features = ["native-tls"] }
+smoldot-light = { workspace = true }
+smol = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }

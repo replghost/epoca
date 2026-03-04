@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 epoca-core = { path = "../epoca-core" }
+epoca-chain = { path = "../epoca-chain" }
 epoca-sandbox = { path = "../epoca-sandbox" }
 epoca-protocol = { path = "../epoca-protocol" }
 epoca-broker = { path = "../epoca-broker" }

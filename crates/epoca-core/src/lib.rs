@@ -3,6 +3,8 @@ pub mod tabs;
 pub mod view_bridge;
 pub mod declarative;
 pub mod shield;
+pub mod settings;
+pub mod chain;
 
 /// GPUI global that tells any `WebViewTab` how far to shift its WKWebView
 /// bounds to the right, so the overlay sidebar can occupy that vacated zone

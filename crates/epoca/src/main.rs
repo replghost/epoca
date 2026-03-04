@@ -1,7 +1,10 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload};
+use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, OpenSettings};
+use epoca_core::settings::SettingsGlobal;
+use epoca_core::chain::ChainGlobal;
+use epoca_chain::ChainClient;
 
 // App-level actions (not workbench-scoped)
 actions!(epoca, [Quit, NewWindow]);
@@ -65,6 +68,7 @@ fn main() {
             KeyBinding::new("cmd-l", FocusUrlBar, None),
             KeyBinding::new("cmd-r", Reload, None),
             KeyBinding::new("cmd-shift-r", HardReload, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
         ]);
 
         // ── macOS menu bar ───────────────────────────────────────────────────
@@ -72,6 +76,8 @@ fn main() {
             Menu {
                 name: "Epoca".into(),
                 items: vec![
+                    MenuItem::action("Settings", OpenSettings),
+                    MenuItem::separator(),
                     MenuItem::os_submenu("Services", SystemMenuType::Services),
                     MenuItem::separator(),
                     MenuItem::action("Quit Epoca", Quit),
@@ -99,6 +105,22 @@ fn main() {
 
         // ── App-level action handlers ────────────────────────────────────────
         cx.on_action::<Quit>(|_, cx| cx.quit());
+
+        // Initialize settings and chain globals
+        let settings_global = SettingsGlobal::load();
+        let chain_client = ChainClient::new();
+
+        // Restore chain connections from saved settings
+        if settings_global.settings.experimental_chain {
+            for &id in epoca_chain::ChainId::all() {
+                if settings_global.settings.enabled_chains.contains(&format!("{id:?}")) {
+                    chain_client.connect(id);
+                }
+            }
+        }
+
+        cx.set_global(settings_global);
+        cx.set_global(ChainGlobal { client: chain_client });
 
         cx.spawn(async move |cx| {
             let opts = WindowOptions {

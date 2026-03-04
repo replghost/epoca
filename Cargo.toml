@@ -10,6 +10,7 @@ members = [
     "crates/epoca-android",
     "crates/epoca-guest-ui",
     "crates/epoca-shield",
+    "crates/epoca-chain",
 ]
 exclude = [
     "guest/counter",
@@ -41,3 +42,6 @@ cosmic-text = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "0.4"
 sentry = "0.45"
+tungstenite = { version = "0.24", features = ["native-tls"] }
+smoldot-light = { version = "0.19", default-features = false, features = ["std"] }
+smol = "2"

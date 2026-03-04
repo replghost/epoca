@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -70,7 +70,7 @@ fn is_window_fullscreen() -> bool {
 }
 
 use crate::tabs::{
-    CodeEditorTab, DeclarativeAppTab, SandboxAppTab, TabEntry, TabKind, WebViewTab,
+    CodeEditorTab, DeclarativeAppTab, SandboxAppTab, SettingsTab, TabEntry, TabKind, WebViewTab,
 };
 
 const SIDEBAR_W: f32 = 260.0;
@@ -123,9 +123,6 @@ pub struct Workbench {
     // Broker
     broker: Arc<Mutex<CapabilityBroker>>,
 
-    // Background-tab settings
-    /// When true, cmd-click opens tabs in the background (no active switch).
-    open_links_in_background: bool,
     /// When true, every new WebView tab gets a non-persistent data store
     /// (WKWebsiteDataStore.nonPersistentDataStore on macOS). No cookies,
     /// localStorage, or cache is shared between tabs or sessions.
@@ -182,7 +179,6 @@ impl Workbench {
             _omnibox_subscription,
             omnibox_pending_nav: None,
             broker: Arc::new(Mutex::new(broker)),
-            open_links_in_background: true,
             isolated_tabs: false,
         }
     }
@@ -320,8 +316,12 @@ impl Workbench {
         }
         // Drain cmd-click / new-tab events from JS
         let new_tabs = crate::shield::drain_nav_events();
+        let bg_links = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.open_links_in_background)
+            .unwrap_or(true);
         for (url, focus) in new_tabs {
-            if focus || !self.open_links_in_background {
+            if focus || !bg_links {
                 self.open_webview(url, window, cx);
             } else {
                 self.open_webview_background(url, window, cx);
@@ -436,7 +436,11 @@ impl Workbench {
             self.open_webview(url, window, cx);
         } else {
             let encoded = url_encode_query(text);
-            let url = format!("https://duckduckgo.com/?q={encoded}");
+            let search_engine = cx
+                .try_global::<crate::settings::SettingsGlobal>()
+                .map(|g| g.settings.search_engine)
+                .unwrap_or_default();
+            let url = search_engine.search_url(&encoded);
             self.open_webview(url, window, cx);
         }
     }
@@ -466,7 +470,7 @@ impl Workbench {
                 TabKind::DeclarativeApp { path } => path.clone(),
                 TabKind::SandboxApp { app_id } => app_id.clone(),
                 TabKind::CodeEditor { path } => path.clone().unwrap_or_default(),
-                TabKind::Welcome => String::new(),
+                TabKind::Welcome | TabKind::Settings => String::new(),
             })
             .unwrap_or_default();
         self.url_input
@@ -583,6 +587,29 @@ impl Workbench {
             });
             cx.notify();
         }
+    }
+
+    /// Open the Settings tab, or switch to it if already open.
+    pub fn open_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::Settings).map(|t| t.id) {
+            self.active_tab_id = Some(id);
+            cx.notify();
+            return;
+        }
+        let id = self.alloc_id();
+        let entity = cx.new(|cx| SettingsTab::new(cx));
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::Settings,
+            title: "Settings".to_string(),
+            icon: IconName::Settings,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+        });
+        self.active_tab_id = Some(id);
+        cx.notify();
     }
 
     pub fn reload_active_tab(&mut self, hard: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -956,7 +983,9 @@ impl Workbench {
                     .ghost()
                     .compact()
                     .icon(IconName::Settings)
-                    .on_click(cx.listener(|_, _, _, _| {})),
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.open_settings(window, cx);
+                    })),
             );
 
         // ── Assemble ──────────────────────────────────────────────────────
@@ -1117,7 +1146,13 @@ impl Workbench {
                             .when(has_tabs, |d| {
                                 d.border_t_1().border_color(rgba(0xffffff14))
                             })
-                            .child("↵  open URL or search DuckDuckGo"),
+                            .child({
+                                let engine_name = cx
+                                    .try_global::<crate::settings::SettingsGlobal>()
+                                    .map(|g| g.settings.search_engine.display_name())
+                                    .unwrap_or("DuckDuckGo");
+                                format!("↵  open URL or search {engine_name}")
+                            }),
                     ),
             )
     }
@@ -1229,6 +1264,7 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
+                    .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
             }
 
             // ---- Overlay: sidebar slides in as a modal over full-width content ----
@@ -1347,6 +1383,7 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &Reload, window, cx| this.reload_active_tab(false, window, cx)))
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
+                    .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
                             return;

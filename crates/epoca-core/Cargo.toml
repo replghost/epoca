@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+epoca-chain = { path = "../epoca-chain" }
 epoca-protocol = { path = "../epoca-protocol" }
 epoca-sandbox = { path = "../epoca-sandbox" }
 epoca-broker = { path = "../epoca-broker" }
