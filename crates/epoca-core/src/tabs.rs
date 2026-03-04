@@ -5,6 +5,8 @@ use gpui_component::input::{Input, InputState};
 use gpui_component::label::Label;
 use gpui_component::theme::ActiveTheme;
 use gpui_component::IconName;
+use gpui_component::scroll::ScrollableElement;
+use gpui_component::Sizable;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use epoca_broker::{CapabilityBroker, PermissionResult};
@@ -43,6 +45,8 @@ pub struct TabEntry {
     /// Favicon URL for WebView tabs — loaded via FAVICON_SCRIPT + epocaFavicon handler.
     /// None until the page reports its icon; falls back to `icon` field for display.
     pub favicon_url: Option<String>,
+    /// Session context ID — `None` = isolated (private), `Some(id)` = shared named context.
+    pub context_id: Option<String>,
 }
 
 /// The kind of tab that can be opened in the workbench.
@@ -1350,7 +1354,9 @@ pub struct WebViewTab {
 }
 
 impl WebViewTab {
-    pub fn new(url: String, isolated: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(url: String, context_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // None = isolated (private), Some = shared named context (persistent store)
+        let isolated = context_id.is_none();
         // Observe OverlayLeftInset so this entity is marked dirty — and therefore
         // re-painted by GPUI — whenever the sidebar animation moves. Without this,
         // GPUI may skip re-rendering the entity and the native WKWebView frame
@@ -1624,6 +1630,10 @@ use gpui::prelude::FluentBuilder;
 pub struct SettingsTab {
     focus_handle: FocusHandle,
     _refresh_task: gpui::Task<()>,
+    /// Input entities for editing context names, keyed by context id.
+    context_name_inputs: Vec<(String, Entity<InputState>)>,
+    /// Subscriptions for context name input blur events.
+    _context_subs: Vec<Subscription>,
 }
 
 impl SettingsTab {
@@ -1650,6 +1660,59 @@ impl SettingsTab {
         Self {
             focus_handle: cx.focus_handle(),
             _refresh_task,
+            context_name_inputs: Vec::new(),
+            _context_subs: Vec::new(),
+        }
+    }
+}
+
+impl SettingsTab {
+    /// Ensure context name inputs match the current settings contexts list.
+    fn sync_context_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        use gpui_component::input::InputEvent;
+
+        let contexts = cx
+            .try_global::<SettingsGlobal>()
+            .map(|g| g.settings.contexts.clone())
+            .unwrap_or_default();
+
+        // Rebuild if IDs differ
+        let current_ids: Vec<&str> = self.context_name_inputs.iter().map(|(id, _)| id.as_str()).collect();
+        let settings_ids: Vec<&str> = contexts.iter().map(|c| c.id.as_str()).collect();
+
+        if current_ids != settings_ids {
+            let mut subs = Vec::new();
+            self.context_name_inputs = contexts
+                .iter()
+                .map(|ctx| {
+                    let name = ctx.name.clone();
+                    let input = cx.new(|cx| {
+                        let mut s = InputState::new(window, cx);
+                        s.set_value(name, window, cx);
+                        s
+                    });
+                    // Save name to settings on blur or Enter
+                    let ctx_id = ctx.id.clone();
+                    let sub = cx.subscribe(&input, move |_this, entity, ev: &InputEvent, cx| {
+                        let should_save = matches!(ev, InputEvent::Blur | InputEvent::PressEnter { .. });
+                        if should_save {
+                            let new_name = entity.read(cx).value().to_string();
+                            let cid = ctx_id.clone();
+                            if !new_name.is_empty() {
+                                cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                    if let Some(c) = g.settings.contexts.iter_mut().find(|c| c.id == cid) {
+                                        c.name = new_name;
+                                    }
+                                    g.save();
+                                });
+                            }
+                        }
+                    });
+                    subs.push(sub);
+                    (ctx.id.clone(), input)
+                })
+                .collect();
+            self._context_subs = subs;
         }
     }
 }
@@ -1677,7 +1740,8 @@ impl Panel for SettingsTab {
 }
 
 impl Render for SettingsTab {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_context_inputs(window, cx);
         let settings = cx
             .try_global::<SettingsGlobal>()
             .map(|g| g.settings.clone())
@@ -1689,6 +1753,8 @@ impl Render for SettingsTab {
         let enabled_chains = settings.enabled_chains.clone();
         let search_engine = settings.search_engine;
         let open_links_in_background = settings.open_links_in_background;
+        let experimental_contexts = settings.experimental_contexts;
+        let session_contexts = settings.contexts.clone();
 
         // Chain statuses snapshot (read once for this render)
         let chain_statuses: Option<Vec<epoca_chain::ChainStatus>> =
@@ -1786,7 +1852,7 @@ impl Render for SettingsTab {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
-            .overflow_y_hidden()
+            .overflow_y_scrollbar()
             .px(px(28.0))
             .py(px(24.0))
             .flex()
@@ -2137,6 +2203,155 @@ impl Render for SettingsTab {
                             }),
                     ),
             )
+            // ── Session Contexts (experimental) ─────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_header("SESSION CONTEXTS"))
+                    .child(
+                        div()
+                            .rounded(px(8.0))
+                            .bg(section_bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .overflow_hidden()
+                            // Master toggle
+                            .child(
+                                div()
+                                    .id("toggle-contexts")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.experimental_contexts =
+                                                !g.settings.experimental_contexts;
+                                            g.save();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Session Contexts"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Create named contexts to share logins and cookies across tabs. Tabs without a context are fully private."),
+                                            ),
+                                    )
+                                    .child(toggle_pill(experimental_contexts)),
+                            )
+                            // Context list + add button (only when enabled)
+                            .when(experimental_contexts, |d| {
+                                let mut container = d;
+                                // Render each existing context with editable name
+                                for (idx, ctx) in session_contexts.iter().enumerate() {
+                                    let ctx_id = ctx.id.clone();
+                                    let dot_color = parse_hex_rgba(&ctx.color);
+                                    // Find the matching input entity
+                                    let name_input = self.context_name_inputs
+                                        .iter()
+                                        .find(|(id, _)| *id == ctx.id)
+                                        .map(|(_, e)| e.clone());
+                                    container = container
+                                        .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .px(px(16.0))
+                                                .py(px(6.0))
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap(px(8.0))
+                                                        .flex_1()
+                                                        .child(
+                                                            div()
+                                                                .w(px(8.0))
+                                                                .h(px(8.0))
+                                                                .rounded_full()
+                                                                .bg(dot_color),
+                                                        )
+                                                        .when_some(name_input, |d, input| {
+                                                            d.child(
+                                                                Input::new(&input)
+                                                                    .appearance(false)
+                                                                    .small(),
+                                                            )
+                                                        }),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id(SharedString::from(format!("del-ctx-{idx}")))
+                                                        .cursor_pointer()
+                                                        .text_xs()
+                                                        .text_color(rgba(0xef444499))
+                                                        .hover(|d| d.text_color(rgba(0xef4444ff)))
+                                                        .child("Delete")
+                                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                                            let cid = ctx_id.clone();
+                                                            cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                                                g.settings.contexts.retain(|c| c.id != cid);
+                                                                g.save();
+                                                            });
+                                                            cx.notify();
+                                                        })),
+                                                ),
+                                        );
+                                }
+                                // Add Context button
+                                container
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(
+                                        div()
+                                            .id("add-context")
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .px(px(16.0))
+                                            .py(px(10.0))
+                                            .cursor_pointer()
+                                            .text_color(rgba(0x3b82f6cc))
+                                            .hover(|d| d.text_color(rgba(0x3b82f6ff)))
+                                            .child(gpui_component::Icon::new(IconName::Plus).size(px(12.0)))
+                                            .child(div().text_sm().child("Add Context"))
+                                            .on_click(cx.listener(|_, _, _, cx| {
+                                                cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                                    let idx = g.settings.contexts.len();
+                                                    let color_idx = idx % crate::settings::DEFAULT_CONTEXT_COLORS.len();
+                                                    let color = crate::settings::DEFAULT_CONTEXT_COLORS[color_idx].to_string();
+                                                    let name = format!("Context {}", idx + 1);
+                                                    let id = format!("ctx-{}", uuid_v4_simple());
+                                                    g.settings.contexts.push(crate::settings::SessionContext {
+                                                        id,
+                                                        name,
+                                                        color,
+                                                    });
+                                                    g.save();
+                                                });
+                                                cx.notify();
+                                            })),
+                                    )
+                            }),
+                    ),
+            )
     }
 }
 
@@ -2248,4 +2463,29 @@ fn chain_row(
                     .child(msg),
             )
         })
+}
+
+/// Parse a "#rrggbb" hex color string to an Rgba value.
+fn parse_hex_rgba(hex: &str) -> Rgba {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return rgba(((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xff);
+        }
+    }
+    rgba(0xffffff66)
+}
+
+/// Simple pseudo-UUID (no external crate needed).
+fn uuid_v4_simple() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:016x}", t)
 }

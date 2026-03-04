@@ -49,6 +49,22 @@ fn default_true() -> bool {
     true
 }
 
+/// Preset colors for session contexts.
+pub const DEFAULT_CONTEXT_COLORS: &[&str] = &[
+    "#3b82f6", // blue
+    "#22c55e", // green
+    "#f59e0b", // amber
+    "#ef4444", // red
+    "#a855f7", // purple
+];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionContext {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub isolated_tabs: bool,
@@ -59,17 +75,23 @@ pub struct AppSettings {
     pub search_engine: SearchEngine,
     #[serde(default = "default_true")]
     pub open_links_in_background: bool,
+    #[serde(default)]
+    pub experimental_contexts: bool,
+    #[serde(default)]
+    pub contexts: Vec<SessionContext>,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            isolated_tabs: false,
+            isolated_tabs: true,
             shield_enabled: true,
             experimental_chain: false,
             enabled_chains: HashSet::new(),
             search_engine: SearchEngine::default(),
             open_links_in_background: true,
+            experimental_contexts: false,
+            contexts: Vec::new(),
         }
     }
 }

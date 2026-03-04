@@ -128,6 +128,13 @@ pub struct Workbench {
     /// localStorage, or cache is shared between tabs or sessions.
     /// Defeats per-tab metered paywalls and cross-tab tracking.
     pub isolated_tabs: bool,
+
+    /// Currently selected session context (experimental). `None` = private/isolated.
+    /// When `experimental_contexts` is on, new WebView tabs inherit this value.
+    pub active_context: Option<String>,
+
+    /// Whether the context picker dropdown is open.
+    context_picker_open: bool,
 }
 
 /// Extract the hostname from a URL string without pulling in the `url` crate.
@@ -180,6 +187,8 @@ impl Workbench {
             omnibox_pending_nav: None,
             broker: Arc::new(Mutex::new(broker)),
             isolated_tabs: false,
+            active_context: None,
+            context_picker_open: false,
         }
     }
 
@@ -518,8 +527,8 @@ impl Workbench {
         let id = self.alloc_id();
         let title = url_to_title(&url);
         let url_clone = url.clone();
-        let isolated = self.isolated_tabs;
-        let entity = cx.new(|cx| WebViewTab::new(url, isolated, window, cx));
+        let context_id = self.resolve_context_id(cx);
+        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -530,6 +539,7 @@ impl Workbench {
             pinned: false,
             nav: Some(nav),
             favicon_url: None,
+            context_id,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -548,8 +558,9 @@ impl Workbench {
         let id = self.alloc_id();
         let title = url_to_title(&url);
         let url_clone = url.clone();
-        let isolated = self.isolated_tabs;
-        let entity = cx.new(|cx| WebViewTab::new(url, isolated, window, cx));
+        // Background tabs (cmd-click) inherit context from the source (active) tab.
+        let context_id = self.active_tab_context_id();
+        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -560,6 +571,7 @@ impl Workbench {
             pinned: false,
             nav: Some(nav),
             favicon_url: None,
+            context_id,
         });
         // Do NOT change active_tab_id — stay on current tab.
         cx.notify();
@@ -569,6 +581,30 @@ impl Workbench {
     pub fn set_isolated_tabs(&mut self, isolated: bool, cx: &mut Context<Self>) {
         self.isolated_tabs = isolated;
         cx.notify();
+    }
+
+    /// Resolve the context_id for a new tab based on current settings.
+    /// When `experimental_contexts` is on: use `active_context`.
+    /// When off: `None` if `isolated_tabs` is true, otherwise `Some("default")` for shared.
+    fn resolve_context_id(&self, cx: &App) -> Option<String> {
+        let experimental = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_contexts)
+            .unwrap_or(false);
+        if experimental {
+            self.active_context.clone()
+        } else if self.isolated_tabs {
+            None // isolated → incognito
+        } else {
+            Some("default".to_string()) // shared persistent store
+        }
+    }
+
+    /// Get context_id of the currently active tab (for background opens inheriting context).
+    fn active_tab_context_id(&self) -> Option<String> {
+        self.active_tab_id.and_then(|id| {
+            self.tabs.iter().find(|t| t.id == id).and_then(|t| t.context_id.clone())
+        })
     }
 
     /// Toggle the shield exception for the active tab's hostname.
@@ -607,6 +643,7 @@ impl Workbench {
             pinned: false,
             nav: None,
             favicon_url: None,
+            context_id: None,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -648,6 +685,7 @@ impl Workbench {
             pinned: false,
             nav: None,
             favicon_url: None,
+            context_id: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -678,6 +716,7 @@ impl Workbench {
             pinned: false,
             nav: None,
             favicon_url: None,
+            context_id: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -708,6 +747,7 @@ impl Workbench {
             pinned: false,
             nav: None,
             favicon_url: None,
+            context_id: None,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -840,6 +880,173 @@ impl Workbench {
         // The outer div owns the visual border/bg; Input is appearance=false
         // so it doesn't add a second bg/border layer. Size::Small reduces
         // horizontal padding from 12px → 8px, tightening the globe and X gaps.
+        let experimental_contexts_on = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_contexts)
+            .unwrap_or(false);
+        let all_contexts = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.contexts.clone())
+            .unwrap_or_default();
+        let active_ctx = self.active_context.clone();
+
+        // Context indicator dot — sits inside the URL bar prefix, left of the globe.
+        // Colored dot = named context, EyeOff icon = private. Click opens dropdown.
+        let url_prefix: AnyElement = if experimental_contexts_on {
+            let dot_color = match &active_ctx {
+                None => None,
+                Some(id) => all_contexts
+                    .iter()
+                    .find(|c| c.id == *id)
+                    .and_then(|c| parse_hex_color(&c.color)),
+            };
+            div()
+                .id("ctx-dot")
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.context_picker_open = !this.context_picker_open;
+                    cx.notify();
+                }))
+                .when_some(dot_color, |d, color| {
+                    d.child(
+                        div()
+                            .w(px(7.0))
+                            .h(px(7.0))
+                            .rounded_full()
+                            .bg(color)
+                            .flex_shrink_0(),
+                    )
+                })
+                .when(dot_color.is_none(), |d| {
+                    d.child(Icon::new(IconName::EyeOff).size(px(12.0)).text_color(rgba(0xffffff55)))
+                })
+                .child(Icon::new(IconName::Globe).size(px(13.0)))
+                .into_any_element()
+        } else {
+            Icon::new(IconName::Globe).size(px(13.0)).into_any_element()
+        };
+
+        // Context dropdown — rendered below the URL bar when open
+        let context_picker_open = self.context_picker_open;
+        let context_dropdown = if experimental_contexts_on && context_picker_open {
+            let active_id = active_ctx.clone();
+            let mut rows: Vec<AnyElement> = Vec::new();
+
+            // "Private" option
+            let is_private = active_id.is_none();
+            rows.push(
+                div()
+                    .id("ctx-private")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgba(0xffffff14)))
+                    .when(is_private, |d| d.bg(rgba(0xffffff0c)))
+                    .child(Icon::new(IconName::EyeOff).size(px(12.0)).text_color(rgba(0xffffff55)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(if is_private { rgba(0xffffffff) } else { rgba(0xffffffaa) })
+                            .child("Private"),
+                    )
+                    .when(is_private, |d| {
+                        d.child(Icon::new(IconName::Check).size(px(11.0)).text_color(rgba(0x22c55eff)))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.active_context = None;
+                        this.context_picker_open = false;
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+            );
+
+            // Named contexts
+            for ctx in &all_contexts {
+                let ctx_id = ctx.id.clone();
+                let ctx_name = ctx.name.clone();
+                let dot_color = parse_hex_color(&ctx.color).unwrap_or(rgba(0xffffff44));
+                let is_active = active_id.as_deref() == Some(&ctx.id);
+                let click_id = ctx_id.clone();
+                rows.push(
+                    div()
+                        .id(SharedString::from(format!("ctx-{}", ctx.id)))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(rgba(0xffffff14)))
+                        .when(is_active, |d| d.bg(rgba(0xffffff0c)))
+                        .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color).flex_shrink_0())
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(if is_active { rgba(0xffffffff) } else { rgba(0xffffffaa) })
+                                .child(ctx_name),
+                        )
+                        .when(is_active, |d| {
+                            d.child(Icon::new(IconName::Check).size(px(11.0)).text_color(rgba(0x22c55eff)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_context = Some(click_id.clone());
+                            this.context_picker_open = false;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+            }
+
+            // Position below url bar: top_row(38) + url margin(4) + url height(~32) + gap(2)
+            Some(
+                div()
+                    .absolute()
+                    .top(px(76.0))
+                    .left(px(8.0))
+                    .right(px(8.0))
+                    .rounded(px(8.0))
+                    .bg(rgba(0x1e1e1eff))
+                    .border_1()
+                    .border_color(rgba(0xffffff22))
+                    .shadow_lg()
+                    .p(px(4.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.0))
+                    .children(rows),
+            )
+        } else {
+            None
+        };
+
+        // Backdrop to dismiss dropdown when clicking outside
+        let context_backdrop = if experimental_contexts_on && context_picker_open {
+            Some(
+                div()
+                    .id("ctx-backdrop")
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .size_full()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.context_picker_open = false;
+                        cx.notify();
+                    })),
+            )
+        } else {
+            None
+        };
+
         let url_row = div()
             .mx(px(8.0))
             .mt(px(4.0))
@@ -852,9 +1059,21 @@ impl Workbench {
                 Input::new(&self.url_input)
                     .appearance(false)
                     .small()
-                    .prefix(Icon::new(IconName::Globe).size(px(13.0)))
+                    .prefix(url_prefix)
                     .cleanable(true),
             );
+
+        // ── Context color lookup ─────────────────────────────────────────
+        let contexts = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.contexts.clone())
+            .unwrap_or_default();
+        let context_color_for = move |ctx_id: &Option<String>| -> Option<Rgba> {
+            let id = ctx_id.as_deref()?;
+            if id == "default" { return None; } // non-experimental shared store has no dot
+            let ctx = contexts.iter().find(|c| c.id == id)?;
+            parse_hex_color(&ctx.color)
+        };
 
         // ── Helper: build one tab row ─────────────────────────────────────
         // Returns AnyElement so we can collect pinned and regular tabs
@@ -865,6 +1084,7 @@ impl Workbench {
                             title: SharedString,
                             is_active: bool,
                             _pinned: bool,
+                            context_color: Option<Rgba>,
                             cx: &mut Context<Self>| {
             let close_icon = IconName::Close;
             let close_id = SharedString::from(format!("close-{tab_id}"));
@@ -894,6 +1114,10 @@ impl Workbench {
                 .cursor_pointer()
                 .when(is_active, |d| d.bg(item_active_bg))
                 .when(!is_active, |d| d.hover(|d| d.bg(item_hover_bg)))
+                // Context dot — 4px colored circle left of icon when tab has a context
+                .when_some(context_color, |d, color| {
+                    d.child(div().w(px(4.0)).h(px(4.0)).rounded_full().bg(color).flex_shrink_0())
+                })
                 .child(
                     Icon::new(icon).size(px(13.0)).text_color(icon_color),
                 )
@@ -919,6 +1143,7 @@ impl Workbench {
             .iter()
             .filter(|t| t.pinned)
             .map(|t| {
+                let cc = context_color_for(&t.context_id);
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
@@ -926,6 +1151,7 @@ impl Workbench {
                     SharedString::from(t.title.clone()),
                     Some(t.id) == self.active_tab_id,
                     true,
+                    cc,
                     cx,
                 )
             })
@@ -937,6 +1163,7 @@ impl Workbench {
             .iter()
             .filter(|t| !t.pinned)
             .map(|t| {
+                let cc = context_color_for(&t.context_id);
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
@@ -944,6 +1171,7 @@ impl Workbench {
                     SharedString::from(t.title.clone()),
                     Some(t.id) == self.active_tab_id,
                     false,
+                    cc,
                     cx,
                 )
             })
@@ -1019,6 +1247,7 @@ impl Workbench {
             });
 
         div()
+            .relative()
             .flex()
             .flex_col()
             .w(px(SIDEBAR_W))
@@ -1030,6 +1259,9 @@ impl Workbench {
             .child(url_row)
             .child(tabs_area)
             .child(bottom_bar)
+            // Context picker overlay — painted last so it sits on top of tabs
+            .children(context_backdrop)
+            .children(context_dropdown)
     }
 
     // ------------------------------------------------------------------
@@ -1438,4 +1670,16 @@ fn url_to_title(url: &str) -> String {
         .next()
         .unwrap_or(url)
         .to_string()
+}
+
+/// Parse a "#rrggbb" hex color string to an Rgba value.
+fn parse_hex_color(hex: &str) -> Option<Rgba> {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() != 6 { return None; }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(rgba(
+        ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | 0xff,
+    ))
 }
