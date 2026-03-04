@@ -124,6 +124,17 @@ If unsure, ask rather than assume.
 - `Workbench::process_pending_nav` drains title events and updates `TabEntry.title` on match
 - Idempotent via `window.__epocaTitleTracker` guard (safe across SPA navigations)
 
+### URL Bar Triple-Click
+- Triple-click in the URL bar selects the entire URL (standard browser behavior)
+- `on_mouse_down` on the url_row div checks `click_count >= 3`, dispatches `gpui_component::input::SelectAll`
+
+### Right-Click Link Context Menu
+- `CONTEXT_MENU_SCRIPT` (init script) intercepts `contextmenu` on `<a>` elements, `preventDefault()`, posts `{href, text, x, y}` to `epocaContextMenu`
+- `EpocaContextMenuHandler` ObjC class (`register_context_menu_handler(uc, webview_ptr)` in shield.rs), routes via `UC_MAP`, sends to `CONTEXT_MENU_CHANNEL`
+- Native NSMenu with: **Open in New Tab** (`open_webview_background`), **Open in New Window** (`cx.open_window`), **Open in Context ▸** (submenu per named context, experimental_contexts), **Copy Link Address** (`cx.write_to_clipboard`)
+- `EpocaMenuTarget` ObjC class with action selectors routes via `MENU_ACTION_CHANNEL` → `drain_menu_actions()` in `process_pending_nav`
+- Non-link right-click falls through to native WKWebView context menu
+
 ### Sidebar
 - Pinned mode: sidebar in flex flow, fixed width
 - Overlay mode: sidebar slides in over content; hides on mouse-out

@@ -49,9 +49,8 @@ Three interlocking advantages no other browser can replicate:
 
 - [ ] **Sidebar layout bug**: content not extending to left edge when sidebar
   collapses (`_inset_subscription` fix landed — needs validation)
-- [ ] **Omnibox focus**: ensure omnibox input auto-focuses when opened
-- [ ] **WelcomeTab startup**: app should open omnibox immediately on launch,
-  not an empty grey screen
+- [x] ~~**Omnibox focus**: ensure omnibox input auto-focuses when opened~~ (done — `new_tab()` calls `window.focus(&focus_handle)`)
+- [x] ~~**WelcomeTab startup**: app should open omnibox immediately on launch~~ (done — `new_tab(window, cx)` called on startup)
 - [ ] **Crash on fast sidebar toggle**: rapid toggle can leave animation task
   in inconsistent state
 
@@ -59,7 +58,7 @@ Three interlocking advantages no other browser can replicate:
 
 ## P1 — Privacy & Content Blocking (deeper than Brave)
 
-**Architecture:** Six-layer pipeline in new `epoca-shield` crate.
+**Architecture:** Six-layer pipeline in `epoca-shield` crate.
 See `docs/content-blocking.md` for the full design document.
 
 **Why this beats Chrome uBlock Origin:**
@@ -68,25 +67,22 @@ undetectable by pages. Chrome Manifest V3 extensions run in the renderer. Brave
 uses the same WKContentRuleList on macOS but Epoca adds CNAME uncloaking and
 video-overlay sweeping which Brave does not have.
 
-### P0 — Infrastructure (must land first)
-- [ ] Create `epoca-shield` crate with `ShieldConfig`, `CompiledRuleSet`, `ShieldManager`
-- [ ] HTTP list fetcher with ETag caching to `~/.epoca/content-rules/lists/`
-- [ ] ABP/uBlock filter parser → WKContentRuleList JSON compiler (45k-rule bucket splitting)
-- [ ] Install compiled rule lists on `WebViewTab` construction via objc2 bridge
-- [ ] Register `epocaShield` `WKScriptMessageHandler` for blocked-count telemetry
-- [ ] `ShieldManager` GPUI global in `epoca-core/src/shield.rs`
+### P0 — Infrastructure ✅ DONE
+- [x] Create `epoca-shield` crate with `ShieldConfig`, `CompiledRuleSet`, `ShieldManager`
+- [x] HTTP list fetcher with ETag caching to `~/.epoca/content-rules/lists/`
+- [x] ABP/uBlock filter parser → WKContentRuleList JSON compiler (45k-rule bucket splitting)
+- [x] Install compiled rule lists on `WebViewTab` construction via objc2 bridge
+- [x] Register `epocaShield` `WKScriptMessageHandler` for blocked-count telemetry
+- [x] `ShieldManager` GPUI global in `epoca-core/src/shield.rs`
 
-### P1 — Core blocking
-- [ ] EasyList + EasyPrivacy + AdGuard Base → `epoca-rules-*` lists
-- [ ] Cosmetic compiler: `##` rules → CSS injection via `WKUserScript` (document_end)
+### P1 — Core blocking (partially done)
+- [x] EasyList + EasyPrivacy + AdGuard Base → `epoca-rules-*` lists
+- [x] Cosmetic compiler: `##` rules → CSS injection via `WKUserScript` (document_end)
 - [ ] `window.open` block: `createWebViewWith` delegate denial + document_start override
-- [ ] **Shield status UI** — design a clear way to show the user whether the shield is
-  active for the current site (blocked count, network vs cosmetic breakdown) and let
-  them toggle per-site exceptions without confusion. Current globe icon is white/static;
-  backend infrastructure (`toggle_site_exception`, `blocked_count`, `ShieldGlobal`) is
-  ready. Needs UX design before wiring up. (Backlogged 2026-03-03)
-- [ ] Settings page: toggle lists, per-domain exceptions
-- [ ] Background update loop (6-hour interval)
+- [x] **Shield status UI** — Eye/EyeOff icon, per-site toggle popover, blocked count badge
+- [x] Settings page: toggle shield on/off
+- [x] Background update loop (6-hour interval)
+- [ ] Per-domain exception list management in Settings (currently only toggle from URL bar)
 - [ ] uBlock Annoyances + Fanboy Annoyance lists (cookie banners, overlay ads)
 - [ ] User TOML rule format: `~/.epoca/content-rules/user-rules.toml`
 
@@ -119,18 +115,6 @@ video-overlay sweeping which Brave does not have.
 - [ ] Twitch ad stream restore after segment block
 - [ ] Learned CNAME map persistence across sessions
 
-**Epoca vs Brave comparison:**
-
-| Capability | Brave | Epoca (planned) |
-|---|---|---|
-| Network blocking | EasyList/EasyPrivacy | + AdGuard + video CDN lists |
-| Cosmetic filtering | Yes | Yes + overlay sweeper |
-| CNAME uncloaking | No | Yes (DNS layer) |
-| Video ad skipping | Basic DASH | DASH + JS skip + overlay removal |
-| Cookie consent | Manual | Auto-dismiss (reject-only) |
-| Fingerprint protection | Canvas/WebGL/audio | + font limits + screen rounding |
-| Anti-anti-adblock | No | Stub injection + style proxy |
-
 ---
 
 ## P1 — First-Class Browser Features
@@ -142,30 +126,27 @@ video-overlay sweeping which Brave does not have.
 - [ ] Reading list / bookmarks (local, no sync account required)
 
 ### Tab Management
-- [ ] Tab groups / workspaces (like Arc's spaces, but stored as ZML files — shareable)
-- [ ] Session restore on launch
+- [x] ~~Session contexts~~ (experimental — named contexts to share cookies across tab groups)
+- [ ] Session restore on launch (persist open tabs to disk, reopen on next launch)
 - [ ] Duplicate tab
 - [ ] Drag-to-reorder in sidebar
 - [ ] Pin/unpin tab (UI wired but persistence not implemented)
-- [ ] Tab search (filter sidebar by title/URL)
+- [ ] Tab search (filter sidebar by title/URL — omnibox partially does this)
 - [ ] Mute tab audio
 
 ### UI / UX
-- [ ] **Crash reporting** — use compile-time env var: `option_env!("SENTRY_DSN").unwrap_or("")` in `main.rs` so debug/source builds send nothing; set `SENTRY_DSN` in CI for official releases only.
-  - Sentry UI: set rate limit (e.g. 1000 events/min) to prevent quota abuse
-  - Sentry UI: enable inbound filters (no stack trace, legacy platforms)
-  - Add opt-out flag or env var so users can disable crash reporting at runtime
-  - README: document crash reporting transparently — "Official builds include Sentry; source builds do not unless you set `SENTRY_DSN` yourself" (see Zed, Lapce for examples)
-- [ ] Keyboard shortcut system (⌘T new tab → omnibox, ⌘W close tab, ⌘L focus URL)
-- [ ] Per-tab favicon fetched and displayed (replace static IconName::Globe)
+- [x] ~~**Crash reporting**~~ — Sentry integrated with compile-time `SENTRY_DSN` env var
+- [x] ~~**Keyboard shortcut system**~~ — ⌘T, ⌘W, ⌘L, ⌘R, ⌘⇧R, ⌘Q, ⌘N, ⌘, all wired
+- [x] ~~**Multi-window support**~~ — ⌘N opens new window with cascading offset
+- [x] ~~**Per-tab favicon fetched and displayed**~~ — FAVICON_SCRIPT + epocaFavicon handler
 - [ ] Dark/light mode toggle (system follow already works via WKWebView theme)
-- [ ] Page title propagated from WKWebView navigation delegate to sidebar tab entry
+- [x] ~~**Page title propagated**~~ — TITLE_TRACKER_SCRIPT + epocaMeta handler updates sidebar
 - [ ] Find-in-page (⌘F)
 - [ ] Full-screen mode (hide sidebar, maximize content)
 
 ### Testing
-- [ ] GPUI `#[gpui::test]` — headless unit/integration tests for workbench logic via `TestAppContext`; no display needed, runs in CI
-- [ ] Appium Mac2Driver — E2E UI testing via macOS Accessibility API (Playwright-like for native Mac apps); covers sidebar, omnibox, tab lifecycle
+- [ ] GPUI `#[gpui::test]` — headless unit/integration tests for workbench logic via `TestAppContext`
+- [ ] Appium Mac2Driver — E2E UI testing via macOS Accessibility API
 
 ---
 
@@ -215,15 +196,15 @@ video-overlay sweeping which Brave does not have.
 ## P1 — Security & Sandboxing (QA/Architect review findings)
 
 ### Critical security gaps
-- [x] **PolkaVM gas limit** — `SandboxConfig` has no `max_gas_per_update`; a looping guest `update()` blocks the main thread forever. Add `max_gas_per_update: u64` (default 50M) and call `instance.set_gas()` before each `call_update`. `CallError::NotEnoughGas` → show "app timed out" error to user.
-- [x] **App ID collision via filename** — two `counter.zml` files in different directories share the same broker permission set. Use canonical path (or Blake3 hash of path + content) as app_id in `DeclarativeAppTab` and `SandboxAppTab`.
-- [ ] **ZML actions not broker-checked at execution time** — `exec_actions` runs actions without consulting the broker. Add per-action broker checks for fetch/storage/clipboard before the capability is implemented to avoid accidental escalation.
-- [ ] **Network fetch is fully stubbed** — broker allows fetch but nothing executes. When implementing: run on background thread (GPUI background executor), cap response size (10 MB), reject redirect chains outside declared domain.
-- [ ] **Permission store in cwd** — `epoca_permissions.json` lives in the working directory; any local process can escalate permissions by editing it. Move to `~/Library/Application Support/Epoca/` on macOS; add note about future read-only admin policy layer at `/Library/Managed Preferences/`.
+- [x] **PolkaVM gas limit** — implemented in `SandboxConfig`
+- [x] **App ID collision via filename** — uses canonical path
+- [ ] **ZML actions not broker-checked at execution time** — `exec_actions` runs actions without consulting the broker. Add per-action broker checks for fetch/storage/clipboard.
+- [ ] **Network fetch is fully stubbed** — broker allows fetch but nothing executes. When implementing: run on background thread, cap response size (10 MB), reject redirect chains outside declared domain.
+- [ ] **Permission store in cwd** — `epoca_permissions.json` lives in the working directory. Move to `~/Library/Application Support/Epoca/` on macOS.
 
 ### QA findings (from automated review)
-- [ ] **Broker lock poisoning ignored** — all `broker.lock()` calls silently discard poisoning. Recover with `poisoned.into_inner()` and log the error so permission failures are visible.
-- [ ] **ZML state reset heuristic too coarse** — state is fully reset if state-block *count* changes. Should compare variable names instead, so adding a new `@state` preserves existing values.
+- [ ] **Broker lock poisoning ignored** — all `broker.lock()` calls silently discard poisoning. Recover with `poisoned.into_inner()` and log the error.
+- [ ] **ZML state reset heuristic too coarse** — state is fully reset if state-block *count* changes. Should compare variable names instead.
 - [ ] **`find_node_by_callback` unbounded recursion** — malformed ZML with deeply nested views could stack-overflow. Add a depth limit (e.g. 1000).
 
 ---
@@ -231,40 +212,70 @@ video-overlay sweeping which Brave does not have.
 ## P2 — Architecture (Architect review findings)
 
 ### Tab system
-- [x] **`TabBehavior` / `NavHandler` trait** — `Workbench` calls `entity.downcast::<WebViewTab>()` in every navigation method. Add a `NavHandler` trait (or vtable struct) stored in `TabEntry` so adding a new navigable tab type requires zero changes in `workbench.rs`. (Implemented — eliminates all downcast call sites.)
-- [ ] **`TabKind` closed enum** — adding split-view, PiP, WASM, or AI tabs requires a new variant and a new match arm everywhere. Long-term, migrate to a trait-based or capability-flag model.
-- [ ] **Pause PolkaVM poll for inactive tabs** — each `SandboxAppTab` spawns an unconditional 33 ms timer. With 20 open tabs = 600 ms of wakeups/sec. Skip `call_update` when the tab is not the active one.
+- [x] ~~**`NavHandler` trait**~~ — implemented, eliminates all downcast call sites
+- [ ] **`TabKind` closed enum** — adding split-view, PiP, WASM, or AI tabs requires a new variant. Long-term, migrate to trait-based or capability-flag model.
+- [ ] **Pause PolkaVM poll for inactive tabs** — each `SandboxAppTab` spawns an unconditional 33 ms timer. Skip `call_update` when the tab is not active.
 
 ### Platform abstraction
-- [ ] **macOS ObjC code inlined in `tabs.rs` / `workbench.rs`** — all `#[cfg(target_os = "macos")]` HAL functions should move to a `platform/macos.rs` module (or a future `epoca-platform-hal` crate) behind a `PlatformHal` trait. Enables Linux/Windows porting without auditing workbench logic.
-- [ ] **`sidebar_blocker_ptr: u64` unsound** — raw `*mut AnyObject` stored as integer. Wrap in `struct SidebarBlocker(*mut AnyObject)` with `unsafe impl Send` and a documented safety invariant.
-- [ ] **`CHROME: f32 = 10.0` duplicated** — `update_sidebar_blocker` duplicates the chrome inset from `workbench.rs`. Extract to a shared constant.
+- [ ] **macOS ObjC code inlined in `tabs.rs` / `workbench.rs`** — move to `platform/macos.rs` module behind a `PlatformHal` trait for Linux/Windows porting.
+- [ ] **`sidebar_blocker_ptr: u64` unsound** — raw `*mut AnyObject` stored as integer. Wrap in `struct SidebarBlocker(*mut AnyObject)` with `unsafe impl Send`.
+- [ ] **`CHROME: f32 = 10.0` duplicated** — extract to a shared constant.
 
 ### State management
-- [ ] **GPUI globals not scalable** — `OverlayLeftInset` and `OmniboxOpen` cause O(n tabs) ObjC calls per animation frame. Migrate to a `TabCommand` enum that `Workbench` fans out to each tab entity via `entity.update(cx, ...)`.
+- [ ] **GPUI globals not scalable** — `OverlayLeftInset` and `OmniboxOpen` cause O(n tabs) ObjC calls per animation frame. Migrate to a `TabCommand` enum.
 
 ---
 
 ## P2 — Distribution & Auto-Update
 
-- [ ] **macOS .app packaging** — use `cargo-bundle` (or custom `build.sh`) to produce a properly structured `.app` bundle; wire `Info.plist`, icon set, and entitlements.
-- [ ] **Code signing + notarization** — `codesign --deep --timestamp` with an Apple Developer certificate; `xcrun notarytool` for Gatekeeper clearance. Required before any public distribution.
-- [ ] **Sparkle auto-updater** — integrate Sparkle 2 via objc2 bindings (`SparkleUpdater` wrapper crate); host a signed `appcast.xml` on a CDN (e.g. `updates.getepoca.com`); call `checkForUpdatesInBackground` at launch. Sparkle handles delta updates, Ed25519 signature verification, and the native macOS update UI.
-- [ ] **Linux: AppImage + self-update** — produce `.AppImage` with `appimage-update` for delta updates.
-- [ ] **Windows: signed MSI** — use `cargo-wix` or `msiexec` with a signed MSI installer.
-- [ ] **GitHub Releases** (interim) — `self_update` crate for in-app update check pointing at GitHub Releases API; zero infrastructure needed.
+- [ ] **macOS .app packaging** — `cargo-bundle` or custom `build.sh` for `.app` bundle with `Info.plist`, icon set, entitlements.
+- [ ] **Code signing + notarization** — `codesign --deep --timestamp` + `xcrun notarytool` for Gatekeeper.
+- [ ] **Sparkle auto-updater** — Sparkle 2 via objc2; host signed `appcast.xml` on CDN.
+- [ ] **Linux: AppImage + self-update**
+- [ ] **Windows: signed MSI**
+- [ ] **GitHub Releases** (interim) — `self_update` crate for in-app update check.
 
 ---
 
 ## P3 — Moonshots
 
-- [ ] **WASM guest apps**: compile Rust/TS/Python to WASM, run as sandboxed tabs —
-  a superset of PolkaVM
+- [ ] **WASM guest apps**: compile Rust/TS/Python to WASM, run as sandboxed tabs
 - [ ] **Decentralized content**: IPFS/Arweave tab renderer, ENS domain support
-- [ ] **Hardware attestation**: verify page JS hasn't been tampered with using
-  reproducible builds + WASM attestation
+- [ ] **Hardware attestation**: verify page JS via reproducible builds + WASM attestation
 - [ ] **Browser-as-IDE**: CodeEditorTab with LSP support, run local dev servers as tabs
 - [ ] **Physical-world tabs**: NFC/QR scanner as a tab type (mobile)
+
+---
+
+## What's Next — Product Thinking
+
+### Immediate (next 1-2 sessions)
+The biggest gap between "project" and "product" is **session restore** + **history**. Without
+these, closing the app loses all state. Users won't adopt a browser that forgets everything.
+
+1. **Session restore on launch** — serialize open tabs (URLs + context IDs) to
+   `~/.epoca/session.json` on quit/crash; reopen on next launch. Low effort, high impact.
+2. **Find-in-page (⌘F)** — table-stakes browser feature. WKWebView exposes
+   `evaluateJavaScript("window.find(...)")` or the native `WKWebView._findString:` SPI.
+3. **Sidebar bug validation** — the P0 sidebar layout bug needs a definitive test.
+
+### Short-term (next 2-4 sessions)
+4. **Browsing history** — SQLite-backed history with omnibox autocomplete. This is
+   foundational for bookmarks, reading list, and sync later.
+5. **Bookmarks / reading list** — local JSON or SQLite store, no account required.
+6. **macOS .app packaging** — makes it shareable. Currently requires `cargo run`.
+
+### Medium-term
+7. **Find-in-page** and **back/forward swipe gestures** round out the browser basics.
+8. **Tab drag-to-reorder** and **pin persistence** improve daily usability.
+9. **Distribution** — code signing + notarization + Sparkle for auto-update.
+
+### What to deprioritize
+- **Fingerprinting protection** and **CNAME uncloaking** are impressive technically but
+  won't be noticed by early adopters who are already on macOS (Safari's ITP handles most
+  tracking). Ship these after the browser basics are solid.
+- **Android** — park until macOS is feature-complete enough to share.
+- **Local AI** — exciting but premature until the core browser loop is polished.
 
 ---
 

@@ -8,6 +8,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **URL bar triple-click select-all** — Triple-clicking the URL bar selects the entire URL, matching
+  standard browser behavior. Uses `on_mouse_down` with `click_count >= 3` to dispatch
+  `gpui_component::input::SelectAll`. (2026-03-04)
+
+- **Right-click link context menu** — Right-clicking a link in any WebView shows a native NSMenu with:
+  Open in New Tab, Open in New Window, Open in Context (submenu, when experimental contexts enabled),
+  and Copy Link Address. `CONTEXT_MENU_SCRIPT` (init script) intercepts `contextmenu` events on `<a>` tags,
+  posts via `epocaContextMenu` WKScriptMessageHandler (`EpocaContextMenuHandler` ObjC class,
+  `CONTEXT_MENU_CHANNEL`). NSMenu actions route back via `MENU_ACTION_CHANNEL` → `drain_menu_actions()`
+  in `process_pending_nav`. `EpocaMenuTarget` ObjC class handles selector callbacks. (2026-03-04)
+
 - **Favicon in tab list** — Sidebar tab rows show the site's favicon instead of the generic
   globe icon. `FAVICON_SCRIPT` finds the best `<link rel="icon">` URL or falls back to
   `/favicon.ico`, posts via `epocaFavicon` WKScriptMessageHandler (`EpocaFaviconHandler`

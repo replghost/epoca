@@ -1052,6 +1052,30 @@ document.addEventListener('click',function(e){
 },true);
 })();"#;
 
+/// Intercepts right-click (contextmenu) on links and posts to epocaContextMenu.
+/// If the click is not on a link, lets the native context menu through.
+/// Idempotent via window.__epocaCtxMenu guard.
+const CONTEXT_MENU_SCRIPT: &str = r#"(function(){
+if(window.__epocaCtxMenu)return;
+window.__epocaCtxMenu=true;
+document.addEventListener('contextmenu',function(e){
+  var el=e.target;
+  while(el&&el.tagName!=='A')el=el.parentElement;
+  if(!el||!el.href)return;
+  var url=el.href;
+  if(!url||url.startsWith('javascript:'))return;
+  e.preventDefault();
+  if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaContextMenu){
+    window.webkit.messageHandlers.epocaContextMenu.postMessage({
+      href:url,
+      text:(el.textContent||'').trim().substring(0,200),
+      x:e.clientX,
+      y:e.clientY
+    });
+  }
+},true);
+})();"#;
+
 /// Injected into every page at document creation time. Styles the WebKit
 /// scrollbar to match the dark chrome look (same technique Arc uses).
 const SCROLLBAR_CSS_SCRIPT: &str = r#"(function(){
@@ -1325,6 +1349,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_meta_handler(uc, webview_ptr);
         crate::shield::register_shield_handler(uc, webview_ptr);
         crate::shield::register_favicon_handler(uc, webview_ptr);
+        crate::shield::register_context_menu_handler(uc, webview_ptr);
         webview_ptr
     }
 }
@@ -1426,6 +1451,7 @@ impl WebViewTab {
             .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(RIPPLE_SCRIPT)
             .with_initialization_script(FAVICON_SCRIPT)
+            .with_initialization_script(CONTEXT_MENU_SCRIPT)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)
@@ -2078,132 +2104,7 @@ impl Render for SettingsTab {
                             ),
                     ),
             )
-            // ── Experimental section ──────────────────────────────────────────
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.0))
-                    .child(section_header("EXPERIMENTAL"))
-                    .child(
-                        div()
-                            .rounded(px(8.0))
-                            .bg(section_bg)
-                            .border_1()
-                            .border_color(border_color)
-                            .overflow_hidden()
-                            // Blockchain Light Client master toggle
-                            .child(
-                                div()
-                                    .id("toggle-chain")
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .px(px(16.0))
-                                    .py(px(12.0))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
-                                            g.settings.experimental_chain =
-                                                !g.settings.experimental_chain;
-                                            // Disconnect all chains when disabling
-                                            if !g.settings.experimental_chain {
-                                                g.settings.enabled_chains.clear();
-                                            }
-                                            g.save();
-                                        });
-                                        // Stop all chain connections if disabled
-                                        if cx
-                                            .try_global::<SettingsGlobal>()
-                                            .map(|g| !g.settings.experimental_chain)
-                                            .unwrap_or(true)
-                                        {
-                                            if cx.has_global::<ChainGlobal>() {
-                                                cx.update_global::<ChainGlobal, _>(|g, _| {
-                                                    for &id in ChainId::all() {
-                                                        g.client.disconnect(id);
-                                                    }
-                                                });
-                                            }
-                                        }
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .flex_col()
-                                            .gap(px(2.0))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(text_primary)
-                                                    .child("Blockchain Light Client"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(text_secondary)
-                                                    .child("Directly sync chain state from the peer network — no central server required"),
-                                            ),
-                                    )
-                                    .child(toggle_pill(experimental_chain)),
-                            )
-                            // Individual chain rows (only when master toggle is on)
-                            .when(experimental_chain, |d| {
-                                let pol_enabled = enabled_chains.contains("PolkadotAssetHub");
-                                let pas_enabled = enabled_chains.contains("PaseoAssetHub");
-                                let pre_enabled = enabled_chains.contains("Previewnet");
-
-                                let pol_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PolkadotAssetHub))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
-                                let pas_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PaseoAssetHub))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
-                                let pre_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::Previewnet))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
-
-                                d.child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
-                                    .child(chain_row(
-                                        "pol-chain",
-                                        "Polkadot Asset Hub",
-                                        pol_enabled,
-                                        status_badge(&pol_state),
-                                        ChainId::PolkadotAssetHub,
-                                        &pol_state,
-                                        cx,
-                                    ))
-                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
-                                    .child(chain_row(
-                                        "pas-chain",
-                                        "Paseo Asset Hub",
-                                        pas_enabled,
-                                        status_badge(&pas_state),
-                                        ChainId::PaseoAssetHub,
-                                        &pas_state,
-                                        cx,
-                                    ))
-                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
-                                    .child(chain_row(
-                                        "pre-chain",
-                                        "Previewnet",
-                                        pre_enabled,
-                                        status_badge(&pre_state),
-                                        ChainId::Previewnet,
-                                        &pre_state,
-                                        cx,
-                                    ))
-                            }),
-                    ),
-            )
-            // ── Session Contexts (experimental) ─────────────────────────────
+            // ── Session Contexts ─────────────────────────────────────────────
             .child(
                 div()
                     .flex()
@@ -2349,6 +2250,131 @@ impl Render for SettingsTab {
                                                 cx.notify();
                                             })),
                                     )
+                            }),
+                    ),
+            )
+            // ── Experimental section ──────────────────────────────────────────
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(section_header("EXPERIMENTAL"))
+                    .child(
+                        div()
+                            .rounded(px(8.0))
+                            .bg(section_bg)
+                            .border_1()
+                            .border_color(border_color)
+                            .overflow_hidden()
+                            // Blockchain Light Client master toggle
+                            .child(
+                                div()
+                                    .id("toggle-chain")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.experimental_chain =
+                                                !g.settings.experimental_chain;
+                                            // Disconnect all chains when disabling
+                                            if !g.settings.experimental_chain {
+                                                g.settings.enabled_chains.clear();
+                                            }
+                                            g.save();
+                                        });
+                                        // Stop all chain connections if disabled
+                                        if cx
+                                            .try_global::<SettingsGlobal>()
+                                            .map(|g| !g.settings.experimental_chain)
+                                            .unwrap_or(true)
+                                        {
+                                            if cx.has_global::<ChainGlobal>() {
+                                                cx.update_global::<ChainGlobal, _>(|g, _| {
+                                                    for &id in ChainId::all() {
+                                                        g.client.disconnect(id);
+                                                    }
+                                                });
+                                            }
+                                        }
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Blockchain Light Client"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("Directly sync chain state from the peer network — no central server required"),
+                                            ),
+                                    )
+                                    .child(toggle_pill(experimental_chain)),
+                            )
+                            // Individual chain rows (only when master toggle is on)
+                            .when(experimental_chain, |d| {
+                                let pol_enabled = enabled_chains.contains("PolkadotAssetHub");
+                                let pas_enabled = enabled_chains.contains("PaseoAssetHub");
+                                let pre_enabled = enabled_chains.contains("Previewnet");
+
+                                let pol_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PolkadotAssetHub))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+                                let pas_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PaseoAssetHub))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+                                let pre_state = chain_statuses
+                                    .as_ref()
+                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::Previewnet))
+                                    .map(|s| s.state.clone())
+                                    .unwrap_or(ChainState::Disconnected);
+
+                                d.child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pol-chain",
+                                        "Polkadot Asset Hub",
+                                        pol_enabled,
+                                        status_badge(&pol_state),
+                                        ChainId::PolkadotAssetHub,
+                                        &pol_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pas-chain",
+                                        "Paseo Asset Hub",
+                                        pas_enabled,
+                                        status_badge(&pas_state),
+                                        ChainId::PaseoAssetHub,
+                                        &pas_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "pre-chain",
+                                        "Previewnet",
+                                        pre_enabled,
+                                        status_badge(&pre_state),
+                                        ChainId::Previewnet,
+                                        &pre_state,
+                                        cx,
+                                    ))
                             }),
                     ),
             )

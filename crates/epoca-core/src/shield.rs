@@ -458,6 +458,197 @@ pub fn drain_favicon_events() -> Vec<(usize, String)> {
     events
 }
 
+// ---------------------------------------------------------------------------
+// Context menu channel — right-click link events from epocaContextMenu JS
+// ---------------------------------------------------------------------------
+
+/// A right-click-on-link event from page JS.
+pub struct ContextMenuEvent {
+    pub href: String,
+    pub text: String,
+    pub x: f64,
+    pub y: f64,
+    pub webview_ptr: usize,
+}
+
+static CONTEXT_MENU_CHANNEL: OnceLock<(
+    mpsc::SyncSender<ContextMenuEvent>,
+    Mutex<mpsc::Receiver<ContextMenuEvent>>,
+)> = OnceLock::new();
+
+fn context_menu_channel() -> &'static (
+    mpsc::SyncSender<ContextMenuEvent>,
+    Mutex<mpsc::Receiver<ContextMenuEvent>>,
+) {
+    CONTEXT_MENU_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(32);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain pending context menu events (called every render frame from Workbench).
+pub fn drain_context_menu_events() -> Vec<ContextMenuEvent> {
+    let ch = context_menu_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+/// Register the `epocaContextMenu` WKScriptMessageHandler. Receives:
+///   { href: '...', text: '...', x: N, y: N }
+#[cfg(target_os = "macos")]
+pub fn register_context_menu_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: usize) {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+    use std::collections::HashMap;
+
+    static UC_MAP: LazyLock<Mutex<HashMap<usize, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaContextMenuHandler") {
+            return c;
+        }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaContextMenuHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                let body: *mut AnyObject = objc2::msg_send![message, body];
+                if body.is_null() { return; }
+
+                let href_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"href\0".as_ptr() as *const i8
+                ];
+                let text_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"text\0".as_ptr() as *const i8
+                ];
+                let x_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"x\0".as_ptr() as *const i8
+                ];
+                let y_key: *mut AnyObject = objc2::msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"y\0".as_ptr() as *const i8
+                ];
+
+                let href_val: *mut AnyObject = objc2::msg_send![body, objectForKey: href_key];
+                let text_val: *mut AnyObject = objc2::msg_send![body, objectForKey: text_key];
+                let x_val: *mut AnyObject = objc2::msg_send![body, objectForKey: x_key];
+                let y_val: *mut AnyObject = objc2::msg_send![body, objectForKey: y_key];
+                if href_val.is_null() { return; }
+
+                let href_cstr: *const i8 = objc2::msg_send![href_val, UTF8String];
+                if href_cstr.is_null() { return; }
+                let href = std::ffi::CStr::from_ptr(href_cstr)
+                    .to_string_lossy()
+                    .to_string();
+                if href.is_empty() { return; }
+
+                let text = if text_val.is_null() {
+                    String::new()
+                } else {
+                    let cstr: *const i8 = objc2::msg_send![text_val, UTF8String];
+                    if cstr.is_null() {
+                        String::new()
+                    } else {
+                        std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string()
+                    }
+                };
+
+                let x: f64 = if x_val.is_null() { 0.0 } else { objc2::msg_send![x_val, doubleValue] };
+                let y: f64 = if y_val.is_null() { 0.0 } else { objc2::msg_send![y_val, doubleValue] };
+
+                let uc_key = uc as usize;
+                if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                    let _ = context_menu_channel().0.try_send(ContextMenuEvent {
+                        href,
+                        text,
+                        x,
+                        y,
+                        webview_ptr: wv_ptr,
+                    });
+                }
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+
+            if let Some(proto) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(proto);
+            }
+
+            builder.register()
+        }
+    });
+
+    UC_MAP.lock().unwrap().insert(uc as usize, webview_ptr);
+
+    unsafe {
+        let handler: *mut AnyObject = objc2::msg_send![*cls, new];
+        if handler.is_null() { return; }
+        let name: *mut AnyObject = objc2::msg_send![
+            AnyClass::get("NSString").unwrap(),
+            stringWithUTF8String: b"epocaContextMenu\0".as_ptr() as *const i8
+        ];
+        let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Menu action channel — NSMenu item callbacks route through here
+// ---------------------------------------------------------------------------
+
+/// Actions that can come from the native context menu.
+pub enum MenuAction {
+    OpenInNewTab(String),
+    OpenInNewWindow(String),
+    OpenInContext(String, String), // (url, context_id)
+    CopyLink(String),
+}
+
+static MENU_ACTION_CHANNEL: OnceLock<(
+    mpsc::SyncSender<MenuAction>,
+    Mutex<mpsc::Receiver<MenuAction>>,
+)> = OnceLock::new();
+
+fn menu_action_channel() -> &'static (
+    mpsc::SyncSender<MenuAction>,
+    Mutex<mpsc::Receiver<MenuAction>>,
+) {
+    MENU_ACTION_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(32);
+        (tx, Mutex::new(rx))
+    })
+}
+
+pub fn send_menu_action(action: MenuAction) {
+    let _ = menu_action_channel().0.try_send(action);
+}
+
+/// Drain pending menu action events.
+pub fn drain_menu_actions() -> Vec<MenuAction> {
+    let ch = menu_action_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
 /// Register the `epocaFavicon` WKScriptMessageHandler. Receives:
 ///   { type: 'faviconFound', url: '...' }
 #[cfg(target_os = "macos")]

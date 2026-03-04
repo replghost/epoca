@@ -389,6 +389,238 @@ impl Workbench {
             }
             if changed { cx.notify(); }
         }
+        // Drain right-click context menu events from JS
+        let ctx_events = crate::shield::drain_context_menu_events();
+        for ev in ctx_events {
+            #[cfg(target_os = "macos")]
+            self.show_link_context_menu(&ev, cx);
+        }
+        // Drain NSMenu action callbacks
+        let menu_actions = crate::shield::drain_menu_actions();
+        for action in menu_actions {
+            match action {
+                crate::shield::MenuAction::OpenInNewTab(url) => {
+                    self.open_webview_background(url, window, cx);
+                }
+                crate::shield::MenuAction::OpenInNewWindow(url) => {
+                    let url2 = url.clone();
+                    let _ = cx.open_window(
+                        gpui::WindowOptions {
+                            titlebar: Some(gpui::TitlebarOptions {
+                                appears_transparent: true,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        },
+                        |window, cx| {
+                            cx.new(|cx| {
+                                let mut wb = Workbench::new(window, cx);
+                                wb.open_webview(url2, window, cx);
+                                wb
+                            })
+                        },
+                    );
+                }
+                crate::shield::MenuAction::OpenInContext(url, context_id) => {
+                    let saved = self.active_context.clone();
+                    self.active_context = Some(context_id);
+                    self.open_webview_background(url, window, cx);
+                    self.active_context = saved;
+                }
+                crate::shield::MenuAction::CopyLink(url) => {
+                    cx.write_to_clipboard(ClipboardItem::new_string(url));
+                }
+            }
+        }
+    }
+
+    /// Show a native NSMenu at the right-click position for a link context menu event.
+    #[cfg(target_os = "macos")]
+    fn show_link_context_menu(&self, ev: &crate::shield::ContextMenuEvent, cx: &App) {
+        use objc2::msg_send;
+        use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
+        use objc2_foundation::NSPoint;
+        use crate::shield::{send_menu_action, MenuAction};
+
+        // ── Build the EpocaMenuTarget ObjC class (one-time) ────────────────
+        // Each menu item action routes through a static channel.
+        static TARGET_CLASS: std::sync::OnceLock<&'static AnyClass> = std::sync::OnceLock::new();
+        let cls = TARGET_CLASS.get_or_init(|| {
+            if let Some(c) = AnyClass::get("EpocaMenuTarget") {
+                return c;
+            }
+            unsafe {
+                let superclass = AnyClass::get("NSObject").unwrap();
+                let mut builder = ClassBuilder::new("EpocaMenuTarget", superclass).unwrap();
+
+                unsafe extern "C" fn open_new_tab(
+                    _this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject,
+                ) {
+                    let rep: *mut AnyObject = msg_send![sender, representedObject];
+                    if rep.is_null() { return; }
+                    let cstr: *const i8 = msg_send![rep, UTF8String];
+                    if cstr.is_null() { return; }
+                    let url = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    send_menu_action(MenuAction::OpenInNewTab(url));
+                }
+                unsafe extern "C" fn open_new_window(
+                    _this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject,
+                ) {
+                    let rep: *mut AnyObject = msg_send![sender, representedObject];
+                    if rep.is_null() { return; }
+                    let cstr: *const i8 = msg_send![rep, UTF8String];
+                    if cstr.is_null() { return; }
+                    let url = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    send_menu_action(MenuAction::OpenInNewWindow(url));
+                }
+                unsafe extern "C" fn copy_link(
+                    _this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject,
+                ) {
+                    let rep: *mut AnyObject = msg_send![sender, representedObject];
+                    if rep.is_null() { return; }
+                    let cstr: *const i8 = msg_send![rep, UTF8String];
+                    if cstr.is_null() { return; }
+                    let url = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    send_menu_action(MenuAction::CopyLink(url));
+                }
+                unsafe extern "C" fn open_in_context(
+                    _this: *mut AnyObject, _sel: Sel, sender: *mut AnyObject,
+                ) {
+                    // representedObject is "url\ncontext_id"
+                    let rep: *mut AnyObject = msg_send![sender, representedObject];
+                    if rep.is_null() { return; }
+                    let cstr: *const i8 = msg_send![rep, UTF8String];
+                    if cstr.is_null() { return; }
+                    let s = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+                    if let Some((url, ctx)) = s.split_once('\n') {
+                        send_menu_action(MenuAction::OpenInContext(url.to_string(), ctx.to_string()));
+                    }
+                }
+
+                builder.add_method(
+                    objc2::sel!(openNewTab:),
+                    open_new_tab as unsafe extern "C" fn(_, _, _),
+                );
+                builder.add_method(
+                    objc2::sel!(openNewWindow:),
+                    open_new_window as unsafe extern "C" fn(_, _, _),
+                );
+                builder.add_method(
+                    objc2::sel!(copyLink:),
+                    copy_link as unsafe extern "C" fn(_, _, _),
+                );
+                builder.add_method(
+                    objc2::sel!(openInContext:),
+                    open_in_context as unsafe extern "C" fn(_, _, _),
+                );
+
+                builder.register()
+            }
+        });
+
+        unsafe {
+            let target: *mut AnyObject = msg_send![*cls, new];
+            if target.is_null() { return; }
+
+            let ns_string = AnyClass::get("NSString").unwrap();
+            let ns_menu = AnyClass::get("NSMenu").unwrap();
+            let ns_menu_item = AnyClass::get("NSMenuItem").unwrap();
+
+            // Helper: create an NSString from a Rust &str
+            // Helper: create an NSString from a Rust &str.
+            // Appends a NUL byte so stringWithUTF8String: sees a valid C string.
+            macro_rules! nsstr {
+                ($s:expr) => {{
+                    let mut buf = $s.as_bytes().to_vec();
+                    buf.push(0);
+                    let ns: *mut AnyObject = msg_send![
+                        ns_string,
+                        stringWithUTF8String: buf.as_ptr() as *const i8
+                    ];
+                    ns
+                }};
+            }
+
+            let href_ns = nsstr!(&ev.href);
+
+            // Helper: create an NSMenuItem with title, action selector, target, and representedObject
+            macro_rules! make_item {
+                ($title:expr, $sel:expr, $rep:expr) => {{
+                    let item: *mut AnyObject = msg_send![ns_menu_item, new];
+                    let title_ns = nsstr!($title);
+                    let _: () = msg_send![item, setTitle: title_ns];
+                    let _: () = msg_send![item, setAction: $sel];
+                    let _: () = msg_send![item, setTarget: target];
+                    let _: () = msg_send![item, setRepresentedObject: $rep];
+                    let _: () = msg_send![item, setEnabled: objc2::ffi::YES];
+                    item
+                }};
+            }
+
+            // Build NSMenu
+            let menu: *mut AnyObject = msg_send![ns_menu, new];
+            let _: () = msg_send![menu, setAutoenablesItems: objc2::ffi::NO];
+
+            // "Open in New Tab"
+            let item1 = make_item!("Open in New Tab", objc2::sel!(openNewTab:), href_ns);
+            let _: () = msg_send![menu, addItem: item1];
+
+            // "Open in New Window"
+            let item2 = make_item!("Open in New Window", objc2::sel!(openNewWindow:), href_ns);
+            let _: () = msg_send![menu, addItem: item2];
+
+            // "Open in Context ▸" submenu (only when experimental_contexts is on)
+            let experimental_contexts_on = cx
+                .try_global::<crate::settings::SettingsGlobal>()
+                .map(|g| g.settings.experimental_contexts)
+                .unwrap_or(false);
+            if experimental_contexts_on {
+                let all_contexts = cx
+                    .try_global::<crate::settings::SettingsGlobal>()
+                    .map(|g| g.settings.contexts.clone())
+                    .unwrap_or_default();
+                if !all_contexts.is_empty() {
+                    let submenu: *mut AnyObject = msg_send![ns_menu, new];
+                    for ctx in &all_contexts {
+                        let rep = format!("{}\n{}", ev.href, ctx.id);
+                        let rep_ns = nsstr!(&rep);
+                        let ctx_item = make_item!(&ctx.name, objc2::sel!(openInContext:), rep_ns);
+                        let _: () = msg_send![submenu, addItem: ctx_item];
+                    }
+                    let ctx_parent: *mut AnyObject = msg_send![ns_menu_item, new];
+                    let ctx_parent_title = nsstr!("Open in Context");
+                    let _: () = msg_send![ctx_parent, setTitle: ctx_parent_title];
+                    let _: () = msg_send![ctx_parent, setSubmenu: submenu];
+                    let _: () = msg_send![menu, addItem: ctx_parent];
+                }
+            }
+
+            // Separator
+            let sep: *mut AnyObject = msg_send![ns_menu_item, separatorItem];
+            let _: () = msg_send![menu, addItem: sep];
+
+            // "Copy Link Address"
+            let item3 = make_item!("Copy Link Address", objc2::sel!(copyLink:), href_ns);
+            let _: () = msg_send![menu, addItem: item3];
+
+            // ── Find the WKWebView NSView to anchor the menu ───────────
+            // Use the webview_ptr to find the correct WKWebView NSView.
+            let wv_ptr = ev.webview_ptr as *mut AnyObject;
+
+            // WKWebView is a flipped NSView (isFlipped = YES), so CSS
+            // (clientX, clientY) maps directly to the view's local
+            // coordinate system. JS clientX/clientY are already in CSS
+            // (logical) pixels, which matches NSView points on macOS.
+            let location = NSPoint { x: ev.x, y: ev.y };
+
+            // Pop up the menu at the computed position in the WKWebView.
+            let _: () = msg_send![
+                menu,
+                popUpMenuPositioningItem: std::ptr::null::<AnyObject>()
+                atLocation: location
+                inView: wv_ptr
+            ];
+        }
     }
 
     fn close_omnibox(&mut self, cx: &mut Context<Self>) {
@@ -1048,6 +1280,7 @@ impl Workbench {
         };
 
         let url_row = div()
+            .id("url-bar")
             .mx(px(8.0))
             .mt(px(4.0))
             .mb(px(10.0))
@@ -1055,6 +1288,11 @@ impl Workbench {
             .bg(url_bar_bg)
             .border_1()
             .border_color(rgba(0xffffff22))
+            .on_mouse_down(MouseButton::Left, cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+                if event.click_count >= 3 {
+                    window.dispatch_action(Box::new(gpui_component::input::SelectAll), _cx);
+                }
+            }))
             .child(
                 Input::new(&self.url_input)
                     .appearance(false)
