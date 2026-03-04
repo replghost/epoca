@@ -17,6 +17,26 @@ enum OpenTarget {
     WebView(String),
 }
 
+fn new_window_opts() -> WindowOptions {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static WINDOW_COUNT: AtomicU32 = AtomicU32::new(0);
+    let n = WINDOW_COUNT.fetch_add(1, Ordering::Relaxed);
+    let offset = (n % 20) as f32 * 22.0; // cascade, wrap after 20
+
+    WindowOptions {
+        titlebar: Some(TitlebarOptions {
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(18.0), px(12.0))),
+            ..Default::default()
+        }),
+        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+            point(px(100.0 + offset), px(100.0 + offset)),
+            size(px(1280.0), px(800.0)),
+        ))),
+        ..Default::default()
+    }
+}
+
 fn main() {
     // Crash reporting. Set SENTRY_DSN to your project DSN to enable.
     // Silently no-ops if the variable is absent.
@@ -63,6 +83,7 @@ fn main() {
         // ── Keyboard shortcuts ───────────────────────────────────────────────
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-n", NewWindow, None),
             KeyBinding::new("cmd-t", NewTab, None),
             KeyBinding::new("cmd-w", CloseActiveTab, None),
             KeyBinding::new("cmd-l", FocusUrlBar, None),
@@ -105,6 +126,21 @@ fn main() {
 
         // ── App-level action handlers ────────────────────────────────────────
         cx.on_action::<Quit>(|_, cx| cx.quit());
+        cx.on_action::<NewWindow>(|_, cx| {
+            cx.spawn(async move |cx| {
+                cx.open_window(new_window_opts(), |window, cx| {
+                    let workbench = cx.new(|cx| {
+                        let mut wb = Workbench::new(window, cx);
+                        wb.new_tab(window, cx);
+                        wb
+                    });
+                    let view: AnyView = workbench.into();
+                    cx.new(|cx| Root::new(view, window, cx))
+                })?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .detach();
+        });
 
         // Initialize settings and chain globals
         let settings_global = SettingsGlobal::load();
@@ -123,22 +159,7 @@ fn main() {
         cx.set_global(ChainGlobal { client: chain_client });
 
         cx.spawn(async move |cx| {
-            let opts = WindowOptions {
-                titlebar: Some(TitlebarOptions {
-                    appears_transparent: true,
-                    // Position traffic lights inside the sidebar
-                    // y=12 → button center at y=19, matching the 38px top-row center.
-                    traffic_light_position: Some(point(px(18.0), px(12.0))),
-                    ..Default::default()
-                }),
-                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
-                    point(px(100.0), px(100.0)),
-                    size(px(1280.0), px(800.0)),
-                ))),
-                ..Default::default()
-            };
-
-            cx.open_window(opts, |window, cx| {
+            cx.open_window(new_window_opts(), |window, cx| {
                 let workbench = cx.new(|cx| {
                     let mut wb = Workbench::new(window, cx);
 
