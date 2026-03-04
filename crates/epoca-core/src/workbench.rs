@@ -70,8 +70,10 @@ fn is_window_fullscreen() -> bool {
 }
 
 use crate::tabs::{
-    CodeEditorTab, DeclarativeAppTab, SandboxAppTab, SettingsTab, TabEntry, TabKind, WebViewTab,
+    CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab, SettingsTab, TabEntry,
+    TabKind, WebViewTab,
 };
+use epoca_sandbox::ProdBundle;
 
 const SIDEBAR_W: f32 = 260.0;
 /// Hover-zone width at the left edge that triggers sidebar reveal.
@@ -793,6 +795,29 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .to_string();
                     self.open_sandbox_app(name, path, window, cx);
                 }
+                Some("prod") => {
+                    match ProdBundle::from_file(path) {
+                        Ok(bundle) => {
+                            if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+                                self.open_framebuffer_app(bundle, window, cx);
+                            } else {
+                                // Non-framebuffer .prod — open as regular sandbox app
+                                let name = bundle.manifest.app.name.clone();
+                                let config = epoca_sandbox::SandboxConfig::default();
+                                match epoca_sandbox::SandboxInstance::from_bytes(&bundle.program_bytes, &config) {
+                                    Ok(_) => {
+                                        // Re-open via sandbox path (create temp or use bundle bytes directly)
+                                        log::info!("Non-framebuffer .prod bundle: {name}");
+                                    }
+                                    Err(e) => log::error!("Failed to load .prod sandbox: {e}"),
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("Failed to load .prod: {e}");
+                        }
+                    }
+                }
                 _ => {}
             }
             return;
@@ -833,6 +858,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::WebView { url } => url.clone(),
                 TabKind::DeclarativeApp { path } => path.clone(),
                 TabKind::SandboxApp { app_id } => app_id.clone(),
+                TabKind::FramebufferApp { app_id } => app_id.clone(),
                 TabKind::CodeEditor { path } => path.clone().unwrap_or_default(),
                 TabKind::Welcome | TabKind::Settings => String::new(),
             })
@@ -1110,6 +1136,36 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             kind: TabKind::SandboxApp { app_id: app_id_clone.clone() },
             title,
             icon: IconName::SquareTerminal,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+        });
+        self.active_tab_id = Some(id);
+        self.url_input
+            .update(cx, |s, inner_cx| s.set_value(app_id_clone, window, inner_cx));
+        cx.notify();
+    }
+
+    pub fn open_framebuffer_app(
+        &mut self,
+        bundle: ProdBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.alloc_id();
+        let app_id = bundle.manifest.app.id.clone();
+        let title = bundle.manifest.app.name.clone();
+        let broker = self.broker.clone();
+        let app_id_clone = app_id.clone();
+        let entity =
+            cx.new(|cx| FramebufferAppTab::from_bundle(bundle, broker, window, cx));
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::FramebufferApp { app_id: app_id_clone.clone() },
+            title,
+            icon: IconName::Frame,
             entity: entity.into(),
             pinned: false,
             nav: None,

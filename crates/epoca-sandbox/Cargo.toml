@@ -9,4 +9,6 @@ polkavm = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
+toml = { workspace = true }
 postcard = { version = "1", features = ["alloc"] }
+zip = { workspace = true }

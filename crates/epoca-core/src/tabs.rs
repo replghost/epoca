@@ -7,6 +7,7 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::IconName;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::Sizable;
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use epoca_broker::{CapabilityBroker, PermissionResult};
@@ -56,6 +57,7 @@ pub enum TabKind {
     Settings,
     CodeEditor { path: Option<String> },
     SandboxApp { app_id: String },
+    FramebufferApp { app_id: String },
     DeclarativeApp { path: String },
     WebView { url: String },
 }
@@ -859,6 +861,334 @@ impl Render for SandboxAppTab {
         }
 
         root
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Framebuffer App Panel — pixel-buffer sandbox tab (e.g. DOOM)
+// ---------------------------------------------------------------------------
+
+use epoca_sandbox::{InputEvent, ProdBundle};
+
+/// Shared slot between the background sandbox thread and the GPUI main thread.
+struct FramebufferShared {
+    /// Latest rendered frame (background thread writes, main thread reads).
+    frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Input events queued by the main thread for the sandbox.
+    input_queue: VecDeque<InputEvent>,
+    /// Error from the background thread.
+    error: Option<String>,
+    /// Set to true when the tab is dropped to stop the background thread.
+    stopped: bool,
+}
+
+pub struct FramebufferAppTab {
+    focus_handle: FocusHandle,
+    app_id: String,
+    shared: Arc<Mutex<FramebufferShared>>,
+    current_frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    #[allow(dead_code)]
+    broker: Arc<Mutex<CapabilityBroker>>,
+    error: Option<String>,
+}
+
+impl FramebufferAppTab {
+    /// Create from a loaded `.prod` bundle.
+    pub fn from_bundle(
+        bundle: ProdBundle,
+        broker: Arc<Mutex<CapabilityBroker>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let app_id = bundle.manifest.app.id.clone();
+        let max_gas = bundle
+            .manifest
+            .sandbox
+            .as_ref()
+            .and_then(|s| s.max_gas_per_update)
+            .unwrap_or(u64::MAX);
+
+        let config = SandboxConfig {
+            max_gas_per_update: max_gas,
+            ..Default::default()
+        };
+
+        let shared = Arc::new(Mutex::new(FramebufferShared {
+            frame: None,
+            input_queue: VecDeque::new(),
+            error: None,
+            stopped: false,
+        }));
+
+        let mut init_error = None;
+
+        // Spawn the sandbox on a background thread — all PolkaVM work happens there.
+        let shared_bg = shared.clone();
+        match SandboxInstance::from_bytes(&bundle.program_bytes, &config) {
+            Ok(mut sandbox) => {
+                sandbox.load_assets(bundle.assets);
+                if let Err(e) = sandbox.call_init() {
+                    init_error = Some(format!("init failed: {e}"));
+                } else {
+                    std::thread::Builder::new()
+                        .name(format!("fb-{}", app_id))
+                        .spawn(move || {
+                            Self::bg_loop(sandbox, shared_bg);
+                        })
+                        .ok();
+                }
+            }
+            Err(e) => {
+                init_error = Some(format!("load failed: {e}"));
+            }
+        }
+
+        // Poll for new frames from the background thread at ~60fps.
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let Ok(()) = cx.update(|cx| {
+                    if let Some(entity) = this.upgrade() {
+                        entity.update(cx, |tab, cx| {
+                            tab.poll_frame(cx);
+                        });
+                    }
+                }) else {
+                    break;
+                };
+            }
+        })
+        .detach();
+
+        Self {
+            focus_handle: cx.focus_handle(),
+            app_id,
+            shared,
+            current_frame: None,
+            broker,
+            error: init_error,
+        }
+    }
+
+    /// Background thread loop: runs sandbox update + pixel conversion off the main thread.
+    fn bg_loop(mut sandbox: SandboxInstance, shared: Arc<Mutex<FramebufferShared>>) {
+        let mut rgba_buf: Vec<u8> = Vec::new();
+        let target_dt = std::time::Duration::from_micros(16_667); // ~60fps
+
+        loop {
+            let tick_start = std::time::Instant::now();
+
+            // Check if we should stop, and drain input events into the sandbox.
+            {
+                let mut s = shared.lock().unwrap();
+                if s.stopped {
+                    return;
+                }
+                while let Some(evt) = s.input_queue.pop_front() {
+                    sandbox.send_input(evt);
+                }
+            }
+
+            // Run one guest update tick.
+            if let Err(e) = sandbox.call_update() {
+                let mut s = shared.lock().unwrap();
+                s.error = Some(format!("update error: {e}"));
+                return;
+            }
+
+            // If the guest presented a frame, convert ARGB→RGBA and build RenderImage.
+            if let Some((argb, w, h)) = sandbox.take_framebuffer() {
+                let pixel_count = (w * h) as usize;
+                rgba_buf.resize(pixel_count * 4, 0);
+                for i in 0..pixel_count {
+                    let base = i * 4;
+                    let a = argb[base];
+                    let r = argb[base + 1];
+                    let g = argb[base + 2];
+                    let b = argb[base + 3];
+                    rgba_buf[base] = r;
+                    rgba_buf[base + 1] = g;
+                    rgba_buf[base + 2] = b;
+                    rgba_buf[base + 3] = a;
+                }
+                if let Some(img_buf) = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_raw(
+                    w, h, rgba_buf.clone(),
+                ) {
+                    let frame = image::Frame::new(img_buf);
+                    let render_image = std::sync::Arc::new(
+                        gpui::RenderImage::new(smallvec::smallvec![frame]),
+                    );
+                    let mut s = shared.lock().unwrap();
+                    s.frame = Some(render_image);
+                }
+            }
+
+            // Sleep to maintain target framerate.
+            let elapsed = tick_start.elapsed();
+            if elapsed < target_dt {
+                std::thread::sleep(target_dt - elapsed);
+            }
+        }
+    }
+
+    /// Main thread: pick up the latest frame from the background thread.
+    fn poll_frame(&mut self, cx: &mut Context<Self>) {
+        let mut s = self.shared.lock().unwrap();
+
+        if let Some(err) = s.error.take() {
+            self.error = Some(err);
+            cx.notify();
+            return;
+        }
+
+        if let Some(frame) = s.frame.take() {
+            self.current_frame = Some(frame);
+            cx.notify();
+        }
+    }
+
+    /// Translate a GPUI keystroke into a simple key_code for the guest.
+    fn keystroke_to_code(keystroke: &gpui::Keystroke) -> Option<u8> {
+        let key = keystroke.key_char.as_deref().unwrap_or("");
+        // Map common keys to DOOM-compatible scancodes
+        match key {
+            "w" | "W" => Some(0x11), // up
+            "a" | "A" => Some(0x1E), // strafe left
+            "s" | "S" => Some(0x1F), // down
+            "d" | "D" => Some(0x20), // strafe right
+            " " => Some(0x39),       // space (use)
+            _ => {
+                // Arrow keys and others
+                match keystroke.key.as_str() {
+                    "up" => Some(0x48),
+                    "down" => Some(0x50),
+                    "left" => Some(0x4B),
+                    "right" => Some(0x4D),
+                    "enter" => Some(0x1C),
+                    "escape" => Some(0x01),
+                    "tab" => Some(0x0F),
+                    "shift" => Some(0x2A),
+                    "control" => Some(0x1D),
+                    _ => {
+                        // Single ASCII character
+                        if let Some(ch) = key.chars().next() {
+                            if ch.is_ascii() {
+                                Some(ch as u8)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl EventEmitter<PanelEvent> for FramebufferAppTab {}
+
+impl Focusable for FramebufferAppTab {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for FramebufferAppTab {
+    fn panel_name(&self) -> &'static str {
+        "FramebufferAppTab"
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        SharedString::from(self.app_id.clone())
+    }
+
+    fn dump(&self, _cx: &App) -> PanelState {
+        PanelState::new(self)
+    }
+}
+
+impl Drop for FramebufferAppTab {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.stopped = true;
+        }
+    }
+}
+
+impl Render for FramebufferAppTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(err) = &self.error {
+            return div()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .p_4()
+                        .rounded_md()
+                        .bg(gpui::red())
+                        .text_color(gpui::white())
+                        .child(Label::new(err.clone())),
+                )
+                .into_any_element();
+        }
+
+        let content = if let Some(frame) = &self.current_frame {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(gpui::black())
+                .child(
+                    gpui::img(gpui::ImageSource::Render(frame.clone()))
+                        .size_full()
+                        .object_fit(gpui::ObjectFit::Contain),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Label::new("Waiting for first frame..."))
+                .into_any_element()
+        };
+
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .child(content)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, _cx| {
+                if let Some(code) = Self::keystroke_to_code(&ev.keystroke) {
+                    if let Ok(mut s) = this.shared.lock() {
+                        s.input_queue.push_back(InputEvent {
+                            event_type: 1, // key down
+                            key_code: code,
+                            _pad: [0, 0],
+                        });
+                    }
+                }
+            }))
+            .on_key_up(cx.listener(|this, ev: &gpui::KeyUpEvent, _window, _cx| {
+                if let Some(code) = Self::keystroke_to_code(&ev.keystroke) {
+                    if let Ok(mut s) = this.shared.lock() {
+                        s.input_queue.push_back(InputEvent {
+                            event_type: 2, // key up
+                            key_code: code,
+                            _pad: [0, 0],
+                        });
+                    }
+                }
+            }))
+            .into_any_element()
     }
 }
 

@@ -1,3 +1,5 @@
+pub mod bundle;
 pub mod runtime;
 
-pub use runtime::{SandboxInstance, SandboxConfig};
+pub use bundle::ProdBundle;
+pub use runtime::{InputEvent, SandboxConfig, SandboxInstance};

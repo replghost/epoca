@@ -1,10 +1,21 @@
 use anyhow::{anyhow, Context, Result};
 use polkavm::{CallError, Config, Engine, Instance, Linker, Module, ProgramBlob};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use epoca_protocol::{
     deserialize_view_tree, serialize_event, GuestEvent, ViewTree,
 };
+
+/// A simple input event for framebuffer guests (4 bytes, packed).
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct InputEvent {
+    /// 1 = key down, 2 = key up
+    pub event_type: u8,
+    /// Scancode / key identifier
+    pub key_code: u8,
+    pub _pad: [u8; 2],
+}
 
 /// Configuration for the sandbox.
 #[derive(Debug, Clone)]
@@ -41,6 +52,14 @@ struct HostState {
     event_queue: VecDeque<GuestEvent>,
     /// Network fetch requests from the guest (url, response_callback).
     pending_fetches: Vec<(String, u64)>,
+    /// Framebuffer: (ARGB pixels, width, height) — set by `host_present_frame`.
+    framebuffer: Option<(Vec<u8>, u32, u32)>,
+    /// Input events queued for the guest (framebuffer mode).
+    input_queue: VecDeque<InputEvent>,
+    /// Assets loaded from a .prod bundle, keyed by relative path.
+    assets: HashMap<String, Vec<u8>>,
+    /// Time origin for `host_time_ms`.
+    time_origin: std::time::Instant,
 }
 
 impl Default for HostState {
@@ -49,6 +68,10 @@ impl Default for HostState {
             view_tree: None,
             event_queue: VecDeque::new(),
             pending_fetches: Vec::new(),
+            framebuffer: None,
+            input_queue: VecDeque::new(),
+            assets: HashMap::new(),
+            time_origin: std::time::Instant::now(),
         }
     }
 }
@@ -170,6 +193,85 @@ impl SandboxInstance {
             )
             .context("Failed to define host_log")?;
 
+        // host_present_frame(ptr: u32, width: u32, height: u32, stride: u32) -> u32
+        // Reads width*height*4 ARGB bytes from guest memory and stores in HostState.
+        linker
+            .define_typed(
+                "host_present_frame",
+                |caller: polkavm::Caller<'_, HostState>, ptr: u32, width: u32, height: u32, _stride: u32| -> Result<u32, anyhow::Error> {
+                    let byte_len = width.checked_mul(height).and_then(|n| n.checked_mul(4));
+                    let Some(byte_len) = byte_len else {
+                        return Ok(1); // overflow
+                    };
+                    let buf = read_guest_memory(caller.instance, ptr, byte_len)?;
+                    caller.user_data.framebuffer = Some((buf, width, height));
+                    Ok(0)
+                },
+            )
+            .context("Failed to define host_present_frame")?;
+
+        // host_poll_input(buf_ptr: u32, buf_len: u32) -> u32
+        // Pops InputEvents from the queue, writes into guest memory, returns bytes written.
+        linker
+            .define_typed(
+                "host_poll_input",
+                |caller: polkavm::Caller<'_, HostState>, buf_ptr: u32, buf_len: u32| -> Result<u32, anyhow::Error> {
+                    let max_events = (buf_len as usize) / 4; // InputEvent is 4 bytes
+                    let mut written = 0u32;
+                    for _ in 0..max_events {
+                        let Some(evt) = caller.user_data.input_queue.pop_front() else {
+                            break;
+                        };
+                        let bytes = [evt.event_type, evt.key_code, evt._pad[0], evt._pad[1]];
+                        caller
+                            .instance
+                            .write_memory(buf_ptr + written, &bytes)
+                            .map_err(|e| anyhow!("Memory write error: {:?}", e))?;
+                        written += 4;
+                    }
+                    Ok(written)
+                },
+            )
+            .context("Failed to define host_poll_input")?;
+
+        // host_time_ms() -> u64
+        // Returns milliseconds since sandbox creation.
+        linker
+            .define_typed(
+                "host_time_ms",
+                |caller: polkavm::Caller<'_, HostState>| -> Result<u64, anyhow::Error> {
+                    Ok(caller.user_data.time_origin.elapsed().as_millis() as u64)
+                },
+            )
+            .context("Failed to define host_time_ms")?;
+
+        // host_asset_read(name_ptr: u32, name_len: u32, offset: u32, dst_ptr: u32, max_len: u32) -> u32
+        // Reads from HostState.assets, writes slice into guest memory, returns bytes read (0 = not found / EOF).
+        linker
+            .define_typed(
+                "host_asset_read",
+                |caller: polkavm::Caller<'_, HostState>, name_ptr: u32, name_len: u32, offset: u32, dst_ptr: u32, max_len: u32| -> Result<u32, anyhow::Error> {
+                    let name_buf = read_guest_memory(caller.instance, name_ptr, name_len)?;
+                    let name = String::from_utf8(name_buf)
+                        .map_err(|_| anyhow!("Invalid UTF-8 asset name"))?;
+                    let Some(data) = caller.user_data.assets.get(&name) else {
+                        return Ok(0);
+                    };
+                    let offset = offset as usize;
+                    if offset >= data.len() {
+                        return Ok(0);
+                    }
+                    let remaining = &data[offset..];
+                    let to_write = remaining.len().min(max_len as usize);
+                    caller
+                        .instance
+                        .write_memory(dst_ptr, &remaining[..to_write])
+                        .map_err(|e| anyhow!("Memory write error: {:?}", e))?;
+                    Ok(to_write as u32)
+                },
+            )
+            .context("Failed to define host_asset_read")?;
+
         let instance_pre = linker
             .instantiate_pre(&module)
             .context("Failed to pre-instantiate module")?;
@@ -192,6 +294,7 @@ impl SandboxInstance {
 
     /// Call the guest's `init` function.
     pub fn call_init(&mut self) -> Result<()> {
+        self.instance.set_gas(i64::MAX);
         let mut state = self.state.lock().unwrap();
         self.instance
             .call_typed_and_get_result::<(), ()>(&mut *state, "init", ())
@@ -211,7 +314,12 @@ impl SandboxInstance {
     /// rather than killing the browser — the guest can be restarted.
     pub fn call_update(&mut self) -> Result<()> {
         // Re-fill gas before each tick so a slow tick doesn't accumulate debt.
-        self.instance.set_gas(self.max_gas_per_update as i64);
+        let gas = if self.max_gas_per_update > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            self.max_gas_per_update as i64
+        };
+        self.instance.set_gas(gas);
         let mut state = self.state.lock().unwrap();
         self.instance
             .call_typed_and_get_result::<(), ()>(&mut *state, "update", ())
@@ -241,5 +349,24 @@ impl SandboxInstance {
     pub fn take_pending_fetches(&self) -> Vec<(String, u64)> {
         let mut state = self.state.lock().unwrap();
         std::mem::take(&mut state.pending_fetches)
+    }
+
+    /// Take the latest framebuffer submitted by `host_present_frame`.
+    /// Returns `(argb_pixels, width, height)`.
+    pub fn take_framebuffer(&self) -> Option<(Vec<u8>, u32, u32)> {
+        let mut state = self.state.lock().unwrap();
+        state.framebuffer.take()
+    }
+
+    /// Send an input event to the guest (queued for next `host_poll_input` call).
+    pub fn send_input(&self, event: InputEvent) {
+        let mut state = self.state.lock().unwrap();
+        state.input_queue.push_back(event);
+    }
+
+    /// Load assets into the sandbox (typically from a .prod bundle).
+    pub fn load_assets(&self, assets: HashMap<String, Vec<u8>>) {
+        let mut state = self.state.lock().unwrap();
+        state.assets = assets;
     }
 }
