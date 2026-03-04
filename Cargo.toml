@@ -15,6 +15,7 @@ members = [
 exclude = [
     "guest/counter",
     "guest/framebuffer-test",
+    "guest/doom",
 ]
 
 [workspace.package]

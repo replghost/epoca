@@ -321,9 +321,66 @@ impl Workbench {
     }
 
     fn process_pending_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // URL bar enter — navigate the current tab if it's a WebView, else open new.
         if let Some(text) = self.pending_nav.take() {
-            self.navigate_or_open(&text, window, cx);
+            if text.starts_with("http://") || text.starts_with("https://") || looks_like_url(&text) {
+                let url = if text.starts_with("http://") || text.starts_with("https://") {
+                    text.clone()
+                } else {
+                    format!("https://{text}")
+                };
+                // Try navigating the active tab in-place.
+                let navigated = self.active_tab_id.map(|id| {
+                    if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
+                        if let Some(nav) = &tab.nav {
+                            nav.load_url(&url, cx);
+                            true
+                        } else { false }
+                    } else { false }
+                }).unwrap_or(false);
+                if !navigated {
+                    self.open_webview(url, window, cx);
+                } else {
+                    // Update the TabKind url so switch_context reads the right value.
+                    if let Some(id) = self.active_tab_id {
+                        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                            tab.kind = TabKind::WebView { url: url.clone() };
+                        }
+                    }
+                    cx.notify();
+                }
+            } else if std::path::Path::new(&text).exists() {
+                // File paths — open as app tab (these aren't navigable in WebView).
+                self.navigate_or_open(&text, window, cx);
+            } else {
+                // Search query — navigate in the active WebView tab if possible.
+                let encoded = url_encode_query(&text);
+                let search_engine = cx
+                    .try_global::<crate::settings::SettingsGlobal>()
+                    .map(|g| g.settings.search_engine)
+                    .unwrap_or_default();
+                let url = search_engine.search_url(&encoded);
+                let navigated = self.active_tab_id.map(|id| {
+                    if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
+                        if let Some(nav) = &tab.nav {
+                            nav.load_url(&url, cx);
+                            true
+                        } else { false }
+                    } else { false }
+                }).unwrap_or(false);
+                if !navigated {
+                    self.open_webview(url, window, cx);
+                } else {
+                    if let Some(id) = self.active_tab_id {
+                        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) {
+                            tab.kind = TabKind::WebView { url: url.clone() };
+                        }
+                    }
+                    cx.notify();
+                }
+            }
         }
+        // Omnibox (Cmd+T) — always opens new tab.
         if let Some(text) = self.omnibox_pending_nav.take() {
             self.omnibox_open = false;
             cx.set_global(OmniboxOpen(false));
@@ -864,7 +921,13 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             })
             .unwrap_or_default();
         // Sync the context indicator to reflect this tab's context.
-        self.active_context = tab.and_then(|t| t.context_id.clone());
+        // Only update from WebView tabs — non-WebView tabs (Settings, Welcome, etc.)
+        // have no meaningful context and shouldn't reset the indicator.
+        if let Some(t) = tab {
+            if matches!(t.kind, TabKind::WebView { .. }) {
+                self.active_context = t.context_id.clone();
+            }
+        }
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(value, window, inner_cx));
         cx.notify();
