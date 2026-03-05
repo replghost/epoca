@@ -1738,6 +1738,13 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_cursor_handler(uc, webview_ptr);
         #[cfg(feature = "test-server")]
         crate::test_server::register_test_result_handler(uc, webview_ptr);
+
+        // Install WKContentRuleList for network-level ad/tracker blocking.
+        let shield = crate::shield::current_config();
+        if !shield.rule_sets.is_empty() {
+            crate::shield::install_content_rules(uc, &shield.rule_sets);
+        }
+
         webview_ptr
     }
 }

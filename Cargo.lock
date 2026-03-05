@@ -2429,6 +2429,7 @@ name = "epoca-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "block2 0.5.1",
  "epoca-broker",
  "epoca-chain",
  "epoca-dsl",
@@ -6568,8 +6569,6 @@ dependencies = [
 [[package]]
 name = "polkavm"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34ddb26cbe473e21bf5c329723e72fdf9208b5f9674e54721bf436e2efdbb26f"
 dependencies = [
  "libc",
  "log",
@@ -6582,8 +6581,6 @@ dependencies = [
 [[package]]
 name = "polkavm-assembler"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f9006f0a135c6d035487fa88fa75b97b32a53d1d914c757f131c8e10a2af295"
 dependencies = [
  "log",
 ]
@@ -6591,8 +6588,6 @@ dependencies = [
 [[package]]
 name = "polkavm-common"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0a3e43fa1a54b955a2f9422b1690c3cc29252ac8828c02a99d2370b9f2a188e"
 dependencies = [
  "log",
  "picosimd",
@@ -6602,8 +6597,6 @@ dependencies = [
 [[package]]
 name = "polkavm-linux-raw"
 version = "0.31.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbcd9ed5f77c60f3878289001d3e789da301746249b622bfb2876e2d0fe32c0b"
 
 [[package]]
 name = "polling"
@@ -11876,3 +11869,7 @@ dependencies = [
  "syn 2.0.117",
  "winnow 0.7.14",
 ]
+
+[[patch.unused]]
+name = "polkavm-derive"
+version = "0.31.0"

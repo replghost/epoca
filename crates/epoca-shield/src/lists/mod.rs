@@ -58,5 +58,26 @@ pub fn builtin_lists() -> Vec<ListMeta> {
             etag: None,
             last_modified: None,
         },
+        ListMeta {
+            name: "peter-lowe-adservers".into(),
+            url: "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=adblockplus&mimetype=plaintext".into(),
+            last_fetched: None,
+            etag: None,
+            last_modified: None,
+        },
+        ListMeta {
+            name: "ublock-filters".into(),
+            url: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/filters.txt".into(),
+            last_fetched: None,
+            etag: None,
+            last_modified: None,
+        },
+        ListMeta {
+            name: "ublock-privacy".into(),
+            url: "https://raw.githubusercontent.com/uBlockOrigin/uAssets/master/filters/privacy.txt".into(),
+            last_fetched: None,
+            etag: None,
+            last_modified: None,
+        },
     ]
 }

@@ -58,6 +58,106 @@ pub fn current_config() -> ShieldConfig {
 }
 
 // ---------------------------------------------------------------------------
+// WKContentRuleList installation — network-level ad blocking
+// ---------------------------------------------------------------------------
+
+/// Install compiled WKContentRuleList JSON buckets on a WKUserContentController.
+/// Each rule set is compiled asynchronously by WebKit; the completion handler
+/// calls `[uc addContentRuleList:]` to activate it.
+#[cfg(target_os = "macos")]
+pub fn install_content_rules(
+    uc: *mut objc2::runtime::AnyObject,
+    rule_sets: &[epoca_shield::CompiledRuleSet],
+) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    // WKContentRuleListStore.defaultStore
+    let store_cls = match AnyClass::get("WKContentRuleListStore") {
+        Some(c) => c,
+        None => {
+            log::warn!("Shield: WKContentRuleListStore class not found");
+            return;
+        }
+    };
+    let store: *mut AnyObject = unsafe { msg_send![store_cls, defaultStore] };
+    if store.is_null() {
+        log::warn!("Shield: defaultStore returned nil");
+        return;
+    }
+
+    for rs in rule_sets {
+        let identifier = &rs.identifier;
+        let json = &rs.json;
+
+        // Build NSStrings using initWithBytes:length:encoding: (NSUTF8StringEncoding = 4)
+        // to handle large buffers safely.
+        let ns_id: *mut AnyObject = unsafe {
+            let alloc: *mut AnyObject =
+                msg_send![AnyClass::get("NSString").unwrap(), alloc];
+            msg_send![alloc,
+                initWithBytes: identifier.as_ptr() as *const std::ffi::c_void
+                length: identifier.len()
+                encoding: 4u64  // NSUTF8StringEncoding
+            ]
+        };
+        let ns_json: *mut AnyObject = unsafe {
+            let alloc: *mut AnyObject =
+                msg_send![AnyClass::get("NSString").unwrap(), alloc];
+            msg_send![alloc,
+                initWithBytes: json.as_ptr() as *const std::ffi::c_void
+                length: json.len()
+                encoding: 4u64
+            ]
+        };
+
+        if ns_id.is_null() || ns_json.is_null() {
+            log::warn!("Shield: failed to create NSString for rule set {}", identifier);
+            continue;
+        }
+
+        // Build the completion block: ^(WKContentRuleList *list, NSError *error)
+        // Capture `uc` as a raw pointer — it stays valid for the lifetime of
+        // the WKWebView (which outlives compilation).
+        let uc_ptr = uc as usize;
+        let id_for_log = identifier.clone();
+        let block = block2::RcBlock::new(
+            move |list: *mut AnyObject, error: *mut AnyObject| {
+                unsafe {
+                    if !error.is_null() {
+                        let desc: *mut AnyObject = msg_send![error, localizedDescription];
+                        if !desc.is_null() {
+                            let cstr: *const i8 = msg_send![desc, UTF8String];
+                            if !cstr.is_null() {
+                                let msg = std::ffi::CStr::from_ptr(cstr).to_string_lossy();
+                                log::warn!("Shield: failed to compile {}: {}", id_for_log, msg);
+                            }
+                        }
+                        return;
+                    }
+                    if list.is_null() {
+                        log::warn!("Shield: compile returned nil list for {}", id_for_log);
+                        return;
+                    }
+                    let uc_restored = uc_ptr as *mut AnyObject;
+                    let _: () = msg_send![uc_restored, addContentRuleList: list];
+                    log::info!("Shield: installed rule set {}", id_for_log);
+                }
+            },
+        );
+
+        unsafe {
+            let _: () = msg_send![store,
+                compileContentRuleListForIdentifier: ns_id
+                encodedContentRuleList: ns_json
+                completionHandler: &*block
+            ];
+        }
+        log::debug!("Shield: submitted {} for compilation ({} bytes JSON)", identifier, json.len());
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Nav channel — cmd-click / new-tab events from page JS
 // ---------------------------------------------------------------------------
 
