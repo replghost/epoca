@@ -15,5 +15,11 @@
     <!-- Allow outbound network connections (required for WKWebView). -->
     <key>com.apple.security.network.client</key>
     <true/>
+
+    <!-- Declare as a web browser so the WebKit content process can reach
+         AuthKit XPC — enables WebAuthn (passkeys + USB security keys like
+         YubiKey) in the embedded WKWebView on macOS 14+. -->
+    <key>com.apple.developer.web-browser</key>
+    <true/>
 </dict>
 </plist>

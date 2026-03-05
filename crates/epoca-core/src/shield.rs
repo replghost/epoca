@@ -888,6 +888,111 @@ pub fn drain_menu_actions() -> Vec<MenuAction> {
     events
 }
 
+// ---------------------------------------------------------------------------
+// Keyboard shortcut channel — NSApp local event monitor → Workbench
+// ---------------------------------------------------------------------------
+
+/// Actions dispatched from the NSApp local event monitor.
+#[derive(Clone, Debug)]
+pub enum ShortcutAction {
+    NewTab,
+    CloseActiveTab,
+    FocusUrlBar,
+    Reload,
+    HardReload,
+    OpenSettings,
+    FindInPage,
+}
+
+static SHORTCUT_CHANNEL: OnceLock<(
+    mpsc::SyncSender<ShortcutAction>,
+    Mutex<mpsc::Receiver<ShortcutAction>>,
+)> = OnceLock::new();
+
+fn shortcut_channel() -> &'static (
+    mpsc::SyncSender<ShortcutAction>,
+    Mutex<mpsc::Receiver<ShortcutAction>>,
+) {
+    SHORTCUT_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(64);
+        (tx, Mutex::new(rx))
+    })
+}
+
+pub fn send_shortcut(action: ShortcutAction) {
+    let _ = shortcut_channel().0.try_send(action);
+}
+
+/// Drain all pending keyboard shortcut events (called every render frame from Workbench).
+pub fn drain_shortcuts() -> Vec<ShortcutAction> {
+    let ch = shortcut_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+/// Install an NSApplication local event monitor that intercepts Cmd+key shortcuts
+/// before WKWebView (or any native NSView) can swallow them. Matched shortcuts
+/// are sent through `SHORTCUT_CHANNEL` and drained each frame in `process_pending_nav`.
+#[cfg(target_os = "macos")]
+pub fn install_key_monitor() {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    unsafe {
+        // NSEventMaskKeyDown = 1 << 10
+        let mask: u64 = 1 << 10;
+
+        let block = block2::RcBlock::new(move |event: *mut AnyObject| -> *mut AnyObject {
+            let flags: u64 = msg_send![event, modifierFlags];
+            let cmd = (flags & (1 << 20)) != 0; // NSEventModifierFlagCommand
+            let shift = (flags & (1 << 17)) != 0; // NSEventModifierFlagShift
+
+            if !cmd {
+                return event; // Not a Cmd shortcut, pass through
+            }
+
+            let chars: *mut AnyObject = msg_send![event, charactersIgnoringModifiers];
+            if chars.is_null() {
+                return event;
+            }
+            let cstr: *const i8 = msg_send![chars, UTF8String];
+            if cstr.is_null() {
+                return event;
+            }
+            let key = std::ffi::CStr::from_ptr(cstr).to_string_lossy();
+
+            let action = match (key.as_ref(), shift) {
+                ("t", false) => Some(ShortcutAction::NewTab),
+                ("w", false) => Some(ShortcutAction::CloseActiveTab),
+                ("l", false) => Some(ShortcutAction::FocusUrlBar),
+                ("r", false) => Some(ShortcutAction::Reload),
+                ("r", true) => Some(ShortcutAction::HardReload),
+                (",", false) => Some(ShortcutAction::OpenSettings),
+                ("f", false) => Some(ShortcutAction::FindInPage),
+                _ => None,
+            };
+
+            if let Some(a) = action {
+                send_shortcut(a);
+                std::ptr::null_mut() // Consume event (return nil)
+            } else {
+                event // Pass through unmatched Cmd+key
+            }
+        });
+
+        let ns_event_cls = AnyClass::get("NSEvent").unwrap();
+        let _: *mut AnyObject = msg_send![
+            ns_event_cls,
+            addLocalMonitorForEventsMatchingMask: mask
+            handler: &*block
+        ];
+    }
+}
+
 /// Register the `epocaFavicon` WKScriptMessageHandler. Receives:
 ///   { type: 'faviconFound', url: '...' }
 #[cfg(target_os = "macos")]

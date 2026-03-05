@@ -592,6 +592,36 @@ impl Workbench {
             }
         }
 
+        // Drain keyboard shortcuts from NSApp local event monitor
+        for action in crate::shield::drain_shortcuts() {
+            use crate::shield::ShortcutAction;
+            match action {
+                ShortcutAction::NewTab => self.new_tab(window, cx),
+                ShortcutAction::CloseActiveTab => {
+                    if let Some(id) = self.active_tab_id {
+                        self.close_tab(id, window, cx);
+                    }
+                }
+                ShortcutAction::FocusUrlBar => {
+                    let fh = self.url_input.focus_handle(cx);
+                    window.focus(&fh);
+                }
+                ShortcutAction::Reload => self.reload_active_tab(false, window, cx),
+                ShortcutAction::HardReload => self.reload_active_tab(true, window, cx),
+                ShortcutAction::OpenSettings => self.open_settings(window, cx),
+                ShortcutAction::FindInPage => {
+                    self.find_open = !self.find_open;
+                    if self.find_open {
+                        let fh = self.find_input.focus_handle(cx);
+                        window.focus(&fh);
+                    } else {
+                        self.close_find(window, cx);
+                    }
+                    cx.notify();
+                }
+            }
+        }
+
         // Clean up orphaned tabs whose context was deleted.
         {
             let valid_ids: std::collections::HashSet<String> = cx
@@ -1701,6 +1731,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .px(px(8.0))
             .py(px(4.0))
             .bg(find_bar_bg)
+            .rounded_t(px(8.0))
             .border_b_1()
             .border_color(border_color)
             .child(

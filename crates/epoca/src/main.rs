@@ -85,6 +85,11 @@ fn main() {
     app.run(move |cx| {
         gpui_component::init(cx);
 
+        // Install NSApp-level event monitor so Cmd+key shortcuts work even
+        // when WKWebView is first responder.
+        #[cfg(target_os = "macos")]
+        epoca_core::shield::install_key_monitor();
+
         // ── Keyboard shortcuts ───────────────────────────────────────────────
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
