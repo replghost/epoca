@@ -16,6 +16,7 @@ exclude = [
     "guest/counter",
     "guest/framebuffer-test",
     "guest/doom",
+    "guest/moonpool",
 ]
 
 [workspace.package]

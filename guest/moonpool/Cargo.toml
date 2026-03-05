@@ -1,0 +1,11 @@
+[package]
+name = "moonpool-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+polkavm-derive = "0.31.0"
+
+[profile.release]
+opt-level = "s"
+lto = true

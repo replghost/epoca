@@ -543,7 +543,7 @@ impl Workbench {
                     self.open_webview_background(url, window, cx);
                 }
                 crate::shield::MenuAction::OpenInNewWindow(url) => {
-                    self.open_webview(url, window, cx);
+                    self.open_in_new_window(url, cx);
                 }
                 crate::shield::MenuAction::OpenInContext(url, context_id) => {
                     // Open directly with the specified context_id — don't use
@@ -1099,6 +1099,38 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(url_clone, window, inner_cx));
         cx.notify();
+    }
+
+    /// Open a URL in a brand-new OS window.
+    pub fn open_in_new_window(&self, url: String, cx: &mut Context<Self>) {
+        use gpui_component::Root;
+        cx.spawn(async move |_, cx| {
+            cx.open_window(
+                WindowOptions {
+                    titlebar: Some(TitlebarOptions {
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(18.0), px(12.0))),
+                        ..Default::default()
+                    }),
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(120.0), px(120.0)),
+                        size(px(1280.0), px(800.0)),
+                    ))),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let workbench = cx.new(|cx| {
+                        let mut wb = Workbench::new(window, cx);
+                        wb.open_webview(url, window, cx);
+                        wb
+                    });
+                    let view: AnyView = workbench.into();
+                    cx.new(|cx| Root::new(view, window, cx))
+                },
+            )?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     /// Open a new WebView tab in the background without switching to it.
