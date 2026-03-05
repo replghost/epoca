@@ -1,9 +1,0 @@
-[app]
-id = "moonpool"
-name = "Moonpool"
-version = "0.1.0"
-app_type = "application"
-
-[sandbox]
-framebuffer = true
-max_gas_per_update = 200000000

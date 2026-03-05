@@ -12,12 +12,7 @@ members = [
     "crates/epoca-shield",
     "crates/epoca-chain",
 ]
-exclude = [
-    "guest/counter",
-    "guest/framebuffer-test",
-    "guest/doom",
-    "guest/moonpool",
-]
+exclude = []
 
 [workspace.package]
 version = "0.0.1"

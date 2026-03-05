@@ -48,7 +48,6 @@ crates/
   epoca-broker/     capability/permission broker
   epoca-dsl/        ZML parser + evaluator (no GPUI dep)
   epoca-android/    Android renderer (winit + wgpu + cosmic-text)
-guest/counter/      sample PolkaVM guest (no_std)
 examples/           .toml and .zml sample apps
 docs/design.md      LOCKED design system — read before any UI change
 docs/backlog.md     Product backlog + strategy — update when completing features

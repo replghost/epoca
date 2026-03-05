@@ -1,8 +1,0 @@
-[app]
-id = "doom"
-name = "DOOM"
-version = "0.1.0"
-app_type = "application"
-
-[sandbox]
-framebuffer = true

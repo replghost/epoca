@@ -259,22 +259,11 @@ max_gas_per_update = 2000000000
 
 ### DOOM on PolkaVM (proof of concept)
 Target: doomgeneric (minimal C port, 5 platform callbacks) running in PolkaVM, packaged as `.prod`.
-Architecture: Rust shim (`no_std`, `polkavm_derive`) + C doomgeneric sources linked via `cc` crate in `build.rs`.
-```
-guest/doom/
-├── Cargo.toml           # polkavm-derive + cc build dep
-├── build.rs             # cross-compiles doomgeneric C to riscv32
-├── src/main.rs          # Rust shim: polkavm_import/export glue
-├── c_src/
-│   ├── doomgeneric/     # git subtree of github.com/ozkl/doomgeneric
-│   ├── polkavm_platform.c  # implements DG_Init/DG_DrawFrame/DG_SleepMs/DG_GetTicksMs/DG_GetKey
-│   └── libc_polkavm.c  # minimal libc: malloc (8MB arena bump allocator), memcpy, printf→host_log
-└── doom.prod            # output bundle with doom1.wad in assets/
-```
-- [ ] Create `guest/doom/` workspace member with Rust shim + `build.rs` for C cross-compilation
-- [ ] Patch doomgeneric WAD I/O (`w_wad.c`) to use `host_asset_read` instead of `fopen`/`fread`
-- [ ] Implement libc shim: `malloc`/`free` (8MB static arena bump allocator), `memcpy`/`memset`, `printf`→`host_log`, `exit`→`unimp`
-- [ ] Build pipeline: `cargo +nightly build -Z build-std=core,alloc --target $(polkatool get-target-json-path --bitness 32) --release` then `polkatool link`
+Source lives in the separate [epoca-games](https://github.com/replghost/epoca-games) repo (GPL-2.0).
+- [x] Create doom guest with Rust shim + `build.rs` for C cross-compilation
+- [x] Patch doomgeneric WAD I/O (`w_wad.c`) to use `host_asset_read` instead of `fopen`/`fread`
+- [x] Implement libc shim: `malloc`/`free` (8MB static arena bump allocator), `memcpy`/`memset`, `printf`→`host_log`, `exit`→`unimp`
+- [x] Build pipeline: `cargo +nightly build -Z build-std=core,alloc --target $(polkatool get-target-json-path --bitness 32) --release` then `polkatool link`
 - [ ] Validate 35fps at 320×200 in `FramebufferAppTab` with `doom1.wad` (shareware, ~4MB)
 - [ ] Soft-float: verify clang `-march=rv32emac -mabi=ilp32e` soft-float works for Doom's trig (`cos`/`sin`/`atan2`)
 
