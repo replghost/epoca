@@ -352,6 +352,17 @@ the host renders them natively (GPUI on desktop, wgpu on Android, future: web/iO
 - [ ] No central server required: sync over iCloud Drive / local network / custom S3
 - [ ] Open sync protocol — any client can implement it
 
+### Hardware Security Key Authentication (YubiKey / FIDO2)
+Allow users to authenticate to websites using USB security keys (YubiKey, SoloKeys, etc.)
+via the WebAuthn / FIDO2 standard. This is table-stakes for security-conscious users.
+
+- [ ] **WebAuthn API relay** — intercept `navigator.credentials.create()` / `navigator.credentials.get()` JS calls via `WKScriptMessageHandler`, relay to native authenticator
+- [ ] **macOS AuthenticationServices integration** — use `ASAuthorizationPlatformPublicKeyCredentialProvider` (macOS 13+) to bridge WKWebView ↔ USB HID authenticator
+- [ ] **Fallback: direct USB HID** — if AuthenticationServices doesn't cover the flow, use `IOKit` HID manager to talk CTAP2 directly to FIDO2 keys
+- [ ] **Passkey support** — `ASAuthorizationPlatformPublicKeyCredentialProvider` also handles iCloud Keychain passkeys; support both hardware keys and platform passkeys
+- [ ] **UI chrome** — security key prompt overlay (tap your key animation) when WebAuthn ceremony is in progress
+- [ ] **Attestation policy** — broker-level setting to allow/deny attestation conveyance per origin
+
 ### Enterprise / Team Features
 - [ ] Capability broker policies pushed from a config file (already architected)
 - [ ] Network policy: block categories of sites per workspace

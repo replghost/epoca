@@ -1736,6 +1736,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_favicon_handler(uc, webview_ptr);
         crate::shield::register_context_menu_handler(uc, webview_ptr);
         crate::shield::register_cursor_handler(uc, webview_ptr);
+        crate::webauthn::register_webauthn_handler(uc, webview_ptr);
         #[cfg(feature = "test-server")]
         crate::test_server::register_test_result_handler(uc, webview_ptr);
 
@@ -1852,6 +1853,7 @@ impl WebViewTab {
             .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(CONTEXT_MENU_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
+            .with_initialization_script(crate::webauthn::WEBAUTHN_POLYFILL)
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script)
             .build_as_child(window)

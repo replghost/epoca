@@ -592,6 +592,34 @@ impl Workbench {
             }
         }
 
+        // Drain completed WebAuthn ceremony responses → evaluate_script back to page
+        for resp in crate::webauthn::drain_webauthn_responses() {
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                    if entity.read(cx).webview_ptr == resp.webview_ptr {
+                        // Validate callback_id is numeric to prevent injection
+                        let cb_id = resp.callback_id.trim();
+                        if !cb_id.chars().all(|c| c.is_ascii_digit()) {
+                            log::warn!("WebAuthn: invalid callback_id: {cb_id}");
+                            break;
+                        }
+                        let ok = if resp.ok { "true" } else { "false" };
+                        let json = escape_js_string(
+                            resp.response_json.as_deref().unwrap_or(""),
+                        );
+                        let err = escape_js_string(
+                            resp.error.as_deref().unwrap_or(""),
+                        );
+                        let js = format!(
+                            "window.__epocaWebAuthnResolve('{cb_id}',{ok},'{json}','{err}')",
+                        );
+                        entity.read(cx).evaluate_script(&js, cx);
+                        break;
+                    }
+                }
+            }
+        }
+
         // Drain keyboard shortcuts from NSApp local event monitor
         for action in crate::shield::drain_shortcuts() {
             use crate::shield::ShortcutAction;
@@ -2753,6 +2781,24 @@ impl Render for Workbench {
     }
 }
 
+
+/// Escape a string for safe embedding in a JS single-quoted string literal.
+fn escape_js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\0' => out.push_str("\\0"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
 
 /// Returns true if the text looks like a URL rather than a search query.
 /// Heuristic: no spaces and contains a dot (e.g. "github.com", "localhost:3000").
