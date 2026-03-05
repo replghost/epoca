@@ -150,6 +150,10 @@ pub struct Workbench {
     pub(crate) find_open: bool,
     pub(crate) find_input: Entity<InputState>,
     _find_subscription: Subscription,
+
+    // History
+    _history_cleanup: Option<Task<()>>,
+    omnibox_history_results: Vec<crate::history::HistoryEntry>,
 }
 
 /// Extract the hostname from a URL string without pulling in the `url` crate.
@@ -167,6 +171,9 @@ impl Workbench {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         // Start shield bootstrap in background (list fetch + compile).
         init_shield(cx);
+
+        // Start browsing history subsystem.
+        crate::history::init_history(cx);
 
         // Start embedded test server if EPOCA_TEST=1 is set.
         #[cfg(feature = "test-server")]
@@ -215,6 +222,29 @@ impl Workbench {
             }
         });
 
+        // Hourly history cleanup timer.
+        let history_cleanup_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(3600))
+                    .await;
+                let should_continue = cx
+                    .update(|cx| {
+                        if this.upgrade().is_none() {
+                            return false;
+                        }
+                        if let Some(hg) = cx.try_global::<crate::history::HistoryGlobal>() {
+                            hg.manager.cleanup_expired();
+                        }
+                        true
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        });
+
         Self {
             sidebar_mode: SidebarMode::Pinned,
             sidebar_anim: 1.0,
@@ -239,6 +269,8 @@ impl Workbench {
             find_open: false,
             find_input,
             _find_subscription,
+            _history_cleanup: Some(history_cleanup_task),
+            omnibox_history_results: Vec::new(),
         }
     }
 
@@ -398,6 +430,7 @@ impl Workbench {
                             tab.kind = TabKind::WebView { url: url.clone() };
                         }
                     }
+                    record_history_visit(&url, "", cx);
                     cx.notify();
                 }
             } else {
@@ -424,6 +457,7 @@ impl Workbench {
                             tab.kind = TabKind::WebView { url: url.clone() };
                         }
                     }
+                    record_history_visit(&url, "", cx);
                     cx.notify();
                 }
             }
@@ -458,6 +492,11 @@ impl Workbench {
                     for (ev_ptr, title) in &title_events {
                         if *ev_ptr == wv_ptr {
                             tab.title = title.clone();
+                            if let TabKind::WebView { ref url } = tab.kind {
+                                if let Some(hg) = cx.try_global::<crate::history::HistoryGlobal>() {
+                                    hg.manager.update_title(url, title);
+                                }
+                            }
                             changed = true;
                         }
                     }
@@ -943,12 +982,23 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         event: &InputEvent,
         cx: &mut Context<Self>,
     ) {
-        if let InputEvent::PressEnter { .. } = event {
-            let text = self.omnibox_input.read(cx).value().to_string();
-            if !text.is_empty() {
-                self.omnibox_pending_nav = Some(text);
+        match event {
+            InputEvent::PressEnter { .. } => {
+                let text = self.omnibox_input.read(cx).value().to_string();
+                if !text.is_empty() {
+                    self.omnibox_pending_nav = Some(text);
+                    cx.notify();
+                }
+            }
+            InputEvent::Change => {
+                let query = self.omnibox_input.read(cx).value().to_string();
+                self.omnibox_history_results = cx
+                    .try_global::<crate::history::HistoryGlobal>()
+                    .map(|hg| hg.manager.search(&query, 8))
+                    .unwrap_or_default();
                 cx.notify();
             }
+            _ => {}
         }
     }
 
@@ -1124,6 +1174,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             context_id,
         });
         self.active_tab_id = Some(id);
+        record_history_visit(&url_clone, "", cx);
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(url_clone, window, inner_cx));
         cx.notify();
@@ -1178,7 +1229,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
-            kind: TabKind::WebView { url: url_clone },
+            kind: TabKind::WebView { url: url_clone.clone() },
             title,
             icon: IconName::Globe,
             entity: entity.into(),
@@ -1188,6 +1239,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             context_id,
         });
         // Do NOT change active_tab_id — stay on current tab.
+        record_history_visit(&url_clone, "", cx);
         cx.notify();
     }
 
@@ -2369,6 +2421,63 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
 
         let has_tabs = !tab_rows.is_empty();
 
+        // Build history suggestion rows (cached from on_omnibox_input_event)
+        let history_rows: Vec<AnyElement> = self
+            .omnibox_history_results
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let url = entry.url.clone();
+                let title = entry.title.clone();
+                let display_title = if title.is_empty() {
+                    url.clone()
+                } else {
+                    title.clone()
+                };
+                let display_url = url.clone();
+                let nav_url = url.clone();
+                div()
+                    .id(ElementId::Integer((i as u64) + 2_000_000))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(16.0))
+                    .h(px(46.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgba(0xffffff0d)))
+                    .child(Icon::new(IconName::Globe).size(px(14.0)).text_color(rgba(0xffffffaa)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .overflow_hidden()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgba(0xffffffdd))
+                                    .truncate()
+                                    .child(display_title),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgba(0xffffff55))
+                                    .truncate()
+                                    .child(display_url),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.omnibox_pending_nav = Some(nav_url.clone());
+                        this.close_omnibox(cx);
+                    }))
+                    .into_any_element()
+            })
+            .collect();
+        let has_history = !history_rows.is_empty();
+        let has_any_results = has_tabs || has_history;
+
         // Backdrop — click outside the panel to dismiss the omnibox.
         div()
             .id("omnibox-backdrop")
@@ -2415,6 +2524,22 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             .child(div().flex_1().child(Input::new(&self.omnibox_input))),
                     )
                     .when(has_tabs, |d| d.children(tab_rows))
+                    .when(has_history, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .px(px(16.0))
+                                .h(px(24.0))
+                                .text_xs()
+                                .text_color(rgba(0xffffff44))
+                                .when(has_tabs, |d| {
+                                    d.border_t_1().border_color(rgba(0xffffff14))
+                                })
+                                .child("History"),
+                        )
+                        .children(history_rows)
+                    })
                     .child(
                         div()
                             .flex()
@@ -2424,7 +2549,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             .h(px(38.0))
                             .text_xs()
                             .text_color(rgba(0xffffff55))
-                            .when(has_tabs, |d| {
+                            .when(has_any_results, |d| {
                                 d.border_t_1().border_color(rgba(0xffffff14))
                             })
                             .child({
@@ -2798,6 +2923,16 @@ fn escape_js_string(s: &str) -> String {
         }
     }
     out
+}
+
+/// Record a browsing history visit, skipping non-http URLs.
+fn record_history_visit(url: &str, title: &str, cx: &gpui::App) {
+    if !crate::history::is_http_url(url) {
+        return;
+    }
+    if let Some(hg) = cx.try_global::<crate::history::HistoryGlobal>() {
+        hg.manager.record_visit(url, title);
+    }
 }
 
 /// Returns true if the text looks like a URL rather than a search query.

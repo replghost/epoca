@@ -111,6 +111,19 @@ If unsure, ask rather than assume.
 - URL bar shows current tab's URL; updates on tab switch and navigation
 - Hand cursor (pointer) on all `<a href>` elements via `a[href]{cursor:pointer!important}` in SCROLLBAR_CSS_SCRIPT
 
+### Browsing History (Ephemeral with TTL)
+- SQLite-backed history at `~/.epoca/history.db` (WAL journal, auto_vacuum=INCREMENTAL)
+- `HistoryRetention` enum: `SessionOnly` (in-memory), `Hours8`, `Hours24` (default), `Days7`, `Days30`
+- `HistoryManager`: `record_visit()` (upsert with visit_count++), `update_title()`, `cleanup_expired()` (hard DELETE + incremental_vacuum), `search()` (frecency-ordered LIKE match, limit 8)
+- `HistoryGlobal` GPUI global; `init_history(cx)` reads retention from settings, opens DB, runs initial cleanup
+- Corrupt DB handling: if CREATE TABLE fails, delete file and retry; if retry fails, fall back to in-memory
+- File permissions: 0600 on Unix after DB creation
+- Omnibox integration: `on_omnibox_input_event` fires `search()` on `InputEvent::Change`, caches results in `omnibox_history_results`; `render_omnibox()` renders "History" divider + two-line rows (title + URL) with Globe icon
+- Visit recording: `record_history_visit()` called in `open_webview()`, `open_webview_background()`, in-place URL bar nav, search nav; `update_title()` called in title drain block
+- Hourly cleanup timer: `_history_cleanup: Option<Task<()>>` in Workbench, runs `cleanup_expired()` every hour
+- Settings UI: "History Retention" pill-button row in Privacy section; click updates setting and re-inits history
+- Switching from SessionOnly → disk mode intentionally loses in-memory history (privacy-first design)
+
 ### Tab Isolation ("Fresh Tab" mode)
 - `Workbench.isolated_tabs: bool` (default: `false`)
 - When `true`, every new WebView tab is opened with `.with_incognito(true)` on the wry WebViewBuilder
@@ -229,6 +242,22 @@ If unsure, ask rather than assume.
 - **Do include**: what the user can do that they couldn't before, key implementation types
   (so future agents can find the code), date landed.
 - **Don't include**: refactors with no user-visible effect, dependency bumps, doc fixes.
+
+---
+
+## Feature Development Process
+
+When implementing a non-trivial feature (new module, multi-file change, user-facing behavior):
+
+1. **Plan** — Design the implementation approach (plan mode or manual).
+2. **Architect Review** — Before writing code, have the `software-architect` agent review the plan for correctness, security, and alignment with existing patterns.
+3. **QA Test Strategy** — Have the `QA-expert` agent define the testing approach (unit tests, integration tests, manual verification steps). Tests may be written before or after implementation depending on the feature — QA decides.
+4. **Implement** — Write the code following the reviewed plan.
+5. **Tech Lead Code Review** — After implementation, have the `tech-lead` agent review the code for quality, security, and correctness.
+6. **QA Code Check** — After implementation, have the `QA-expert` agent verify test coverage, edge cases, and that the implementation matches the plan.
+7. **Fix** — Address any findings from steps 5-6 before considering the feature complete.
+
+For small fixes (typos, single-line changes, obvious bugs), skip this process.
 
 ---
 

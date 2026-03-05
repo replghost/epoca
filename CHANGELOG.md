@@ -8,6 +8,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Browsing history (ephemeral with TTL)** — SQLite-backed browsing history at
+  `~/.epoca/history.db`. Configurable retention: Session Only / 8h / 24h (default) / 7d / 30d.
+  Hard DELETE on expiry, incremental vacuum. Frecency-ordered search in omnibox (⌘T) with
+  "History" divider between tab matches and history results. File permissions 0600. Corrupt DB
+  auto-recreated. `history.rs`, `HistoryRetention` enum in settings, retention selector in
+  Settings UI. 29 unit tests. (2026-03-05)
+
 - **Session restore** — Open tabs are saved to `session.json` every 30s and on quit (⌘Q). On next
   launch (no CLI arg), tabs are restored with their URLs, titles, favicons, pinned state, and
   session contexts. Atomic writes via `.tmp` + rename. Skips non-restorable tab types (SandboxApp,

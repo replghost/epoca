@@ -1081,6 +1081,7 @@ impl FramebufferAppTab {
             "a" | "A" => Some(0x1E), // strafe left
             "s" | "S" => Some(0x1F), // down
             "d" | "D" => Some(0x20), // strafe right
+            "f" | "F" => Some(0x1D), // fire (Ctrl scancode — macOS swallows bare Ctrl)
             " " => Some(0x39),       // space (use)
             _ => {
                 // Arrow keys and others
@@ -2073,7 +2074,7 @@ impl Render for WebViewTab {
 // Settings Panel
 // ---------------------------------------------------------------------------
 
-use crate::settings::{SearchEngine, SettingsGlobal};
+use crate::settings::{HistoryRetention, SearchEngine, SettingsGlobal};
 use crate::chain::ChainGlobal;
 use epoca_chain::{ChainId, ChainState, ConnectionBackend};
 use gpui::prelude::FluentBuilder;
@@ -2206,6 +2207,7 @@ impl Render for SettingsTab {
         let open_links_in_background = settings.open_links_in_background;
         let experimental_contexts = settings.experimental_contexts;
         let session_contexts = settings.contexts.clone();
+        let history_retention = settings.history_retention;
 
         // Chain statuses snapshot (read once for this render)
         let chain_statuses: Option<Vec<epoca_chain::ChainStatus>> =
@@ -2526,7 +2528,9 @@ impl Render for SettingsTab {
                                             ),
                                     )
                                     .child(toggle_pill(shield_enabled)),
-                            ),
+                            )
+                            .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                            .child(render_history_retention_row(history_retention, cx)),
                     ),
             )
             // ── Session Contexts ─────────────────────────────────────────────
@@ -2920,6 +2924,63 @@ fn chain_row(
                     .child(msg),
             )
         })
+}
+
+/// Render the "History Retention" pill-button row for the privacy settings section.
+/// Extracted to its own function to keep SettingsTab::render() within the gpui proc-macro
+/// stack-depth limit.
+fn render_history_retention_row(
+    current: HistoryRetention,
+    cx: &mut Context<SettingsTab>,
+) -> impl IntoElement {
+    let text_primary = rgba(0xffffffff);
+    let text_secondary = rgba(0xffffffaa);
+    div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(16.0))
+        .py(px(12.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().text_sm().text_color(text_primary).child("History Retention"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_secondary)
+                        .child("How long browsing history is kept before deletion"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .children(HistoryRetention::all().iter().map(|&variant| {
+                    let is_active = variant == current;
+                    div()
+                        .id(SharedString::from(format!("hist-{}", variant.display_name())))
+                        .text_xs()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .cursor_pointer()
+                        .text_color(if is_active { rgba(0xffffffff) } else { text_secondary })
+                        .bg(if is_active { rgba(0x22c55eff) } else { rgba(0xffffff14) })
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                g.settings.history_retention = variant;
+                                g.save();
+                            });
+                            crate::history::init_history(cx);
+                            cx.notify();
+                        }))
+                        .child(variant.display_name())
+                })),
+        )
 }
 
 /// Parse a "#rrggbb" hex color string to an Rgba value.

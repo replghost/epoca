@@ -1,3 +1,5 @@
+#![recursion_limit = "1024"]
+
 pub mod workbench;
 pub mod tabs;
 pub mod view_bridge;
@@ -6,6 +8,7 @@ pub mod shield;
 pub mod webauthn;
 pub mod settings;
 pub mod session;
+pub mod history;
 pub mod chain;
 
 #[cfg(feature = "test-server")]

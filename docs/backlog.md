@@ -118,8 +118,8 @@ video-overlay sweeping which Brave does not have.
 ## P1 — First-Class Browser Features
 
 ### Navigation & History
-- [ ] Persist browsing history to SQLite (`~/.epoca/history.db`)
-- [ ] Omnibox autocomplete from history + open tabs
+- [x] ~~Persist browsing history to SQLite (`~/.epoca/history.db`)~~ (done — `history.rs`, configurable TTL, frecency search)
+- [x] ~~Omnibox autocomplete from history + open tabs~~ (done — cached history results in omnibox, Globe icon, two-line layout)
 - [ ] Back/forward swipe gestures (macOS trackpad)
 - [ ] Reading list / bookmarks (local, no sync account required)
 
@@ -139,7 +139,7 @@ video-overlay sweeping which Brave does not have.
 - [x] ~~**Per-tab favicon fetched and displayed**~~ — FAVICON_SCRIPT + epocaFavicon handler
 - [ ] Dark/light mode toggle (system follow already works via WKWebView theme)
 - [x] ~~**Page title propagated**~~ — TITLE_TRACKER_SCRIPT + epocaMeta handler updates sidebar
-- [ ] Find-in-page (⌘F)
+- [x] ~~Find-in-page (⌘F)~~
 - [ ] Full-screen mode (hide sidebar, maximize content)
 
 ### Testing

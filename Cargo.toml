@@ -52,6 +52,7 @@ smol = "2"
 zip = "2"
 image = "0.25"
 smallvec = { version = "1", features = ["union"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
 
 [patch.crates-io]
 polkavm = { path = "../polkavm/crates/polkavm" }

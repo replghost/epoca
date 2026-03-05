@@ -49,6 +49,54 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryRetention {
+    SessionOnly,
+    Hours8,
+    Hours24,
+    Days7,
+    Days30,
+}
+
+impl Default for HistoryRetention {
+    fn default() -> Self {
+        Self::Hours24
+    }
+}
+
+impl HistoryRetention {
+    /// Returns the TTL in seconds, or `None` for `SessionOnly` (in-memory only).
+    pub fn ttl_secs(&self) -> Option<u64> {
+        match self {
+            Self::SessionOnly => None,
+            Self::Hours8 => Some(8 * 3600),
+            Self::Hours24 => Some(24 * 3600),
+            Self::Days7 => Some(7 * 24 * 3600),
+            Self::Days30 => Some(30 * 24 * 3600),
+        }
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::SessionOnly => "Session Only",
+            Self::Hours8 => "8 Hours",
+            Self::Hours24 => "24 Hours",
+            Self::Days7 => "7 Days",
+            Self::Days30 => "30 Days",
+        }
+    }
+
+    pub fn all() -> &'static [HistoryRetention] {
+        &[
+            HistoryRetention::SessionOnly,
+            HistoryRetention::Hours8,
+            HistoryRetention::Hours24,
+            HistoryRetention::Days7,
+            HistoryRetention::Days30,
+        ]
+    }
+}
+
 /// Preset colors for session contexts.
 pub const DEFAULT_CONTEXT_COLORS: &[&str] = &[
     "#3b82f6", // blue
@@ -79,6 +127,8 @@ pub struct AppSettings {
     pub experimental_contexts: bool,
     #[serde(default)]
     pub contexts: Vec<SessionContext>,
+    #[serde(default)]
+    pub history_retention: HistoryRetention,
 }
 
 impl Default for AppSettings {
@@ -92,6 +142,7 @@ impl Default for AppSettings {
             open_links_in_background: true,
             experimental_contexts: false,
             contexts: Vec::new(),
+            history_retention: HistoryRetention::default(),
         }
     }
 }
@@ -136,5 +187,46 @@ impl SettingsGlobal {
         if let Ok(json) = serde_json::to_string_pretty(&self.settings) {
             let _ = std::fs::write(&self.path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn history_retention_default_is_24h() {
+        assert_eq!(HistoryRetention::default(), HistoryRetention::Hours24);
+    }
+
+    #[test]
+    fn history_retention_ttl_values_are_correct() {
+        assert_eq!(HistoryRetention::SessionOnly.ttl_secs(), None);
+        assert_eq!(HistoryRetention::Hours8.ttl_secs(), Some(8 * 3600));
+        assert_eq!(HistoryRetention::Hours24.ttl_secs(), Some(24 * 3600));
+        assert_eq!(HistoryRetention::Days7.ttl_secs(), Some(7 * 24 * 3600));
+        assert_eq!(HistoryRetention::Days30.ttl_secs(), Some(30 * 24 * 3600));
+    }
+
+    #[test]
+    fn history_retention_serde_roundtrip() {
+        for &variant in HistoryRetention::all() {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: HistoryRetention = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn app_settings_default_has_history_retention() {
+        let s = AppSettings::default();
+        assert_eq!(s.history_retention, HistoryRetention::Hours24);
+    }
+
+    #[test]
+    fn app_settings_deserializes_without_history_retention_field() {
+        let json = r#"{"isolated_tabs":true,"shield_enabled":true,"experimental_chain":false,"enabled_chains":[],"search_engine":"DuckDuckGo","open_links_in_background":true}"#;
+        let s: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.history_retention, HistoryRetention::Hours24);
     }
 }
