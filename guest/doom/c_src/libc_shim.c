@@ -9,14 +9,20 @@
 #include <stdint.h>
 #include <stdarg.h>
 
-/* ── Host function imports (provided by Rust via polkavm_import) ── */
-extern void host_log(const char *ptr, unsigned int len);
+/* ── Host function imports (linked via Rust #[no_mangle] wrappers) ── */
+extern void host_log_wrapper(const char *ptr, unsigned int len);
+
+/* Forward declarations for functions used before definition */
+void *memcpy(void *dst, const void *src, size_t n);
+void *memset(void *dst, int c, size_t n);
+void  free(void *ptr);
+size_t strlen(const char *s);
 
 /* ══════════════════════════════════════════════════════════════════
  * Memory allocator — simple bump with free-list for reuse
  * ══════════════════════════════════════════════════════════════════ */
 
-#define HEAP_SIZE (12 * 1024 * 1024)  /* 12 MiB arena */
+#define HEAP_SIZE (32 * 1024 * 1024)  /* 32 MiB arena */
 
 static unsigned char heap[HEAP_SIZE] __attribute__((aligned(16)));
 static size_t heap_offset = 0;
@@ -94,6 +100,9 @@ void *memset(void *dst, int c, size_t n) {
 int memcmp(const void *a, const void *b, size_t n) {
     const unsigned char *pa = (const unsigned char *)a;
     const unsigned char *pb = (const unsigned char *)b;
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
     for (size_t i = 0; i < n; i++) {
         if (pa[i] != pb[i]) return pa[i] - pb[i];
     }
@@ -105,6 +114,7 @@ int memcmp(const void *a, const void *b, size_t n) {
  * ══════════════════════════════════════════════════════════════════ */
 
 size_t strlen(const char *s) {
+    if (!s) return 0;
     size_t n = 0;
     while (s[n]) n++;
     return n;
@@ -112,37 +122,51 @@ size_t strlen(const char *s) {
 
 char *strcpy(char *dst, const char *src) {
     char *d = dst;
+    if (!dst) return dst;
+    if (!src) { *d = '\0'; return dst; }
     while ((*d++ = *src++));
     return dst;
 }
 
 char *strncpy(char *dst, const char *src, size_t n) {
     size_t i;
+    if (!dst) return dst;
+    if (!src) { if (n) dst[0] = '\0'; return dst; }
     for (i = 0; i < n && src[i]; i++) dst[i] = src[i];
     for (; i < n; i++) dst[i] = '\0';
     return dst;
 }
 
 char *strcat(char *dst, const char *src) {
-    char *d = dst + strlen(dst);
+    char *d;
+    if (!dst) return dst;
+    if (!src) return dst;
+    d = dst + strlen(dst);
     while ((*d++ = *src++));
     return dst;
 }
 
 char *strncat(char *dst, const char *src, size_t n) {
-    char *d = dst + strlen(dst);
+    char *d;
     size_t i;
+    if (!dst) return dst;
+    if (!src) return dst;
+    d = dst + strlen(dst);
     for (i = 0; i < n && src[i]; i++) d[i] = src[i];
     d[i] = '\0';
     return dst;
 }
 
 int strcmp(const char *a, const char *b) {
+    if (!a) return b ? -1 : 0;
+    if (!b) return 1;
     while (*a && *a == *b) { a++; b++; }
     return (unsigned char)*a - (unsigned char)*b;
 }
 
 int strncmp(const char *a, const char *b, size_t n) {
+    if (!a) return b ? -1 : 0;
+    if (!b) return 1;
     for (size_t i = 0; i < n; i++) {
         if (a[i] != b[i]) return (unsigned char)a[i] - (unsigned char)b[i];
         if (a[i] == '\0') return 0;
@@ -155,11 +179,15 @@ static int to_lower(int c) {
 }
 
 int strcasecmp(const char *a, const char *b) {
+    if (!a) return b ? -1 : 0;
+    if (!b) return 1;
     while (*a && to_lower(*a) == to_lower(*b)) { a++; b++; }
     return to_lower((unsigned char)*a) - to_lower((unsigned char)*b);
 }
 
 int strncasecmp(const char *a, const char *b, size_t n) {
+    if (!a) return b ? -1 : 0;
+    if (!b) return 1;
     for (size_t i = 0; i < n; i++) {
         int la = to_lower((unsigned char)a[i]);
         int lb = to_lower((unsigned char)b[i]);
@@ -170,6 +198,7 @@ int strncasecmp(const char *a, const char *b, size_t n) {
 }
 
 char *strchr(const char *s, int c) {
+    if (!s) return NULL;
     while (*s) {
         if (*s == (char)c) return (char *)s;
         s++;
@@ -179,6 +208,7 @@ char *strchr(const char *s, int c) {
 
 char *strrchr(const char *s, int c) {
     const char *last = NULL;
+    if (!s) return NULL;
     while (*s) {
         if (*s == (char)c) last = s;
         s++;
@@ -188,7 +218,10 @@ char *strrchr(const char *s, int c) {
 }
 
 char *strstr(const char *haystack, const char *needle) {
-    size_t nlen = strlen(needle);
+    size_t nlen;
+    if (!haystack) return NULL;
+    if (!needle) return (char *)haystack;
+    nlen = strlen(needle);
     if (nlen == 0) return (char *)haystack;
     while (*haystack) {
         if (strncmp(haystack, needle, nlen) == 0) return (char *)haystack;
@@ -198,8 +231,11 @@ char *strstr(const char *haystack, const char *needle) {
 }
 
 char *strdup(const char *s) {
-    size_t len = strlen(s) + 1;
-    char *d = malloc(len);
+    size_t len;
+    char *d;
+    if (!s) return NULL;
+    len = strlen(s) + 1;
+    d = malloc(len);
     if (d) memcpy(d, s, len);
     return d;
 }
@@ -225,6 +261,7 @@ int isxdigit(int c) { return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' &
 
 int atoi(const char *s) {
     int n = 0, neg = 0;
+    if (!s) return 0;
     while (isspace(*s)) s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
@@ -234,9 +271,29 @@ int atoi(const char *s) {
 
 long atol(const char *s) { return (long)atoi(s); }
 
+double atof(const char *s) {
+    double result = 0.0, fraction = 0.0;
+    int neg = 0, has_dot = 0;
+    double divisor = 1.0;
+    if (!s) return 0.0;
+    while (isspace(*s)) s++;
+    if (*s == '-') { neg = 1; s++; }
+    else if (*s == '+') s++;
+    while (*s) {
+        if (*s == '.' && !has_dot) { has_dot = 1; s++; continue; }
+        if (*s < '0' || *s > '9') break;
+        if (has_dot) { divisor *= 10.0; fraction += (*s - '0') / divisor; }
+        else { result = result * 10.0 + (*s - '0'); }
+        s++;
+    }
+    result += fraction;
+    return neg ? -result : result;
+}
+
 long strtol(const char *s, char **end, int base) {
     long n = 0;
     int neg = 0;
+    if (!s) { if (end) *end = (char *)s; return 0; }
     while (isspace(*s)) s++;
     if (*s == '-') { neg = 1; s++; }
     else if (*s == '+') s++;
@@ -296,6 +353,8 @@ static int fmt_int(char *buf, size_t sz, unsigned long val, int base, int upper,
 int vsnprintf(char *buf, size_t sz, const char *fmt, va_list ap) {
     size_t pos = 0;
     if (sz == 0) return 0;
+    if (!buf) return 0;
+    if (!fmt) { buf[0] = '\0'; return 0; }
     sz--; /* reserve for NUL */
 
     while (*fmt && pos < sz) {
@@ -331,32 +390,42 @@ int vsnprintf(char *buf, size_t sz, const char *fmt, va_list ap) {
         else if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; }
         else if (*fmt == 'z') { is_long = 1; fmt++; }
 
+        /* For integer formats, precision means minimum digits (zero-padded).
+         * E.g. %.3d with value 33 → "033". */
+        int int_width = width;
+        int int_zero = zero_pad;
+        if (precision >= 0 && (*fmt == 'd' || *fmt == 'i' || *fmt == 'u' ||
+                               *fmt == 'x' || *fmt == 'X' || *fmt == 'o')) {
+            int_width = precision;
+            int_zero = 1;
+        }
+
         switch (*fmt) {
             case 'd': case 'i': {
                 long val = is_long ? va_arg(ap, long) : (long)va_arg(ap, int);
                 int neg = val < 0;
                 unsigned long uval = neg ? (unsigned long)(-val) : (unsigned long)val;
-                pos += fmt_int(buf + pos, sz - pos + 1, uval, 10, 0, neg, width, zero_pad, left_align);
+                pos += fmt_int(buf + pos, sz - pos + 1, uval, 10, 0, neg, int_width, int_zero, left_align);
                 break;
             }
             case 'u': {
                 unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-                pos += fmt_int(buf + pos, sz - pos + 1, val, 10, 0, 0, width, zero_pad, left_align);
+                pos += fmt_int(buf + pos, sz - pos + 1, val, 10, 0, 0, int_width, int_zero, left_align);
                 break;
             }
             case 'x': {
                 unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-                pos += fmt_int(buf + pos, sz - pos + 1, val, 16, 0, 0, width, zero_pad, left_align);
+                pos += fmt_int(buf + pos, sz - pos + 1, val, 16, 0, 0, int_width, int_zero, left_align);
                 break;
             }
             case 'X': {
                 unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-                pos += fmt_int(buf + pos, sz - pos + 1, val, 16, 1, 0, width, zero_pad, left_align);
+                pos += fmt_int(buf + pos, sz - pos + 1, val, 16, 1, 0, int_width, int_zero, left_align);
                 break;
             }
             case 'o': {
                 unsigned long val = is_long ? va_arg(ap, unsigned long) : (unsigned long)va_arg(ap, unsigned int);
-                pos += fmt_int(buf + pos, sz - pos + 1, val, 8, 0, 0, width, zero_pad, left_align);
+                pos += fmt_int(buf + pos, sz - pos + 1, val, 8, 0, 0, int_width, int_zero, left_align);
                 break;
             }
             case 'p': {
@@ -420,21 +489,25 @@ static char log_buf[4096];
 
 int printf(const char *fmt, ...) {
     va_list ap;
+    int n;
+    if (!fmt) return 0;
     va_start(ap, fmt);
-    int n = vsnprintf(log_buf, sizeof(log_buf), fmt, ap);
+    n = vsnprintf(log_buf, sizeof(log_buf), fmt, ap);
     va_end(ap);
-    if (n > 0) host_log(log_buf, n);
+    if (n > 0) host_log_wrapper(log_buf, n);
     return n;
 }
 
-int vfprintf(void *stream, const char *fmt, va_list ap) {
+int vfprintf(struct _FILE *stream, const char *fmt, va_list ap) {
+    int n;
     (void)stream;
-    int n = vsnprintf(log_buf, sizeof(log_buf), fmt, ap);
-    if (n > 0) host_log(log_buf, n);
+    if (!fmt) return 0;
+    n = vsnprintf(log_buf, sizeof(log_buf), fmt, ap);
+    if (n > 0) host_log_wrapper(log_buf, n);
     return n;
 }
 
-int fprintf(void *stream, const char *fmt, ...) {
+int fprintf(struct _FILE *stream, const char *fmt, ...) {
     (void)stream;
     va_list ap;
     va_start(ap, fmt);
@@ -444,18 +517,20 @@ int fprintf(void *stream, const char *fmt, ...) {
 }
 
 int puts(const char *s) {
-    int len = strlen(s);
-    host_log(s, len);
+    int len;
+    if (!s) s = "(null)";
+    len = strlen(s);
+    host_log_wrapper(s, len);
     return len;
 }
 
 int putchar(int c) {
     char ch = (char)c;
-    host_log(&ch, 1);
+    host_log_wrapper(&ch, 1);
     return c;
 }
 
-int fflush(void *stream) { (void)stream; return 0; }
+int fflush(struct _FILE *stream) { (void)stream; return 0; }
 
 /* ══════════════════════════════════════════════════════════════════
  * sscanf — minimal implementation for doom's needs (%d, %s, %x)
@@ -463,8 +538,9 @@ int fflush(void *stream) { (void)stream; return 0; }
 
 int sscanf(const char *str, const char *fmt, ...) {
     va_list ap;
-    va_start(ap, fmt);
     int matched = 0;
+    if (!str || !fmt) return 0;
+    va_start(ap, fmt);
     while (*fmt && *str) {
         if (*fmt == '%') {
             fmt++;
@@ -572,12 +648,12 @@ int raise(int sig) { (void)sig; return 0; }
 void exit(int status) {
     char msg[64];
     snprintf(msg, sizeof(msg), "exit(%d) called", status);
-    host_log(msg, strlen(msg));
+    host_log_wrapper(msg, strlen(msg));
     __builtin_trap();
 }
 
 void abort(void) {
-    host_log("abort() called", 14);
+    host_log_wrapper("abort() called", 14);
     __builtin_trap();
 }
 
@@ -589,12 +665,15 @@ void _exit(int status) { exit(status); }
 
 unsigned int sleep(unsigned int seconds) { (void)seconds; return 0; }
 int usleep(unsigned int usec) { (void)usec; return 0; }
+int system(const char *command) { (void)command; return -1; }
 
 /* errno */
 int errno;
 int *__errno_location(void) { return &errno; }
 
-/* ── Symbols that doom references via headers ── */
-void *stderr = 0;
-void *stdout = 0;
-void *stdin = 0;
+/* ── Standard stream handles (FILE* as declared in stdio.h) ── */
+/* These are never used for actual I/O — doom just passes them to fprintf. */
+struct _FILE;
+struct _FILE *stderr = 0;
+struct _FILE *stdout = 0;
+struct _FILE *stdin = 0;

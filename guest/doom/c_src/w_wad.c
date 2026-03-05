@@ -75,6 +75,8 @@ unsigned int W_LumpNameHash(const char *s)
     unsigned int result = 5381;
     unsigned int i;
 
+    if (!s) return result;
+
     for (i=0; i < 8 && s[i] != '\0'; ++i)
     {
         result = ((result << 5) ^ result ) ^ toupper((int)s[i]);
@@ -147,6 +149,13 @@ wad_file_t *W_AddFile (char *filename)
     filelump_t *fileinfo;
     filelump_t *filerover;
     int newnumlumps;
+
+    /* Guard NULL filename. */
+    if (filename == NULL)
+    {
+        printf(" W_AddFile: NULL filename\n");
+        return NULL;
+    }
 
     // open the file and add to directory
 

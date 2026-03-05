@@ -189,6 +189,10 @@ char *M_TempFile(char *s)
 
 boolean M_StrToInt(const char *str, int *result)
 {
+    if (str == NULL || result == NULL)
+    {
+        return false;
+    }
     return sscanf(str, " 0x%x", result) == 1
         || sscanf(str, " 0X%x", result) == 1
         || sscanf(str, " 0%o", result) == 1
@@ -200,6 +204,12 @@ void M_ExtractFileBase(char *path, char *dest)
     char *src;
     char *filename;
     int length;
+
+    if (path == NULL || dest == NULL)
+    {
+        if (dest != NULL) memset(dest, 0, 8);
+        return;
+    }
 
     src = path + strlen(path) - 1;
 
@@ -244,6 +254,11 @@ void M_ForceUppercase(char *text)
 {
     char *p;
 
+    if (text == NULL)
+    {
+        return;
+    }
+
     for (p = text; *p != '\0'; ++p)
     {
         *p = toupper(*p);
@@ -262,6 +277,11 @@ char *M_StrCaseStr(char *haystack, char *needle)
     unsigned int needle_len;
     unsigned int len;
     unsigned int i;
+
+    if (haystack == NULL || needle == NULL)
+    {
+        return NULL;
+    }
 
     haystack_len = strlen(haystack);
     needle_len = strlen(needle);
@@ -293,6 +313,12 @@ char *M_StringDuplicate(const char *orig)
 {
     char *result;
 
+    /* Guard: strdup(NULL) is undefined behaviour; return empty string. */
+    if (orig == NULL)
+    {
+        orig = "";
+    }
+
     result = strdup(orig);
 
     if (result == NULL)
@@ -313,8 +339,15 @@ char *M_StringReplace(const char *haystack, const char *needle,
 {
     char *result, *dst;
     const char *p;
-    size_t needle_len = strlen(needle);
+    size_t needle_len;
     size_t result_len, dst_len;
+
+    /* Guard NULL inputs. */
+    if (haystack == NULL) haystack = "";
+    if (needle == NULL || needle[0] == '\0') return M_StringDuplicate(haystack);
+    if (replacement == NULL) replacement = "";
+
+    needle_len = strlen(needle);
 
     // Iterate through occurrences of 'needle' and calculate the size of
     // the new string.
@@ -374,6 +407,16 @@ boolean M_StringCopy(char *dest, const char *src, size_t dest_size)
 {
     size_t len;
 
+    if (dest == NULL)
+    {
+        return false;
+    }
+    /* Treat NULL src as an empty string. */
+    if (src == NULL)
+    {
+        src = "";
+    }
+
     if (dest_size >= 1)
     {
         dest[dest_size - 1] = '\0';
@@ -395,6 +438,15 @@ boolean M_StringConcat(char *dest, const char *src, size_t dest_size)
 {
     size_t offset;
 
+    if (dest == NULL)
+    {
+        return false;
+    }
+    if (src == NULL)
+    {
+        src = "";
+    }
+
     offset = strlen(dest);
     if (offset > dest_size)
     {
@@ -408,6 +460,10 @@ boolean M_StringConcat(char *dest, const char *src, size_t dest_size)
 
 boolean M_StringStartsWith(const char *s, const char *prefix)
 {
+    if (s == NULL || prefix == NULL)
+    {
+        return false;
+    }
     return strlen(s) > strlen(prefix)
         && strncmp(s, prefix, strlen(prefix)) == 0;
 }
@@ -416,6 +472,10 @@ boolean M_StringStartsWith(const char *s, const char *prefix)
 
 boolean M_StringEndsWith(const char *s, const char *suffix)
 {
+    if (s == NULL || suffix == NULL)
+    {
+        return false;
+    }
     return strlen(s) >= strlen(suffix)
         && strcmp(s + strlen(s) - strlen(suffix), suffix) == 0;
 }
@@ -429,6 +489,12 @@ char *M_StringJoin(const char *s, ...)
     const char *v;
     va_list args;
     size_t result_len;
+
+    /* Guard NULL first argument — treat as empty string. */
+    if (s == NULL)
+    {
+        s = "";
+    }
 
     result_len = strlen(s) + 1;
 

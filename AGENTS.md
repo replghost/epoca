@@ -154,11 +154,49 @@ If unsure, ask rather than assume.
 - **Ripple on "Open in New Tab"**: `set_menu_origin()` stores click position before NSMenu shows; `take_menu_origin()` retrieves it when OpenInNewTab fires; `trigger_ripple()` evaluates ripple JS on the source WebView (same visual as cmd-click ripple)
 - Non-link right-click falls through to native WKWebView context menu
 
+### Session Contexts (experimental)
+- `experimental_contexts` setting toggle; `SessionContext { id, name, color }` in settings.rs
+- **Context picker dropdown** in URL bar: colored dot prefix, click to open. Shows Private option, all named contexts, "+ New Context" row
+- `active_context: Option<String>` on Workbench — synced from WebView tabs on switch, not from non-WebView tabs
+- `resolve_context_id()` determines context for new tabs; `active_tab_context_id()` for background opens
+- `switch_context()` reads live URL from url_input, closes+reopens tab in new context (WKWebView data stores are immutable after creation)
+- `create_new_context()` picks first unused color from `DEFAULT_CONTEXT_COLORS` palette
+- **Right-click "Open in Context"** submenu: "Private Tab" (always shown) + named contexts. `MenuAction::OpenInContext`, `MenuAction::OpenPrivate`
+- **Orphan cleanup**: `process_pending_nav` checks tabs against valid context IDs, resets orphaned `context_id` to `None`
+- Context dropdown backdrop rendered at root Workbench level (covers full window); auto-closes on sidebar hide
+
 ### Sidebar
 - Pinned mode: sidebar in flex flow, fixed width
 - Overlay mode: sidebar slides in over content; hides on mouse-out
 - Fullscreen: mini toolbar with pin button shown when sidebar hidden (no traffic-light trap)
 - WKWebView masked via CALayer (no page reflow) when sidebar overlaps content
+
+### Session Restore
+- Saves open tabs to `~/Library/Application Support/Epoca/session.json` every 30s + on ⌘Q
+- Atomic writes: `.json.tmp` → `fs::rename` prevents corruption on crash
+- Restores WebView, Settings, CodeEditor, DeclarativeApp tabs; skips SandboxApp, FramebufferApp, Welcome
+- Preserves: URL, title, pinned state, favicon_url, context_id, active_tab_index, next_tab_id, active_context, isolated_tabs
+- `WorkbenchRef` GPUI global (WeakEntity) set in main.rs; Quit handler calls `save_session()` synchronously before `cx.quit()`
+- `session.rs`: `SessionTab`, `SessionState`, `save_session()`, `load_session()`, `is_restorable()`
+- On launch with no CLI arg: `restore_session()` → falls back to `new_tab()` if no session
+- v1 saves only the most recently saved window (multi-window deferred)
+
+### Find-in-Page (⌘F)
+- `FindInPage` action bound to `cmd-f`; toggles find bar open/closed
+- Find bar rendered between chrome padding and content area (not overlaid on WKWebView)
+- Live search: `InputEvent::Change` → `window.find(query, false, backwards, true)` JS API
+- Enter → next match, Shift+Enter or ↑ button → previous match
+- Escape or ✕ button → close find bar, clear highlights via `window.getSelection().removeAllRanges()`
+- No-op on non-WebView tabs (Settings, CodeEditor, etc.)
+- Edit menu with Find entry in macOS menu bar
+- `FindPrev`, `CloseFindBar` actions; find input with search icon prefix
+
+### Embedded Test Server (feature-gated)
+- `#[cfg(feature = "test-server")]` + `EPOCA_TEST=1` env var
+- HTTP on `localhost:9223`: `GET /state`, `POST /action`, `GET /webview/eval?js=X`
+- `TestCommand` enum + channel drain in `process_pending_nav`; `AppSnapshot`/`TabSnapshot` types
+- JS eval uses correlation IDs via `epocaTestResult` WKScriptMessageHandler
+- `tools/test_cursor.sh` smoke test; `tools/move_mouse.swift` CGEvent helper
 
 ---
 
@@ -168,14 +206,18 @@ If unsure, ask rather than assume.
 
 `CHANGELOG.md` at the repo root is the living record of what shipped and when.
 
-### When a feature lands
+### When any work lands (features, fixes, improvements)
 1. Verify it compiles and works (`cargo build` passes, manual smoke test if possible).
-2. Add a bullet to `CHANGELOG.md` under `## [Unreleased]` with the date in parentheses:
+2. **Immediately** add a bullet to `CHANGELOG.md` under `## [Unreleased]` with the date.
+   Use the appropriate subsection (`Added`, `Fixed`, `Changed`, `Removed`):
    ```
-   - **Feature name** — one-sentence description. Key types/files if non-obvious. (YYYY-MM-DD)
+   - **Feature/fix name** — one-sentence description. Key types/files if non-obvious. (YYYY-MM-DD)
    ```
 3. Add or update an entry in the **Implemented Features** section above so it's covered by
    the no-regression policy.
+4. **This is not optional.** Every code change — whether a new feature, a bug fix, a UX
+   improvement, or a refactor with user-visible effect — must be logged before moving on
+   to the next task. Do not batch logging for later; log each change as it lands.
 
 ### When cutting a release
 1. Rename `## [Unreleased]` to `## [x.y.z] — YYYY-MM-DD`.

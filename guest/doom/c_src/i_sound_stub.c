@@ -45,3 +45,10 @@ void I_UnRegisterSong(void *handle) { (void)handle; }
 void I_PlaySong(void *handle, boolean looping) { (void)handle; (void)looping; }
 void I_StopSong(void) {}
 boolean I_MusicIsPlaying(void) { return false; }
+
+/* Additional symbols referenced by other modules */
+void I_PrecacheSounds(void *sounds, int num_sounds) { (void)sounds; (void)num_sounds; }
+void I_BindSoundVariables(void) {}
+
+/* Global variable referenced by config */
+int snd_musicdevice = 0;

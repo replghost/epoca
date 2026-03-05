@@ -1,7 +1,10 @@
 use gpui::*;
 use gpui_component::Root;
 use std::path::PathBuf;
-use epoca_core::workbench::{Workbench, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, OpenSettings};
+use epoca_core::workbench::{
+    Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
+    OpenSettings, FindInPage,
+};
 use epoca_core::settings::SettingsGlobal;
 use epoca_core::chain::ChainGlobal;
 use epoca_chain::ChainClient;
@@ -12,6 +15,7 @@ actions!(epoca, [Quit, NewWindow]);
 /// Determines what to open based on the CLI argument.
 enum OpenTarget {
     PolkaVM(PathBuf),
+    ProdBundle(PathBuf),
     Declarative(PathBuf),
     DeclarativeDev(PathBuf),
     WebView(String),
@@ -66,6 +70,7 @@ fn main() {
         let p = PathBuf::from(arg);
         match p.extension().and_then(|e| e.to_str()) {
             Some("polkavm") => Some(OpenTarget::PolkaVM(p)),
+            Some("prod") => Some(OpenTarget::ProdBundle(p)),
             Some("toml") | Some("zml") => {
                 if dev_mode {
                     Some(OpenTarget::DeclarativeDev(p))
@@ -90,6 +95,7 @@ fn main() {
             KeyBinding::new("cmd-r", Reload, None),
             KeyBinding::new("cmd-shift-r", HardReload, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
+            KeyBinding::new("cmd-f", FindInPage, None),
         ]);
 
         // ── macOS menu bar ───────────────────────────────────────────────────
@@ -114,6 +120,12 @@ fn main() {
                 ],
             },
             Menu {
+                name: "Edit".into(),
+                items: vec![
+                    MenuItem::action("Find", FindInPage),
+                ],
+            },
+            Menu {
                 name: "View".into(),
                 items: vec![
                     MenuItem::action("Focus URL Bar", FocusUrlBar),
@@ -125,7 +137,15 @@ fn main() {
         ]);
 
         // ── App-level action handlers ────────────────────────────────────────
-        cx.on_action::<Quit>(|_, cx| cx.quit());
+        cx.on_action::<Quit>(|_, cx| {
+            // Synchronous session save before quit — GPUI tears down entities after quit.
+            if let Some(wb_ref) = cx.try_global::<WorkbenchRef>() {
+                if let Some(entity) = wb_ref.0.upgrade() {
+                    entity.read(cx).save_session(cx);
+                }
+            }
+            cx.quit();
+        });
         cx.on_action::<NewWindow>(|_, cx| {
             cx.spawn(async move |cx| {
                 cx.open_window(new_window_opts(), |window, cx| {
@@ -172,6 +192,17 @@ fn main() {
                                 .to_string();
                             wb.open_sandbox_app(name, path, window, cx);
                         }
+                        Some(OpenTarget::ProdBundle(path)) => {
+                            match epoca_sandbox::ProdBundle::from_file(path) {
+                                Ok(bundle) => {
+                                    wb.open_framebuffer_app(bundle, window, cx);
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to load .prod bundle: {e}");
+                                    wb.new_tab(window, cx);
+                                }
+                            }
+                        }
                         Some(OpenTarget::Declarative(path)) => {
                             let path_str = path.to_string_lossy().to_string();
                             wb.open_declarative_app(path_str, window, cx);
@@ -184,12 +215,19 @@ fn main() {
                             wb.open_webview(url.clone(), window, cx);
                         }
                         None => {
-                            wb.new_tab(window, cx);
+                            // Try session restore; fall back to new tab.
+                            if !wb.restore_session(window, cx) {
+                                wb.new_tab(window, cx);
+                            }
                         }
                     }
 
                     wb
                 });
+
+                // Set WorkbenchRef global so Quit handler can save session.
+                cx.set_global(WorkbenchRef(workbench.downgrade()));
+
                 let view: AnyView = workbench.into();
                 cx.new(|cx| Root::new(view, window, cx))
             })?;

@@ -299,7 +299,10 @@ impl SandboxInstance {
         self.instance
             .call_typed_and_get_result::<(), ()>(&mut *state, "init", ())
             .map_err(|e| match e {
-                CallError::Trap => anyhow!("Guest trapped during init"),
+                CallError::Trap => {
+                    let pc = self.instance.program_counter();
+                    anyhow!("Guest trapped during init (pc={:?})", pc)
+                },
                 CallError::NotEnoughGas => anyhow!("Guest ran out of gas during init"),
                 CallError::Error(e) => e.into(),
                 CallError::User(e) => e,
@@ -324,7 +327,10 @@ impl SandboxInstance {
         self.instance
             .call_typed_and_get_result::<(), ()>(&mut *state, "update", ())
             .map_err(|e| match e {
-                CallError::Trap => anyhow!("Guest trapped during update"),
+                CallError::Trap => {
+                    let pc = self.instance.program_counter();
+                    anyhow!("Guest trapped during update (pc={:?})", pc)
+                },
                 CallError::NotEnoughGas => anyhow!("Guest exceeded gas limit during update — possible infinite loop"),
                 CallError::Error(e) => e.into(),
                 CallError::User(e) => e,

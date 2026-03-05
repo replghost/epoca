@@ -44,8 +44,16 @@ int M_CheckParmWithArgs(char *check, int num_args)
 {
     int i;
 
+    if (check == NULL || myargv == NULL)
+    {
+        return 0;
+    }
+
     for (i = 1; i < myargc - num_args; i++)
     {
+        /* Guard against NULL entries in argv array. */
+        if (myargv[i] == NULL)
+            continue;
 	if (!strcasecmp(check, myargv[i]))
 	    return i;
     }

@@ -50,7 +50,9 @@ char *P_TempSaveGameFile(void)
 
     if (filename == NULL)
     {
-        filename = M_StringJoin(savegamedir, "temp.dsg", NULL);
+        /* Guard: savegamedir may be NULL in early init. */
+        const char *dir = (savegamedir != NULL) ? savegamedir : "";
+        filename = M_StringJoin(dir, "temp.dsg", NULL);
     }
 
     return filename;
@@ -63,15 +65,19 @@ char *P_SaveGameFile(int slot)
     static char *filename = NULL;
     static size_t filename_size = 0;
     char basename[32];
+    const char *dir;
+
+    /* Guard: savegamedir may be NULL in early init. */
+    dir = (savegamedir != NULL) ? savegamedir : "";
 
     if (filename == NULL)
     {
-        filename_size = strlen(savegamedir) + 32;
+        filename_size = strlen(dir) + 32;
         filename = malloc(filename_size);
     }
 
     DEH_snprintf(basename, 32, SAVEGAMENAME "%d.dsg", slot);
-    M_snprintf(filename, filename_size, "%s%s", savegamedir, basename);
+    M_snprintf(filename, filename_size, "%s%s", dir, basename);
 
     return filename;
 }

@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, FindInPage, FindPrev, CloseFindBar]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -90,6 +90,11 @@ pub enum SidebarMode {
     Overlay,
 }
 
+/// GPUI global that stores a weak reference to the primary Workbench.
+/// Used by the Quit handler to trigger a synchronous session save.
+pub struct WorkbenchRef(pub WeakEntity<Workbench>);
+impl Global for WorkbenchRef {}
+
 /// Arc browser-style workbench.
 pub struct Workbench {
     // Sidebar
@@ -137,6 +142,14 @@ pub struct Workbench {
 
     /// Whether the context picker dropdown is open.
     context_picker_open: bool,
+
+    // Session restore
+    _session_save_task: Option<Task<()>>,
+
+    // Find-in-page
+    pub(crate) find_open: bool,
+    pub(crate) find_input: Entity<InputState>,
+    _find_subscription: Subscription,
 }
 
 /// Extract the hostname from a URL string without pulling in the `url` crate.
@@ -172,8 +185,35 @@ impl Workbench {
         let _omnibox_subscription =
             cx.subscribe(&omnibox_input, Self::on_omnibox_input_event);
 
+        let find_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Find in page…")
+        });
+        let _find_subscription = cx.subscribe(&find_input, Self::on_find_input_event);
+
         let broker =
             CapabilityBroker::new().with_storage("epoca_permissions.json".to_string());
+
+        // Periodic session save every 30 seconds.
+        let session_save_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(30))
+                    .await;
+                let should_continue = cx
+                    .update(|cx| {
+                        if let Some(entity) = this.upgrade() {
+                            entity.read(cx).save_session(cx);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !should_continue {
+                    break;
+                }
+            }
+        });
 
         Self {
             sidebar_mode: SidebarMode::Pinned,
@@ -195,6 +235,10 @@ impl Workbench {
             isolated_tabs: false,
             active_context: None,
             context_picker_open: false,
+            _session_save_task: Some(session_save_task),
+            find_open: false,
+            find_input,
+            _find_subscription,
         }
     }
 
@@ -218,6 +262,8 @@ impl Workbench {
             return;
         }
         self.sidebar_target = 0.0;
+        // Dismiss context picker when sidebar hides
+        self.context_picker_open = false;
         self.start_anim_task(0, cx);
     }
 
@@ -322,8 +368,13 @@ impl Workbench {
 
     fn process_pending_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // URL bar enter — navigate the current tab if it's a WebView, else open new.
-        if let Some(text) = self.pending_nav.take() {
-            if text.starts_with("http://") || text.starts_with("https://") || looks_like_url(&text) {
+        if let Some(raw_text) = self.pending_nav.take() {
+            let text = raw_text.trim().to_string();
+            log::info!("[nav] URL bar submit: {:?}", text);
+            // Check file paths first — they contain dots/slashes which looks_like_url matches.
+            if !text.starts_with("http://") && !text.starts_with("https://") && std::path::Path::new(&text).exists() {
+                self.navigate_or_open(&text, window, cx);
+            } else if text.starts_with("http://") || text.starts_with("https://") || looks_like_url(&text) {
                 let url = if text.starts_with("http://") || text.starts_with("https://") {
                     text.clone()
                 } else {
@@ -349,9 +400,6 @@ impl Workbench {
                     }
                     cx.notify();
                 }
-            } else if std::path::Path::new(&text).exists() {
-                // File paths — open as app tab (these aren't navigable in WebView).
-                self.navigate_or_open(&text, window, cx);
             } else {
                 // Search query — navigate in the active WebView tab if possible.
                 let encoded = url_encode_query(&text);
@@ -544,6 +592,31 @@ impl Workbench {
             }
         }
 
+        // Clean up orphaned tabs whose context was deleted.
+        {
+            let valid_ids: std::collections::HashSet<String> = cx
+                .try_global::<crate::settings::SettingsGlobal>()
+                .map(|g| g.settings.contexts.iter().map(|c| c.id.clone()).collect())
+                .unwrap_or_default();
+            let mut orphaned = false;
+            for tab in &mut self.tabs {
+                if let Some(ref cid) = tab.context_id {
+                    if cid != "default" && !valid_ids.contains(cid) {
+                        tab.context_id = None;
+                        orphaned = true;
+                    }
+                }
+            }
+            // Also reset active_context if it references a deleted context.
+            if let Some(ref ac) = self.active_context {
+                if ac != "default" && !valid_ids.contains(ac) {
+                    self.active_context = None;
+                    orphaned = true;
+                }
+            }
+            if orphaned { cx.notify(); }
+        }
+
         // Drain test server commands (no-op unless feature = "test-server")
         #[cfg(feature = "test-server")]
         crate::test_server::drain_test_commands(self, window, cx);
@@ -708,17 +781,10 @@ impl Workbench {
                     .try_global::<crate::settings::SettingsGlobal>()
                     .map(|g| g.settings.contexts.clone())
                     .unwrap_or_default();
-                // Check if the source tab is inside a named context.
-                let source_in_context = self.tabs.iter().any(|t| {
-                    t.entity.clone().downcast::<WebViewTab>().ok()
-                        .map(|e| e.read(cx).webview_ptr == ev.webview_ptr)
-                        .unwrap_or(false)
-                        && t.context_id.is_some()
-                });
                 if !all_contexts.is_empty() {
                     let submenu: *mut AnyObject = msg_send![ns_menu, new];
-                    // "Private Tab" — only when source tab is already in a context
-                    if source_in_context {
+                    // "Private Tab" — always available so user can open link without context
+                    {
                         let private_item = make_item!(
                             "Private Tab",
                             objc2::sel!(openPrivate:),
@@ -838,8 +904,11 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             self.open_webview(text.to_string(), window, cx);
             return;
         }
-        let path = std::path::Path::new(text);
+        let text_trimmed = text.trim();
+        let path = std::path::Path::new(text_trimmed);
+        log::info!("[nav] navigate_or_open: {:?} exists={}", text_trimmed, path.exists());
         if path.exists() {
+            log::info!("[nav] extension: {:?}", path.extension());
             match path.extension().and_then(|e| e.to_str()) {
                 Some("toml") | Some("zml") => {
                     self.open_declarative_app(text.to_string(), window, cx);
@@ -1076,22 +1145,73 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             return;
         }
         self.active_context = new_ctx;
-        // If the active tab is a WebView with a real URL, reopen it in the new context.
-        let reopen_url = self.active_tab_id.and_then(|id| {
-            self.tabs.iter().find(|t| t.id == id).and_then(|t| {
-                if let TabKind::WebView { url } = &t.kind {
-                    if !url.is_empty() { Some((id, url.clone())) } else { None }
+        // If the active tab is a WebView, reopen it in the new context.
+        // Use the URL bar value (live URL) instead of TabKind url (may be stale).
+        let reopen = self.active_tab_id.and_then(|id| {
+            let tab = self.tabs.iter().find(|t| t.id == id)?;
+            if matches!(tab.kind, TabKind::WebView { .. }) {
+                let live_url = self.url_input.read(cx).value().to_string();
+                if !live_url.is_empty()
+                    && (live_url.starts_with("http://") || live_url.starts_with("https://"))
+                {
+                    Some((id, live_url))
                 } else {
-                    None
+                    // Fall back to TabKind url
+                    if let TabKind::WebView { url } = &tab.kind {
+                        if !url.is_empty() { Some((id, url.clone())) } else { None }
+                    } else {
+                        None
+                    }
                 }
-            })
+            } else {
+                None
+            }
         });
-        if let Some((old_id, url)) = reopen_url {
+        if let Some((old_id, url)) = reopen {
             self.close_tab(old_id, window, cx);
             self.open_webview(url, window, cx);
         } else {
             cx.notify();
         }
+    }
+
+    /// Create a new context with an auto-generated name and the first unused color,
+    /// then switch to it.
+    fn create_new_context(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let existing: Vec<crate::settings::SessionContext> = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.contexts.clone())
+            .unwrap_or_default();
+
+        // Pick the first unused color from the preset palette.
+        let used_colors: std::collections::HashSet<&str> =
+            existing.iter().map(|c| c.color.as_str()).collect();
+        let color = crate::settings::DEFAULT_CONTEXT_COLORS
+            .iter()
+            .find(|c| !used_colors.contains(**c))
+            .unwrap_or(&crate::settings::DEFAULT_CONTEXT_COLORS[0]);
+
+        // Generate a unique id and name like "Context 1", "Context 2", etc.
+        let num = existing.len() + 1;
+        let id = format!("ctx-{}", num);
+        let name = format!("Context {}", num);
+
+        let new_ctx = crate::settings::SessionContext {
+            id: id.clone(),
+            name,
+            color: color.to_string(),
+        };
+
+        cx.update_global::<crate::settings::SettingsGlobal, _>(|g, _| {
+            g.settings.contexts.push(new_ctx);
+            g.save();
+        });
+
+        self.switch_context(Some(id), window, cx);
     }
 
     /// Toggle the shield exception for the active tab's hostname.
@@ -1338,6 +1458,304 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     // Render: sidebar
     // ------------------------------------------------------------------
 
+    // ------------------------------------------------------------------
+    // Session save / restore
+    // ------------------------------------------------------------------
+
+    /// Build a SessionState snapshot from the current tabs.
+    pub fn save_session(&self, _cx: &App) {
+        use crate::session::{is_restorable, save_session, SessionState, SessionTab};
+
+        let tabs: Vec<SessionTab> = self
+            .tabs
+            .iter()
+            .filter(|t| is_restorable(&t.kind))
+            .map(|t| SessionTab {
+                kind: t.kind.clone(),
+                title: t.title.clone(),
+                pinned: t.pinned,
+                favicon_url: t.favicon_url.clone(),
+                context_id: t.context_id.clone(),
+            })
+            .collect();
+
+        if tabs.is_empty() {
+            return;
+        }
+
+        // Find the index of the active tab within the restorable subset.
+        let active_tab_index = self
+            .active_tab_id
+            .and_then(|id| {
+                let restorable_ids: Vec<u64> = self
+                    .tabs
+                    .iter()
+                    .filter(|t| is_restorable(&t.kind))
+                    .map(|t| t.id)
+                    .collect();
+                restorable_ids.iter().position(|&tid| tid == id)
+            })
+            .unwrap_or(0);
+
+        let state = SessionState {
+            version: 1,
+            tabs,
+            active_tab_index,
+            next_tab_id: self.next_tab_id,
+            active_context: self.active_context.clone(),
+            isolated_tabs: self.isolated_tabs,
+        };
+
+        save_session(&state);
+    }
+
+    /// Restore tabs from saved session. Returns true if at least one tab was restored.
+    pub fn restore_session(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        use crate::session::load_session;
+        use crate::tabs::TabKind;
+
+        let state = match load_session() {
+            Some(s) => s,
+            None => return false,
+        };
+
+        self.next_tab_id = state.next_tab_id;
+        self.active_context = state.active_context;
+        self.isolated_tabs = state.isolated_tabs;
+
+        let mut restored_count = 0usize;
+
+        for stab in &state.tabs {
+            match &stab.kind {
+                TabKind::WebView { url } => {
+                    let id = self.alloc_id();
+                    let ctx = stab.context_id.clone();
+                    let entity = cx.new(|cx| {
+                        WebViewTab::new(url.clone(), ctx.clone(), window, cx)
+                    });
+                    let nav = WebViewTab::nav_handler(entity.clone());
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: stab.kind.clone(),
+                        title: stab.title.clone(),
+                        icon: IconName::Globe,
+                        entity: entity.into(),
+                        pinned: stab.pinned,
+                        nav: Some(nav),
+                        favicon_url: stab.favicon_url.clone(),
+                        context_id: ctx,
+                    });
+                    restored_count += 1;
+                }
+                TabKind::Settings => {
+                    self.open_settings(window, cx);
+                    restored_count += 1;
+                }
+                TabKind::CodeEditor { path } => {
+                    if let Some(p) = path {
+                        if !std::path::Path::new(p).exists() {
+                            log::warn!("Skipping restore of missing file: {p}");
+                            continue;
+                        }
+                    }
+                    let id = self.alloc_id();
+                    let entity = cx.new(|cx| {
+                        CodeEditorTab::new(path.clone(), window, cx)
+                    });
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: stab.kind.clone(),
+                        title: stab.title.clone(),
+                        icon: IconName::File,
+                        entity: entity.into(),
+                        pinned: stab.pinned,
+                        nav: None,
+                        favicon_url: None,
+                        context_id: None,
+                    });
+                    restored_count += 1;
+                }
+                TabKind::DeclarativeApp { path } => {
+                    if !std::path::Path::new(path).exists() {
+                        log::warn!("Skipping restore of missing app: {path}");
+                        continue;
+                    }
+                    let id = self.alloc_id();
+                    let broker = self.broker.clone();
+                    let entity = cx.new(|cx| {
+                        DeclarativeAppTab::new(path.clone(), broker, window, cx)
+                    });
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: stab.kind.clone(),
+                        title: stab.title.clone(),
+                        icon: IconName::File,
+                        entity: entity.into(),
+                        pinned: stab.pinned,
+                        nav: None,
+                        favicon_url: None,
+                        context_id: None,
+                    });
+                    restored_count += 1;
+                }
+                _ => {
+                    // Welcome, SandboxApp, FramebufferApp — skip
+                }
+            }
+        }
+
+        if restored_count == 0 {
+            return false;
+        }
+
+        // Set active tab from saved index, clamped to restored tab count.
+        let idx = state.active_tab_index.min(self.tabs.len().saturating_sub(1));
+        if let Some(tab) = self.tabs.get(idx) {
+            let id = tab.id;
+            self.switch_tab(id, window, cx);
+        }
+
+        cx.notify();
+        true
+    }
+
+    // ------------------------------------------------------------------
+    // Find-in-page
+    // ------------------------------------------------------------------
+
+    fn on_find_input_event(
+        &mut self,
+        _entity: Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            InputEvent::Change => {
+                let query = self.find_input.read(cx).value().to_string();
+                if query.is_empty() {
+                    self.clear_find_highlights(cx);
+                } else {
+                    self.find_in_active_tab(false, cx);
+                }
+            }
+            InputEvent::PressEnter { .. } => {
+                self.find_in_active_tab(false, cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn find_in_active_tab(&self, backwards: bool, cx: &App) {
+        let query = self.find_input.read(cx).value().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let Some(id) = self.active_tab_id else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+            // Escape the query for embedding in JS string literal.
+            let escaped = query
+                .replace('\\', "\\\\")
+                .replace('\'', "\\'")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            let js = format!(
+                "window.find('{}', false, {}, true)",
+                escaped,
+                if backwards { "true" } else { "false" }
+            );
+            entity.read(cx).evaluate_script(&js, cx);
+        }
+    }
+
+    fn clear_find_highlights(&self, cx: &App) {
+        let Some(id) = self.active_tab_id else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+            entity
+                .read(cx)
+                .evaluate_script("window.getSelection().removeAllRanges()", cx);
+        }
+    }
+
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find_open = false;
+        self.clear_find_highlights(cx);
+        self.find_input
+            .update(cx, |s, inner_cx| s.set_value("".to_string(), window, inner_cx));
+        cx.notify();
+    }
+
+    fn render_find_bar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let find_bar_bg = rgba(0x3a3a3aff);
+        let border_color = rgba(0xffffff1e);
+
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(find_bar_bg)
+            .border_b_1()
+            .border_color(border_color)
+            .child(
+                Icon::new(IconName::Search)
+                    .size(px(14.0))
+                    .text_color(rgba(0xffffff66)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .child(
+                        Input::new(&self.find_input)
+                            .appearance(false)
+                            .small()
+                            .cleanable(true),
+                    ),
+            )
+            .child(
+                Button::new("find-prev")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ArrowUp)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.find_in_active_tab(true, cx);
+                    })),
+            )
+            .child(
+                Button::new("find-next")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ArrowDown)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.find_in_active_tab(false, cx);
+                    })),
+            )
+            .child(
+                Button::new("find-close")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Close)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.close_find(window, cx);
+                    })),
+            )
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" {
+                    this.close_find(window, cx);
+                }
+                // Shift+Enter → find previous
+                if ev.keystroke.key == "enter" && ev.keystroke.modifiers.shift {
+                    this.find_in_active_tab(true, cx);
+                }
+            }))
+    }
+
     fn render_sidebar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let url_bar_bg = rgba(0xffffff14);
         let item_active_bg = rgba(0xffffff1c);
@@ -1522,6 +1940,41 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 );
             }
 
+            // Separator + "+ New Context" row
+            rows.push(
+                div()
+                    .h(px(1.0))
+                    .mx(px(6.0))
+                    .my(px(3.0))
+                    .bg(rgba(0xffffff14))
+                    .into_any_element(),
+            );
+            rows.push(
+                div()
+                    .id("ctx-new")
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .px(px(10.0))
+                    .py(px(6.0))
+                    .rounded(px(4.0))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(rgba(0xffffff14)))
+                    .child(Icon::new(IconName::Plus).size(px(12.0)).text_color(rgba(0xffffff55)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgba(0xffffffaa))
+                            .child("New Context"),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.context_picker_open = false;
+                        this.create_new_context(window, cx);
+                    }))
+                    .into_any_element(),
+            );
+
             // Position below url bar: top_row(38) + url margin(4) + url height(~32) + gap(2)
             Some(
                 div()
@@ -1544,23 +1997,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             None
         };
 
-        // Backdrop to dismiss dropdown when clicking outside
-        let context_backdrop = if experimental_contexts_on && context_picker_open {
-            Some(
-                div()
-                    .id("ctx-backdrop")
-                    .absolute()
-                    .top(px(0.0))
-                    .left(px(0.0))
-                    .size_full()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.context_picker_open = false;
-                        cx.notify();
-                    })),
-            )
-        } else {
-            None
-        };
+        // Backdrop is now rendered at the root level (Render::render)
+        // so it covers the full window, not just the sidebar.
 
         let url_row = div()
             .id("url-bar")
@@ -1780,8 +2218,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .child(url_row)
             .child(tabs_area)
             .child(bottom_bar)
-            // Context picker overlay — painted last so it sits on top of tabs
-            .children(context_backdrop)
+            // Context picker dropdown — painted last so it sits on top of tabs
             .children(context_dropdown)
     }
 
@@ -1973,16 +2410,29 @@ impl Render for Workbench {
                 // In pinned mode the overlay inset is zero.
                 cx.set_global(OverlayLeftInset(0.0));
 
+                let find_bar_pinned = if self.find_open {
+                    Some(self.render_find_bar(window, cx).into_any_element())
+                } else {
+                    None
+                };
+
                 let content = div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .size_full()
                     .pt(px(CHROME))
                     .pr(px(CHROME))
                     .pb(px(CHROME))
+                    // Find bar sits in the chrome zone, ABOVE the rounded content
+                    // container. This keeps it on the GPUI Metal layer (visible)
+                    // rather than behind the WKWebView native NSView.
+                    .children(find_bar_pinned)
                     .child(
                         div()
                             .relative()
-                            .size_full()
+                            .flex_1()
+                            .w_full()
                             .rounded(px(RADIUS))
                             .overflow_hidden()
                             .bg(cx.theme().background)
@@ -1995,6 +2445,24 @@ impl Render for Workbench {
                     None
                 };
 
+                // Backdrop to dismiss context dropdown when clicking outside
+                let ctx_backdrop = if self.context_picker_open {
+                    Some(
+                        div()
+                            .id("ctx-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.context_picker_open = false;
+                                cx.notify();
+                            })),
+                    )
+                } else {
+                    None
+                };
+
                 div()
                     .relative()
                     .size_full()
@@ -2003,6 +2471,7 @@ impl Render for Workbench {
                     .flex_row()
                     .child(self.render_sidebar(window, cx))
                     .child(content)
+                    .children(ctx_backdrop)
                     .children(omnibox)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
@@ -2018,6 +2487,22 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+                    .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
+                        this.find_open = !this.find_open;
+                        if this.find_open {
+                            let fh = this.find_input.focus_handle(cx);
+                            window.focus(&fh);
+                        } else {
+                            this.close_find(window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(|this, _: &FindPrev, _, cx| {
+                        this.find_in_active_tab(true, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &CloseFindBar, window, cx| {
+                        this.close_find(window, cx);
+                    }))
             }
 
             // ---- Overlay: sidebar slides in as a modal over full-width content ----
@@ -2032,18 +2517,28 @@ impl Render for Workbench {
                 let webview_inset = (SIDEBAR_W * anim - CHROME).max(0.0);
                 cx.set_global(OverlayLeftInset(webview_inset));
 
+                let find_bar_overlay = if self.find_open {
+                    Some(self.render_find_bar(window, cx).into_any_element())
+                } else {
+                    None
+                };
+
                 // ── Content viewport ─────────────────────────────────────────────────
                 // Full width with uniform chrome margins on all sides.
                 let content = div()
+                    .flex()
+                    .flex_col()
                     .size_full()
                     .pt(px(CHROME))
                     .pr(px(CHROME))
                     .pb(px(CHROME))
                     .pl(px(CHROME))
+                    .children(find_bar_overlay)
                     .child(
                         div()
                             .relative()
-                            .size_full()
+                            .flex_1()
+                            .w_full()
                             .rounded(px(RADIUS))
                             .overflow_hidden()
                             .bg(cx.theme().background)
@@ -2087,6 +2582,24 @@ impl Render for Workbench {
                     None
                 };
 
+                // Backdrop to dismiss context dropdown when clicking outside
+                let ctx_backdrop_overlay = if self.context_picker_open {
+                    Some(
+                        div()
+                            .id("ctx-backdrop-overlay")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.context_picker_open = false;
+                                cx.notify();
+                            })),
+                    )
+                } else {
+                    None
+                };
+
                 // In fullscreen overlay mode with sidebar hidden, show a small toolbar
                 // at the top-left so the user can access the sidebar pin button next to
                 // the traffic lights (which macOS manages in the fullscreen hover zone).
@@ -2120,6 +2633,7 @@ impl Render for Workbench {
                     .size_full()
                     .bg(chrome_bg)
                     .child(content)
+                    .children(ctx_backdrop_overlay)
                     .children(sidebar)
                     .children(fullscreen_bar)
                     .children(omnibox)
@@ -2137,6 +2651,22 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+                    .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
+                        this.find_open = !this.find_open;
+                        if this.find_open {
+                            let fh = this.find_input.focus_handle(cx);
+                            window.focus(&fh);
+                        } else {
+                            this.close_find(window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .on_action(cx.listener(|this, _: &FindPrev, _, cx| {
+                        this.find_in_active_tab(true, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &CloseFindBar, window, cx| {
+                        this.close_find(window, cx);
+                    }))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
                             return;

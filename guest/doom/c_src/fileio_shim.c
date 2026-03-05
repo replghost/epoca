@@ -11,63 +11,80 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 
-/* Host imports */
-extern uint32_t host_asset_read(uint32_t name_ptr, uint32_t name_len,
-                                uint32_t offset, uint32_t dst_ptr, uint32_t max_len);
-extern void host_log(const char *ptr, unsigned int len);
+/* Host imports (linked via Rust #[no_mangle] wrappers) */
+extern uint32_t host_asset_read_wrapper(uint32_t name_ptr, uint32_t name_len,
+                                        uint32_t offset, uint32_t dst_ptr, uint32_t max_len);
 
 /* libc shim functions we provide */
 extern void *malloc(size_t);
 extern void free(void *);
-extern size_t strlen(const char *);
-extern void *memcpy(void *, const void *, size_t);
-extern int strcmp(const char *, const char *);
-extern char *strrchr(const char *, int);
-extern int printf(const char *, ...);
 
-/* ── FILE emulation ─────────────────────────────────────────────── */
+/* ── Concrete definition of FILE (declared as struct _FILE in stdio.h) ── */
 
 #define MAX_OPEN_FILES 16
 
-typedef struct {
+struct _FILE {
     int in_use;
     unsigned char *data;
     size_t size;
     size_t pos;
     int eof_flag;
-} fake_file_t;
+    char asset_name[64]; /* cached asset name for reuse */
+};
 
-static fake_file_t file_table[MAX_OPEN_FILES];
-
-typedef fake_file_t FILE;
+static struct _FILE file_table[MAX_OPEN_FILES];
 
 /* Extract just the filename from a path (strip directories). */
-static const char *basename(const char *path) {
-    const char *slash = strrchr(path, '/');
+static const char *base_name(const char *path) {
+    const char *slash;
+    if (!path) return "";
+    slash = strrchr(path, '/');
     if (slash) return slash + 1;
     slash = strrchr(path, '\\');
     if (slash) return slash + 1;
     return path;
 }
 
+/* Check if we already have this asset loaded (closed but data still valid). */
+static struct _FILE *find_cached(const char *name) {
+    for (int i = 0; i < MAX_OPEN_FILES; i++) {
+        if (!file_table[i].in_use && file_table[i].data != NULL
+            && strcmp(file_table[i].asset_name, name) == 0) {
+            return &file_table[i];
+        }
+    }
+    return NULL;
+}
+
 FILE *fopen(const char *path, const char *mode) {
     (void)mode; /* We only support reading. */
 
-    /* Find the asset name — try both full path and basename. */
-    const char *name = basename(path);
+    /* Reject NULL or empty paths immediately. */
+    if (!path || path[0] == '\0') return NULL;
+
+    /* Find the asset name — try basename. */
+    const char *name = base_name(path);
     size_t name_len = strlen(name);
+    if (name_len == 0) return NULL;
 
-    /* First, probe the size by reading with offset 0 into a small buffer
-     * and checking how much we get. We'll read in chunks. */
+    /* Reuse cached data from a previous open/close of the same asset. */
+    struct _FILE *cached = find_cached(name);
+    if (cached) {
+        cached->in_use = 1;
+        cached->pos = 0;
+        cached->eof_flag = 0;
+        printf("fopen: %s (cached, %u bytes)\n", name, (unsigned)cached->size);
+        return cached;
+    }
 
-    /* Try to find the total size — read up to 32MB in 64KB chunks. */
     #define PROBE_CHUNK (64 * 1024)
     #define MAX_FILE_SIZE (32 * 1024 * 1024)
 
-    /* First read a single byte at a very high offset to see if asset exists at all. */
+    /* Check if asset exists. */
     uint8_t probe;
-    uint32_t got = host_asset_read((uint32_t)(uintptr_t)name, name_len,
+    uint32_t got = host_asset_read_wrapper((uint32_t)(uintptr_t)name, name_len,
                                    0, (uint32_t)(uintptr_t)&probe, 1);
     if (got == 0) {
         printf("fopen: asset not found: %s\n", name);
@@ -78,7 +95,7 @@ FILE *fopen(const char *path, const char *mode) {
     size_t lo = 1, hi = MAX_FILE_SIZE;
     while (lo < hi) {
         size_t mid = lo + (hi - lo + 1) / 2;
-        got = host_asset_read((uint32_t)(uintptr_t)name, name_len,
+        got = host_asset_read_wrapper((uint32_t)(uintptr_t)name, name_len,
                               (uint32_t)(mid - 1), (uint32_t)(uintptr_t)&probe, 1);
         if (got > 0) lo = mid;
         else hi = mid - 1;
@@ -88,7 +105,7 @@ FILE *fopen(const char *path, const char *mode) {
     /* Allocate and read the entire file. */
     unsigned char *data = (unsigned char *)malloc(file_size);
     if (!data) {
-        printf("fopen: malloc failed for %zu bytes\n", file_size);
+        printf("fopen: malloc failed for %u bytes\n", (unsigned)file_size);
         return NULL;
     }
 
@@ -96,7 +113,7 @@ FILE *fopen(const char *path, const char *mode) {
     while (offset < file_size) {
         size_t chunk = file_size - offset;
         if (chunk > PROBE_CHUNK) chunk = PROBE_CHUNK;
-        got = host_asset_read((uint32_t)(uintptr_t)name, name_len,
+        got = host_asset_read_wrapper((uint32_t)(uintptr_t)name, name_len,
                               (uint32_t)offset,
                               (uint32_t)(uintptr_t)(data + offset),
                               (uint32_t)chunk);
@@ -106,13 +123,16 @@ FILE *fopen(const char *path, const char *mode) {
 
     /* Find a free file slot. */
     for (int i = 0; i < MAX_OPEN_FILES; i++) {
-        if (!file_table[i].in_use) {
+        if (!file_table[i].in_use && file_table[i].data == NULL) {
             file_table[i].in_use = 1;
             file_table[i].data = data;
-            file_table[i].size = offset; /* actual bytes read */
+            file_table[i].size = offset;
             file_table[i].pos = 0;
             file_table[i].eof_flag = 0;
-            printf("fopen: %s (%zu bytes)\n", name, offset);
+            /* Cache the asset name for reuse after fclose. */
+            strncpy(file_table[i].asset_name, name, sizeof(file_table[i].asset_name) - 1);
+            file_table[i].asset_name[sizeof(file_table[i].asset_name) - 1] = '\0';
+            printf("fopen: %s (%u bytes)\n", name, (unsigned)offset);
             return &file_table[i];
         }
     }
@@ -124,9 +144,10 @@ FILE *fopen(const char *path, const char *mode) {
 
 int fclose(FILE *f) {
     if (!f || !f->in_use) return -1;
-    /* Don't free — bump allocator doesn't reclaim. Just mark slot free. */
     f->in_use = 0;
-    f->data = NULL;
+    /* Keep f->data and f->asset_name for cache reuse on next fopen. */
+    f->pos = 0;
+    f->eof_flag = 0;
     return 0;
 }
 
@@ -148,17 +169,13 @@ size_t fwrite(const void *ptr, size_t size, size_t count, FILE *f) {
     return 0; /* Read-only filesystem. */
 }
 
-#define SEEK_SET_VAL 0
-#define SEEK_CUR_VAL 1
-#define SEEK_END_VAL 2
-
 int fseek(FILE *f, long offset, int whence) {
     if (!f || !f->in_use) return -1;
     long new_pos;
     switch (whence) {
-        case SEEK_SET_VAL: new_pos = offset; break;
-        case SEEK_CUR_VAL: new_pos = (long)f->pos + offset; break;
-        case SEEK_END_VAL: new_pos = (long)f->size + offset; break;
+        case SEEK_SET: new_pos = offset; break;
+        case SEEK_CUR: new_pos = (long)f->pos + offset; break;
+        case SEEK_END: new_pos = (long)f->size + offset; break;
         default: return -1;
     }
     if (new_pos < 0) new_pos = 0;
@@ -217,6 +234,9 @@ typedef struct {
     FILE *stream;
 } stdc_wad_file_t;
 
+/* Forward declaration */
+wad_file_class_t stdc_wad_file;
+
 static wad_file_t *W_Shim_OpenFile(char *path) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -235,13 +255,12 @@ static wad_file_t *W_Shim_OpenFile(char *path) {
 static void W_Shim_CloseFile(wad_file_t *wad) {
     stdc_wad_file_t *sf = (stdc_wad_file_t *)wad;
     fclose(sf->stream);
-    /* Can't truly free with bump allocator. */
 }
 
 static size_t W_Shim_Read(wad_file_t *wad, unsigned int offset,
                           void *buffer, size_t buffer_len) {
     stdc_wad_file_t *sf = (stdc_wad_file_t *)wad;
-    fseek(sf->stream, (long)offset, SEEK_SET_VAL);
+    fseek(sf->stream, (long)offset, SEEK_SET);
     return fread(buffer, 1, buffer_len, sf->stream);
 }
 

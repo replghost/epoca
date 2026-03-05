@@ -8,9 +8,67 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Session restore** — Open tabs are saved to `session.json` every 30s and on quit (⌘Q). On next
+  launch (no CLI arg), tabs are restored with their URLs, titles, favicons, pinned state, and
+  session contexts. Atomic writes via `.tmp` + rename. Skips non-restorable tab types (SandboxApp,
+  FramebufferApp, Welcome). `session.rs`, `WorkbenchRef` global. (2026-03-04)
+
+- **Find-in-page (⌘F)** — Opens a find bar between chrome and content area. Live search on typing,
+  Enter for next match, Shift+Enter/↑ for previous, Escape to close. Uses `window.find()` JS API
+  on the active WebViewTab. No-op on non-WebView tabs. `FindInPage`, `FindPrev`, `CloseFindBar`
+  actions. Edit menu with Find entry. (2026-03-04)
+
+- **Embedded HTTP test server** — `localhost:9223` test API behind `#[cfg(feature = "test-server")]` +
+  `EPOCA_TEST=1`. Endpoints: `GET /state` (full app snapshot), `POST /action` (navigate, new_tab,
+  close_tab, etc.), `GET /webview/eval?js=X` (JS eval with correlation IDs). Channel-drain pattern
+  matches existing shield.rs architecture. `test_server.rs`, `tools/test_cursor.sh`. (2026-03-04)
+
+- **Session contexts** — Named browsing sessions with separate WKWebView data stores. Each context
+  shares cookies/storage across its tabs; tabs without a context are fully private. Context picker
+  dropdown in URL bar (colored dot prefix). "Open in Context" submenu in right-click menu.
+  `experimental_contexts` setting toggle. `SessionContext` type in settings.rs. (2026-03-04)
+
+- **"+ New Context" in dropdown** — Context picker dropdown includes a "+ New Context" row at the
+  bottom, so users can create contexts without going to Settings. Auto-picks first unused color
+  from preset palette. (2026-03-04)
+
+- **"Private Tab" in context menu** — "Open in Context" right-click submenu always shows "Private Tab"
+  option (opens link with no context/isolated data store). `MenuAction::OpenPrivate`. (2026-03-04)
+
 - **URL bar triple-click select-all** — Triple-clicking the URL bar selects the entire URL, matching
   standard browser behavior. Uses `on_mouse_down` with `click_count >= 3` to dispatch
   `gpui_component::input::SelectAll`. (2026-03-04)
+
+### Fixed
+- **Cursor pointer (hand icon) on links** — GPUI's `reset_cursor_style()` overrode WKWebView's CSS
+  cursor every paint frame. Fix: `canvas` paint closure calls `window.set_window_cursor_style(
+  CursorStyle::PointingHand)` with `hitbox_id: None`, bypassing hit-test. (2026-03-04)
+
+- **URL bar navigates in-place** — Entering a URL or search query in the URL bar now navigates the
+  current WebView tab instead of always opening a new tab. New tabs only opened from omnibox (⌘T)
+  or when no navigable tab exists. (2026-03-04)
+
+- **Context indicator syncs on tab switch** — `active_context` now updates when switching tabs, but
+  only from WebView tabs. Non-WebView tabs (Settings, Welcome) don't reset the context indicator.
+  (2026-03-04)
+
+- **Context switch reopens with live URL** — `switch_context()` reads the URL bar input (live URL)
+  instead of the stale `TabKind::WebView { url }` that may reflect the original navigation. (2026-03-04)
+
+- **Context dropdown backdrop covers full window** — Backdrop div now renders at the root Workbench
+  level so clicks anywhere outside the dropdown dismiss it (previously only covered sidebar area).
+  Dropdown also auto-closes when sidebar hides in overlay mode. (2026-03-04)
+
+- **Orphaned tabs cleaned up on context delete** — When a context is deleted in Settings, tabs that
+  referenced it have their `context_id` set to `None` (private). `active_context` also resets if it
+  referenced the deleted context. Checked in `process_pending_nav`. (2026-03-04)
+
+- **Duplicate context colors** — Both the dropdown "+ New Context" and Settings "Add Context" now
+  pick the first unused color from `DEFAULT_CONTEXT_COLORS` instead of cycling by index, preventing
+  duplicates after delete+create cycles. (2026-03-04)
+
+- **Context dot sizes standardized** — URL bar dot 6px, tab sidebar dot 5px, dropdown dot 6px
+  (previously inconsistent 4–7px). (2026-03-04)
 
 - **Right-click link context menu** — Right-clicking a link in any WebView shows a native NSMenu with:
   Open in New Tab, Open in New Window, Open in Context (submenu, when experimental contexts enabled),

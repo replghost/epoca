@@ -515,6 +515,7 @@ fn build_snapshot(wb: &Workbench, cx: &App) -> AppSnapshot {
                 crate::tabs::TabKind::SandboxApp { .. } => "sandbox_app".to_string(),
                 crate::tabs::TabKind::DeclarativeApp { .. } => "declarative_app".to_string(),
                 crate::tabs::TabKind::WebView { .. } => "webview".to_string(),
+                crate::tabs::TabKind::FramebufferApp { .. } => "framebuffer_app".to_string(),
             };
             TabSnapshot {
                 id: tab.id,

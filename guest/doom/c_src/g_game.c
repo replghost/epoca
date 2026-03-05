@@ -2149,14 +2149,21 @@ static char *DemoVersionDescription(int version)
     }
 }
 
-void G_DoPlayDemo (void) 
-{ 
-    skill_t skill; 
-    int             i, episode, map; 
+void G_DoPlayDemo (void)
+{
+    skill_t skill;
+    int             i, episode, map;
     int demoversion;
-	 
-    gameaction = ga_nothing; 
-    demobuffer = demo_p = W_CacheLumpName (defdemoname, PU_STATIC); 
+
+    gameaction = ga_nothing;
+
+    /* Guard: defdemoname must not be NULL — fall back to demo1. */
+    if (defdemoname == NULL)
+    {
+        defdemoname = "demo1";
+    }
+
+    demobuffer = demo_p = W_CacheLumpName (defdemoname, PU_STATIC);
 
     demoversion = *demo_p++;
 

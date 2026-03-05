@@ -4,6 +4,7 @@ pub mod view_bridge;
 pub mod declarative;
 pub mod shield;
 pub mod settings;
+pub mod session;
 pub mod chain;
 
 #[cfg(feature = "test-server")]

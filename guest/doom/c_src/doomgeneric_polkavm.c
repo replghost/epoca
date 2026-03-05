@@ -10,10 +10,10 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ── Host function imports (linked via Rust polkavm_import) ── */
-extern uint32_t host_present_frame(uint32_t ptr, uint32_t width, uint32_t height, uint32_t stride);
-extern uint32_t host_poll_input(uint32_t buf_ptr, uint32_t buf_len);
-extern uint64_t host_time_ms(void);
+/* ── Host function imports (linked via Rust #[no_mangle] wrappers) ── */
+extern uint32_t host_present_frame_wrapper(uint32_t ptr, uint32_t width, uint32_t height, uint32_t stride);
+extern uint32_t host_poll_input_wrapper(uint32_t buf_ptr, uint32_t buf_len);
+extern uint64_t host_time_ms_wrapper(void);
 
 /* ── Key mapping: host scancodes → DOOM key constants ── */
 /* The host sends the same scancodes we defined in FramebufferAppTab::keystroke_to_code */
@@ -71,7 +71,7 @@ static void push_key(int pressed, unsigned char key) {
 static void poll_host_input(void) {
     /* InputEvent is 4 bytes: [event_type, key_code, pad, pad] */
     uint8_t buf[MAX_KEYS * 4];
-    uint32_t bytes = host_poll_input((uint32_t)(uintptr_t)buf, sizeof(buf));
+    uint32_t bytes = host_poll_input_wrapper((uint32_t)(uintptr_t)buf, sizeof(buf));
     uint32_t count = bytes / 4;
     for (uint32_t i = 0; i < count; i++) {
         uint8_t type = buf[i * 4];
@@ -99,7 +99,7 @@ void DG_DrawFrame(void) {
     for (int i = 0; i < count; i++) {
         pixels[i] |= 0xFF000000;
     }
-    host_present_frame(
+    host_present_frame_wrapper(
         (uint32_t)(uintptr_t)DG_ScreenBuffer,
         DOOMGENERIC_RESX,
         DOOMGENERIC_RESY,
@@ -114,7 +114,7 @@ void DG_SleepMs(uint32_t ms) {
 }
 
 uint32_t DG_GetTicksMs(void) {
-    return (uint32_t)host_time_ms();
+    return (uint32_t)host_time_ms_wrapper();
 }
 
 int DG_GetKey(int *pressed, unsigned char *doom_key) {

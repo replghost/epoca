@@ -51,7 +51,7 @@ pub struct TabEntry {
 }
 
 /// The kind of tab that can be opened in the workbench.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TabKind {
     Welcome,
     Settings,
@@ -926,10 +926,17 @@ impl FramebufferAppTab {
         let shared_bg = shared.clone();
         match SandboxInstance::from_bytes(&bundle.program_bytes, &config) {
             Ok(mut sandbox) => {
+                log::info!("[fb] sandbox loaded, {} assets", bundle.assets.len());
+                for key in bundle.assets.keys() {
+                    log::info!("[fb] asset: {} ({} bytes)", key, bundle.assets[key].len());
+                }
                 sandbox.load_assets(bundle.assets);
+                log::info!("[fb] calling init...");
                 if let Err(e) = sandbox.call_init() {
+                    log::error!("[fb] init failed: {e}");
                     init_error = Some(format!("init failed: {e}"));
                 } else {
+                    log::info!("[fb] init succeeded, spawning bg thread");
                     std::thread::Builder::new()
                         .name(format!("fb-{}", app_id))
                         .spawn(move || {
@@ -939,6 +946,7 @@ impl FramebufferAppTab {
                 }
             }
             Err(e) => {
+                log::error!("[fb] load failed: {e}");
                 init_error = Some(format!("load failed: {e}"));
             }
         }
@@ -976,6 +984,9 @@ impl FramebufferAppTab {
     fn bg_loop(mut sandbox: SandboxInstance, shared: Arc<Mutex<FramebufferShared>>) {
         let mut rgba_buf: Vec<u8> = Vec::new();
         let target_dt = std::time::Duration::from_micros(16_667); // ~60fps
+        let mut tick_count = 0u64;
+
+        log::info!("[fb-bg] background loop started");
 
         loop {
             let tick_start = std::time::Instant::now();
@@ -984,6 +995,7 @@ impl FramebufferAppTab {
             {
                 let mut s = shared.lock().unwrap();
                 if s.stopped {
+                    log::info!("[fb-bg] stopped");
                     return;
                 }
                 while let Some(evt) = s.input_queue.pop_front() {
@@ -993,21 +1005,32 @@ impl FramebufferAppTab {
 
             // Run one guest update tick.
             if let Err(e) = sandbox.call_update() {
+                log::error!("[fb-bg] update error on tick {}: {e}", tick_count);
                 let mut s = shared.lock().unwrap();
                 s.error = Some(format!("update error: {e}"));
                 return;
             }
+            tick_count += 1;
+            if tick_count <= 5 || tick_count % 60 == 0 {
+                log::info!("[fb-bg] tick {} ok", tick_count);
+            }
 
-            // If the guest presented a frame, convert ARGB→RGBA and build RenderImage.
+            // If the guest presented a frame, convert to RGBA and build RenderImage.
+            // Guest writes 0xAARRGGBB u32s. On little-endian (riscv32) that's [B,G,R,A] in memory.
             if let Some((argb, w, h)) = sandbox.take_framebuffer() {
+                if tick_count <= 5 {
+                    log::info!("[fb-bg] got frame {}x{} ({} bytes)", w, h, argb.len());
+                }
                 let pixel_count = (w * h) as usize;
                 rgba_buf.resize(pixel_count * 4, 0);
                 for i in 0..pixel_count {
                     let base = i * 4;
-                    let a = argb[base];
-                    let r = argb[base + 1];
-                    let g = argb[base + 2];
-                    let b = argb[base + 3];
+                    // Memory layout (little-endian): [B, G, R, A]
+                    let b = argb[base];
+                    let g = argb[base + 1];
+                    let r = argb[base + 2];
+                    let a = argb[base + 3];
+                    // Output: RGBA
                     rgba_buf[base] = r;
                     rgba_buf[base + 1] = g;
                     rgba_buf[base + 2] = b;
@@ -2628,9 +2651,15 @@ impl Render for SettingsTab {
                                             .child(div().text_sm().child("Add Context"))
                                             .on_click(cx.listener(|_, _, _, cx| {
                                                 cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                                    // Pick first unused color from preset palette.
+                                                    let used: std::collections::HashSet<&str> =
+                                                        g.settings.contexts.iter().map(|c| c.color.as_str()).collect();
+                                                    let color = crate::settings::DEFAULT_CONTEXT_COLORS
+                                                        .iter()
+                                                        .find(|c| !used.contains(**c))
+                                                        .unwrap_or(&crate::settings::DEFAULT_CONTEXT_COLORS[0])
+                                                        .to_string();
                                                     let idx = g.settings.contexts.len();
-                                                    let color_idx = idx % crate::settings::DEFAULT_CONTEXT_COLORS.len();
-                                                    let color = crate::settings::DEFAULT_CONTEXT_COLORS[color_idx].to_string();
                                                     let name = format!("Context {}", idx + 1);
                                                     let id = format!("ctx-{}", uuid_v4_simple());
                                                     g.settings.contexts.push(crate::settings::SessionContext {

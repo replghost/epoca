@@ -25,12 +25,16 @@ fn main() {
         })
         .collect();
 
-    let mut build = cc::Build::new();
+    // Use env vars to force cc to use clang with our exact target triple.
+    // The cc crate replaces hyphens with underscores when looking up env vars.
+    std::env::set_var("CC_riscv32_polkavm_fixed", "clang");
+    std::env::set_var(
+        "CFLAGS_riscv32_polkavm_fixed",
+        "--target=riscv32-unknown-elf -march=rv32emc -mabi=ilp32e",
+    );
 
-    // Override the target triple — clang doesn't understand "polkavm" env,
-    // but riscv32-unknown-none-elf produces compatible object code.
+    let mut build = cc::Build::new();
     build
-        .target("riscv32-unknown-none-elf")
         .files(&sources)
         // Our shim files
         .file("c_src/libc_shim.c")
@@ -38,6 +42,8 @@ fn main() {
         .file("c_src/fileio_shim.c")
         .file("c_src/i_sound_stub.c")
         .include(&c_src)
+        // Our freestanding libc shim headers (used with -nostdinc)
+        .include("c_src/include")
         // Key defines
         .define("HAVE_DECL_STRCASECMP", "1")
         .define("HAVE_DECL_STRNCASECMP", "1")
@@ -49,14 +55,13 @@ fn main() {
         .warnings(false)
         .flag("-fno-builtin")
         .flag("-ffreestanding")
-        // Ensure we generate rv32 code compatible with polkavm
-        .flag("-march=rv32emc")
-        .flag("-mabi=ilp32e")
         .flag("-nostdinc")
-        // Prevent clang from emitting calls to compiler-rt builtins that don't exist
-        .flag("-fno-stack-protector");
+        .flag("-fno-stack-protector")
+        .flag("-fPIC");
 
     build.compile("doom");
 
+    // Allow undefined symbols — host_* functions are resolved by PolkaVM at runtime
+    println!("cargo:rustc-link-arg=--unresolved-symbols=ignore-all");
     println!("cargo:rerun-if-changed=c_src/");
 }

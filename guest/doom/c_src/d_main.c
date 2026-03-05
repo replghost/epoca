@@ -485,6 +485,11 @@ void D_PageTicker (void)
 //
 void D_PageDrawer (void)
 {
+    /* Guard: pagename can be NULL during startup before D_DoAdvanceDemo runs. */
+    if (pagename == NULL)
+    {
+        return;
+    }
     V_DrawPatch (0, 0, W_CacheLumpName(pagename, PU_CACHE));
 }
 
@@ -579,7 +584,7 @@ void D_DoAdvanceDemo (void)
 
     // The Doom 3: BFG Edition version of doom2.wad does not have a
     // TITLETPIC lump. Use INTERPIC instead as a workaround.
-    if (bfgedition && !strcasecmp(pagename, "TITLEPIC")
+    if (bfgedition && pagename != NULL && !strcasecmp(pagename, "TITLEPIC")
         && W_CheckNumForName("titlepic") < 0)
     {
         pagename = DEH_String("INTERPIC");

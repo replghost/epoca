@@ -47,12 +47,10 @@ Three interlocking advantages no other browser can replicate:
 
 ## P0 — Critical bugs / must-fix before sharing
 
-- [ ] **Sidebar layout bug**: content not extending to left edge when sidebar
-  collapses (`_inset_subscription` fix landed — needs validation)
+- [x] ~~**Sidebar layout bug**: content not extending to left edge when sidebar collapses~~ (resolved — `_inset_subscription` fix + CALayer mask working correctly)
 - [x] ~~**Omnibox focus**: ensure omnibox input auto-focuses when opened~~ (done — `new_tab()` calls `window.focus(&focus_handle)`)
 - [x] ~~**WelcomeTab startup**: app should open omnibox immediately on launch~~ (done — `new_tab(window, cx)` called on startup)
-- [ ] **Crash on fast sidebar toggle**: rapid toggle can leave animation task
-  in inconsistent state
+- [x] ~~**Crash on fast sidebar toggle**~~ (resolved — generation counter `sidebar_anim_gen` prevents concurrent animation loops)
 
 ---
 
