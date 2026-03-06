@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, FindInPage, FindPrev, CloseFindBar]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, OpenAppLibrary, OpenApp, FindInPage, FindPrev, CloseFindBar]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -70,8 +70,8 @@ fn is_window_fullscreen() -> bool {
 }
 
 use crate::tabs::{
-    CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab, SettingsTab, SpaTab,
-    TabEntry, TabKind, WebViewTab,
+    AppLibraryTab, CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab,
+    SettingsTab, SpaTab, TabEntry, TabKind, WebViewTab,
 };
 use epoca_sandbox::ProdBundle;
 
@@ -535,7 +535,22 @@ impl Workbench {
                     }
                 }
             }
-            if changed { cx.notify(); }
+            // When a page navigates, its wallet_connected flag may be stale
+            // if the new hostname is not in connected_sites.
+            if changed {
+                for tab in &self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        let wv = entity.read(cx);
+                        if wv.wallet_connected {
+                            let host = hostname_from_url(wv.url()).to_string();
+                            if !self.connected_sites.contains(&host) {
+                                entity.update(cx, |wv, _| wv.wallet_connected = false);
+                            }
+                        }
+                    }
+                }
+                cx.notify();
+            }
         }
         // Drain favicon URL events (epocaFavicon WKScriptMessageHandler)
         let favicon_events = crate::shield::drain_favicon_events();
@@ -759,6 +774,20 @@ impl Workbench {
             .map(|g| g.settings.experimental_wallet)
             .unwrap_or(false);
         if wallet_enabled {
+            // Advance wallet state machine — check auto-lock / sleep-lock
+            if cx.has_global::<crate::wallet::WalletGlobal>() {
+                let locked = cx.global_mut::<crate::wallet::WalletGlobal>().manager.tick();
+                if locked {
+                    self.connected_sites.clear();
+                    for tab in &self.tabs {
+                        if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                            entity.update(cx, |wv, _| wv.wallet_connected = false);
+                        }
+                    }
+                    self.wallet_popover_open = false;
+                    cx.notify();
+                }
+            }
             let wallet_events = crate::wallet::drain_wallet_events();
             for ev in wallet_events {
                 // Find the WebViewTab matching this event's webview_ptr
@@ -810,15 +839,21 @@ impl Workbench {
                                     }
                                 }
                                 method @ ("signPayload" | "signRaw") => {
-                                    // Queue for user confirmation — only one at a time
-                                    if self.pending_wallet_sign.is_some() {
+                                    let origin_url = entity.read(cx).url().to_string();
+                                    let origin_host = hostname_from_url(&origin_url).to_string();
+                                    if !self.connected_sites.contains(&origin_host) {
+                                        let js = format!(
+                                            "window.__epocaWalletResolve({}, 'site not connected', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else if self.pending_wallet_sign.is_some() {
                                         let js = format!(
                                             "window.__epocaWalletResolve({}, 'another signing request is pending', null)",
                                             ev.id,
                                         );
                                         entity.read(cx).evaluate_script(&js, cx);
                                     } else {
-                                        let origin = entity.read(cx).url().to_string();
                                         let display_message = if method == "signPayload" {
                                             "Sign an extrinsic (transaction)".to_string()
                                         } else {
@@ -830,7 +865,7 @@ impl Workbench {
                                             method: method.to_string(),
                                             params_json: ev.params_json,
                                             display_message,
-                                            origin: hostname_from_url(&origin).to_string(),
+                                            origin: origin_host,
                                         });
                                         cx.notify();
                                     }
@@ -3290,7 +3325,7 @@ impl Workbench {
                 // Return { id: 1, signature: "0x01..." } — 0x01 prefix = sr25519 type byte
                 let js = format!(
                     "window.__epocaWalletResolve({}, null, {{id: 1, signature: '0x01{}'}})",
-                    req.id, &sig_hex[2..], // strip "0x" from sig_hex, prepend "0x01"
+                    req.id, sig_hex.strip_prefix("0x").unwrap_or(&sig_hex),
                 );
                 self.evaluate_on_webview(req.webview_ptr, &js, cx);
             }

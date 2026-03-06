@@ -55,6 +55,7 @@ pub struct TabEntry {
 pub enum TabKind {
     Welcome,
     Settings,
+    AppLibrary,
     CodeEditor { path: Option<String> },
     SandboxApp { app_id: String },
     FramebufferApp { app_id: String },
@@ -891,6 +892,8 @@ pub struct FramebufferAppTab {
     #[allow(dead_code)]
     broker: Arc<Mutex<CapabilityBroker>>,
     error: Option<String>,
+    /// Controls hint from manifest — dismissed on first keypress.
+    controls_hint: Option<String>,
 }
 
 impl FramebufferAppTab {
@@ -902,6 +905,11 @@ impl FramebufferAppTab {
         cx: &mut Context<Self>,
     ) -> Self {
         let app_id = bundle.manifest.app.id.clone();
+        let controls_hint = bundle
+            .manifest
+            .sandbox
+            .as_ref()
+            .and_then(|s| s.controls_hint.clone());
         let max_gas = bundle
             .manifest
             .sandbox
@@ -979,6 +987,7 @@ impl FramebufferAppTab {
             current_frame: None,
             broker,
             error: init_error,
+            controls_hint,
         }
     }
 
@@ -1165,6 +1174,8 @@ impl Render for FramebufferAppTab {
                 .items_center()
                 .justify_center()
                 .bg(gpui::black())
+                .rounded(px(10.0))
+                .overflow_hidden()
                 .child(
                     gpui::img(gpui::ImageSource::Render(frame.clone()))
                         .size_full()
@@ -1181,11 +1192,35 @@ impl Render for FramebufferAppTab {
                 .into_any_element()
         };
 
+        // Controls hint overlay (bottom-center, semi-transparent, dismissed on first keypress)
+        let hint_overlay = self.controls_hint.as_ref().map(|hint| {
+            div()
+                .absolute()
+                .bottom_3()
+                .left_0()
+                .w_full()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .bg(gpui::rgba(0x000000cc))
+                        .text_color(gpui::rgba(0xffffffcc))
+                        .text_sm()
+                        .child(Label::new(hint.clone())),
+                )
+        });
+
         div()
             .track_focus(&self.focus_handle)
             .size_full()
+            .relative()
             .child(content)
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, _cx| {
+            .children(hint_overlay)
+            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
+                this.controls_hint = None;
                 if let Some(code) = Self::keystroke_to_code(&ev.keystroke) {
                     if let Ok(mut s) = this.shared.lock() {
                         s.input_queue.push_back(InputEvent {
@@ -1195,6 +1230,7 @@ impl Render for FramebufferAppTab {
                         });
                     }
                 }
+                cx.notify();
             }))
             .on_key_up(cx.listener(|this, ev: &gpui::KeyUpEvent, _window, _cx| {
                 if let Some(code) = Self::keystroke_to_code(&ev.keystroke) {
@@ -1209,6 +1245,195 @@ impl Render for FramebufferAppTab {
             }))
             .into_any_element()
     }
+}
+
+// ---------------------------------------------------------------------------
+// App Library Panel
+// ---------------------------------------------------------------------------
+
+use crate::app_library::{self, InstalledApp};
+use crate::workbench::{OpenApp, OpenAppLibrary};
+
+pub struct AppLibraryTab {
+    focus_handle: FocusHandle,
+    apps: Vec<InstalledApp>,
+}
+
+impl AppLibraryTab {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            apps: app_library::list_installed(),
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        self.apps = app_library::list_installed();
+    }
+}
+
+impl EventEmitter<PanelEvent> for AppLibraryTab {}
+
+impl Focusable for AppLibraryTab {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for AppLibraryTab {
+    fn panel_name(&self) -> &'static str {
+        "AppLibraryTab"
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "App Library"
+    }
+
+    fn dump(&self, _cx: &App) -> PanelState {
+        PanelState::new(self)
+    }
+}
+
+impl Render for AppLibraryTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        use gpui_component::theme::ActiveTheme;
+
+        let theme = cx.theme();
+        let bg = theme.background;
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let border = theme.border;
+
+        let header = div()
+            .px_6()
+            .py_4()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(fg)
+                    .child("App Library"),
+            )
+            .child(
+                Button::new("open-app")
+                    .label("Open .prod")
+                    .small()
+                    .on_click(cx.listener(|_this, _ev, _window, cx| {
+                        cx.dispatch_action(Box::new(OpenApp));
+                    })),
+            );
+
+        let cards = if self.apps.is_empty() {
+            div()
+                .px_6()
+                .py_12()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(
+                    Label::new("No apps installed")
+                        .text_color(muted),
+                )
+                .child(
+                    Label::new("Use File > Open App to install a .prod bundle")
+                        .text_color(muted),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .px_6()
+                .py_2()
+                .flex()
+                .flex_wrap()
+                .gap_4()
+                .children(self.apps.iter().map(|app| {
+                    let app_id = app.app_id.clone();
+                    let name = app.name.clone();
+                    let version = app.version.clone();
+                    let is_fb = app.framebuffer;
+
+                    div()
+                        .w(px(200.0))
+                        .p_4()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(border)
+                        .bg(bg)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme.accent.opacity(0.1)))
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    gpui_component::Icon::new(if is_fb {
+                                        IconName::Frame
+                                    } else {
+                                        IconName::SquareTerminal
+                                    })
+                                    .size_5()
+                                    .text_color(theme.accent),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(fg)
+                                        .child(name),
+                                ),
+                        )
+                        .child(
+                            Label::new(format!("v{version}"))
+                                .text_color(muted)
+                                .text_xs(),
+                        )
+                        .on_mouse_down(gpui::MouseButton::Left, {
+                            let app_id = app_id.clone();
+                            cx.listener(move |_this, _ev, _window, cx| {
+                                app_library::touch_last_launched(&app_id);
+                                match app_library::load_installed(&app_id) {
+                                    Ok(bundle) => {
+                                        // Dispatch to workbench to open the app.
+                                        // We use the GPUI event system via a custom channel.
+                                        log::info!("[app-library] Launching {}", app_id);
+                                        // Store bundle in a static for the workbench to pick up.
+                                        *PENDING_LAUNCH.lock().unwrap() = Some(bundle);
+                                        cx.dispatch_action(Box::new(OpenApp));
+                                    }
+                                    Err(e) => {
+                                        log::error!("[app-library] Failed to load {}: {e}", app_id);
+                                    }
+                                }
+                            })
+                        })
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .overflow_y_scroll()
+            .bg(bg)
+            .child(header)
+            .child(cards)
+    }
+}
+
+/// Channel for AppLibraryTab to pass a loaded bundle to the Workbench.
+static PENDING_LAUNCH: std::sync::Mutex<Option<ProdBundle>> = std::sync::Mutex::new(None);
+
+/// Take a pending bundle launch (called by workbench on OpenApp action).
+pub fn take_pending_launch() -> Option<ProdBundle> {
+    PENDING_LAUNCH.lock().ok()?.take()
 }
 
 // ---------------------------------------------------------------------------

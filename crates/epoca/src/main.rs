@@ -202,6 +202,7 @@ fn main() {
         cx.set_global(WalletGlobal {
             manager: epoca_wallet::WalletManager::new(),
         });
+        epoca_wallet::register_sleep_observer();
 
         cx.spawn(async move |cx| {
             cx.open_window(new_window_opts(), |window, cx| {

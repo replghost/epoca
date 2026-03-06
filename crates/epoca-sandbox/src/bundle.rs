@@ -50,6 +50,8 @@ pub struct SandboxMeta {
     #[serde(default)]
     pub framebuffer: bool,
     pub max_gas_per_update: Option<u64>,
+    /// Optional controls hint shown as an overlay (dismissed on first keypress).
+    pub controls_hint: Option<String>,
 }
 
 /// Web app-specific settings (for `type = "spa"` bundles).

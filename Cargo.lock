@@ -2525,6 +2525,7 @@ dependencies = [
  "bs58",
  "core-foundation 0.10.0",
  "log",
+ "objc2 0.5.2",
  "rand_core 0.6.4",
  "schnorrkel",
  "security-framework",

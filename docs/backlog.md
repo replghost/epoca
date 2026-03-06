@@ -142,6 +142,10 @@ video-overlay sweeping which Brave does not have.
 - [x] ~~Find-in-page (⌘F)~~
 - [ ] Full-screen mode (hide sidebar, maximize content)
 
+### Wallet
+- [ ] Multi-account wallet selection — "Connect wallet?" prompt should let user pick which account to share (currently single root keypair, no choice). Requires: multiple mnemonics or HD-derived accounts, account picker UI in the connect banner, per-tab tracking of which account is connected.
+- [ ] Per-app derived accounts in dapp flow — `app_keypair(app_id)` infra exists but `enable()` always exposes root address. Option to use derived per-origin accounts for isolation.
+
 ### Testing
 - [ ] GPUI `#[gpui::test]` — headless unit/integration tests for workbench logic via `TestAppContext`
 - [ ] Appium Mac2Driver — E2E UI testing via macOS Accessibility API
@@ -344,11 +348,37 @@ the host renders them natively (GPUI on desktop, wgpu on Android, future: web/iO
 - [ ] ZML ↔ PolkaVM bridge: ZML app delegates compute to a `.polkavm` module (`call(fn_name, args) → result`, not full UI takeover)
 - [ ] ZML ↔ WebView bridge: guest app can open a WebView pane in split view
 
-### App Discovery & Distribution
-- [ ] Local directory scanner: `~/.epoca/apps/` — auto-discovers `.prod` bundles
+### App Installation & Library
+App identity = `app.id` from manifest. Two `.prod` files with the same `id` are the same app (newer replaces older).
+
+**Phase 1 — MVP (in progress)**
+- [ ] **File → Open App** — file picker filtered to `.prod`, opens and installs
+- [ ] **Install to `~/.epoca/apps/`** — on first open, extract `.prod` to `~/.epoca/apps/{app_id}/`; subsequent launches load from disk (skip ZIP extraction + binary-search file size probe)
+- [ ] **App Library tab** — built-in tab showing installed apps as a grid of cards (icon, name, last launched); click to launch; right-click to uninstall
+- [ ] **Session restore for FramebufferApp tabs** — re-open from installed path on restore
+- [ ] **Controls hint overlay** — `controls_hint` field in manifest, shown on first launch, dismissed on keypress
+
+**Phase 2 — Polish**
+- [ ] Register `.prod` UTI — Open With / double-click from Finder
+- [ ] Drag & drop `.prod` onto window to install
+- [ ] Omnibox integration — type app name, installed apps show in results
+- [ ] Sidebar pinning for favorite apps
+
+**Phase 3 — Ecosystem**
+- [ ] App catalog — browse/install from hosted directory
+- [ ] Auto-update — manifest `update_url`, periodic check
+- [ ] Save data — `~/.epoca/apps/{id}/save/`, `host_save_read`/`host_save_write` host APIs
 - [ ] Open-from-URL: download `.prod` from HTTPS, verify signature, prompt to install
 - [ ] App registry protocol (simple JSON index over HTTPS, no central server required)
 - [ ] `cargo-epoca` CLI: scaffolds guest projects, handles cross-compile + `polkatool link` + `.prod` packaging
+
+### TCP Socket Host API (enables VNC, SSH, networked apps)
+- [ ] `host_tcp_connect(addr_ptr, addr_len, port) -> handle`
+- [ ] `host_tcp_read(handle, buf_ptr, buf_len) -> bytes_read`
+- [ ] `host_tcp_write(handle, buf_ptr, buf_len) -> bytes_written`
+- [ ] `host_tcp_close(handle)`
+- [ ] Broker network permission gating for TCP connections
+- [ ] Mouse input events for framebuffer apps (`host_poll_mouse`)
 
 ### Split View / Panels
 - [ ] Vertical split: two tabs side-by-side

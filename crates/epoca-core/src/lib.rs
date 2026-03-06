@@ -12,6 +12,7 @@ pub mod history;
 pub mod spa;
 pub mod chain;
 pub mod wallet;
+pub mod app_library;
 
 #[cfg(feature = "test-server")]
 pub mod test_server;
