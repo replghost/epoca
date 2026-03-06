@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 schnorrkel = "0.11"
-bip39 = { version = "2", features = ["rand"] }
+bip39 = { version = "2", features = ["rand", "zeroize"] }
 blake2 = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

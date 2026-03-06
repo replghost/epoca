@@ -131,6 +131,10 @@ pub struct AppSettings {
     pub history_retention: HistoryRetention,
     #[serde(default)]
     pub experimental_wallet: bool,
+    #[serde(default)]
+    pub experimental_eth: bool,
+    #[serde(default)]
+    pub experimental_btc: bool,
 }
 
 impl Default for AppSettings {
@@ -146,6 +150,8 @@ impl Default for AppSettings {
             contexts: Vec::new(),
             history_retention: HistoryRetention::default(),
             experimental_wallet: false,
+            experimental_eth: false,
+            experimental_btc: false,
         }
     }
 }

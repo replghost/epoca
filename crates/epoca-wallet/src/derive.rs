@@ -15,9 +15,10 @@ const SS58_PREFIX: u8 = 42;
 /// The mnemonic is converted to a 64-byte seed via PBKDF2 (BIP-39 standard),
 /// then the first 32 bytes are used as a `MiniSecretKey`.
 pub fn root_keypair_from_mnemonic(mnemonic: &bip39::Mnemonic) -> Keypair {
-    let seed = mnemonic.to_seed("");
+    let mut seed = mnemonic.to_seed("");
     let mut mini_bytes = [0u8; 32];
     mini_bytes.copy_from_slice(&seed[..32]);
+    seed.zeroize();
     let mini = MiniSecretKey::from_bytes(&mini_bytes).expect("32 bytes is valid");
     mini_bytes.zeroize();
     let secret = mini.expand(ExpansionMode::Ed25519);
@@ -83,14 +84,16 @@ pub mod secp256k1 {
 
     /// BIP-44 ETH derivation path: m/44'/60'/0'/0/0
     const ETH_PATH: &str = "m/44'/60'/0'/0/0";
-    /// BIP-44 BTC derivation path: m/44'/0'/0'/0/0
-    const BTC_PATH: &str = "m/44'/0'/0'/0/0";
+    /// BIP-84 BTC derivation path for P2WPKH (native SegWit): m/84'/0'/0'/0/0
+    const BTC_PATH: &str = "m/84'/0'/0'/0/0";
 
     /// Derive a secp256k1 signing key from a BIP-39 mnemonic using a BIP-44 path.
     fn derive_key(mnemonic: &bip39::Mnemonic, path: &str) -> SigningKey {
-        let seed = mnemonic.to_seed("");
+        use zeroize::Zeroize;
+        let mut seed = mnemonic.to_seed("");
         let dp: DerivationPath = path.parse().expect("valid BIP-44 path");
-        let child = XPrv::derive_from_path(seed, &dp).expect("valid derivation");
+        let child = XPrv::derive_from_path(&seed, &dp).expect("valid derivation");
+        seed.zeroize();
         child.into()
     }
 
@@ -99,7 +102,7 @@ pub mod secp256k1 {
         derive_key(mnemonic, ETH_PATH)
     }
 
-    /// Derive the BTC secp256k1 signing key (m/44'/0'/0'/0/0).
+    /// Derive the BTC secp256k1 signing key (BIP-84: m/84'/0'/0'/0/0).
     pub fn btc_key(mnemonic: &bip39::Mnemonic) -> SigningKey {
         derive_key(mnemonic, BTC_PATH)
     }
@@ -109,6 +112,12 @@ pub mod secp256k1 {
     pub fn eth_address(key: &SigningKey) -> String {
         use k256::ecdsa::VerifyingKey;
         let vk = VerifyingKey::from(key);
+        eth_address_from_verifying_key(&vk)
+    }
+
+    /// EIP-55 checksummed Ethereum address from a verifying (public) key.
+    /// Used for signature recovery verification.
+    pub fn eth_address_from_verifying_key(vk: &k256::ecdsa::VerifyingKey) -> String {
         // Uncompressed public key (65 bytes: 0x04 || x || y), skip the 0x04 prefix
         let pubkey_bytes = vk.to_encoded_point(false);
         let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..]; // 64 bytes
@@ -134,6 +143,7 @@ pub mod secp256k1 {
     }
 
     /// P2WPKH (bech32) Bitcoin mainnet address from a signing key.
+    /// Mainnet only (HRP "bc"). Testnet would use HRP "tb" and path m/44'/1'/0'/0/0.
     pub fn btc_address_p2wpkh(key: &SigningKey) -> String {
         use bech32::{segwit, Hrp};
         use k256::ecdsa::VerifyingKey;
@@ -235,11 +245,10 @@ mod tests {
         let addr = secp256k1::eth_address(&key);
         assert!(addr.starts_with("0x"), "ETH address must start with 0x, got: {addr}");
         assert_eq!(addr.len(), 42, "ETH address must be 42 chars, got: {}", addr.len());
-        // Known address for this mnemonic (lowercase comparison for safety)
+        // Known address for this mnemonic — exact EIP-55 checksummed form
         assert_eq!(
-            addr.to_lowercase(),
-            "0x9858effd232b4033e47d90003d41ec34ecaeda94",
-            "ETH address mismatch"
+            addr, "0x9858EfFD232B4033E47d90003D41EC34EcaEda94",
+            "ETH address mismatch (exact EIP-55 checksum)"
         );
     }
 
@@ -278,6 +287,18 @@ mod tests {
         assert!(addr.starts_with("bc1q"), "BTC P2WPKH should start with bc1q, got: {addr}");
         // 42-62 chars for bech32
         assert!(addr.len() >= 42 && addr.len() <= 62, "BTC addr len: {}", addr.len());
+    }
+
+    #[test]
+    fn btc_address_known_vector() {
+        // BIP-84 spec test vector: "abandon x11 about" at m/84'/0'/0'/0/0
+        // From https://github.com/bitcoin/bips/blob/master/bip-0084.mediawiki
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let key = secp256k1::btc_key(&m);
+        let addr = secp256k1::btc_address_p2wpkh(&key);
+        assert_eq!(addr, "bc1qcr8te4kr609gcawutmrza0j4xv80jy8z306fyu");
     }
 
     #[test]

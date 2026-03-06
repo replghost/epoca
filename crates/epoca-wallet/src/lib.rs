@@ -185,8 +185,8 @@ impl WalletManager {
     ///
     /// On macOS this triggers a Touch ID prompt (or passcode fallback).
     pub fn unlock(&mut self) -> Result<()> {
-        let phrase = keystore::load_mnemonic()?;
-        let mnemonic = bip39::Mnemonic::parse(&phrase)
+        let phrase = zeroize::Zeroizing::new(keystore::load_mnemonic()?);
+        let mnemonic = bip39::Mnemonic::parse(phrase.as_str())
             .map_err(|e| anyhow!("Stored mnemonic is invalid: {e}"))?;
 
         let kp = derive::root_keypair_from_mnemonic(&mnemonic);
@@ -278,6 +278,8 @@ impl WalletManager {
     }
 
     /// Sign a raw 32-byte digest with the BTC private key (ECDSA, no prefix).
+    /// The caller is responsible for hashing: BTC transactions use SHA256d
+    /// (double-SHA256 of the serialized transaction).
     /// Returns the DER-encoded signature.
     pub fn btc_sign_raw(&mut self, digest: &[u8; 32]) -> Result<Vec<u8>> {
         self.touch();
@@ -559,6 +561,37 @@ mod tests {
         assert_eq!(sig.len(), 65, "ETH personal_sign must be 65 bytes (r+s+v)");
         // v should be 27 or 28
         assert!(sig[64] == 27 || sig[64] == 28, "v must be 27 or 28, got {}", sig[64]);
+    }
+
+    #[test]
+    fn eth_sign_personal_recovers_to_correct_address() {
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+        use sha3::{Digest, Keccak256};
+
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+
+        let data = b"hello ethereum";
+        let sig_bytes = wm.eth_sign_personal(data).unwrap();
+
+        // Re-hash with EIP-191 prefix
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", data.len());
+        let digest = Keccak256::new()
+            .chain_update(prefix.as_bytes())
+            .chain_update(data)
+            .finalize();
+
+        let sig = Signature::from_slice(&sig_bytes[..64]).unwrap();
+        let recid = RecoveryId::from_byte(sig_bytes[64] - 27).unwrap();
+        let recovered = VerifyingKey::recover_from_prehash(&digest, &sig, recid).unwrap();
+
+        let expected_addr = wm.eth_address().unwrap();
+        let recovered_addr = derive::secp256k1::eth_address_from_verifying_key(&recovered);
+        assert_eq!(recovered_addr, expected_addr, "Recovered signer must match wallet ETH address");
     }
 
     #[test]

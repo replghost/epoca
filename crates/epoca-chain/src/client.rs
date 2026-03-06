@@ -12,6 +12,8 @@ pub enum ChainId {
     PolkadotAssetHub,
     PaseoAssetHub,
     Previewnet,
+    Ethereum,
+    Bitcoin,
 }
 
 /// Which backend to use for a given chain.
@@ -21,6 +23,8 @@ pub enum ConnectionBackend {
     Smoldot,
     /// Direct WebSocket RPC to a public endpoint (centralized).
     Rpc,
+    /// Kyoto BIP-157/158 compact block filter light client (Bitcoin P2P).
+    Kyoto,
 }
 
 impl ChainId {
@@ -29,6 +33,8 @@ impl ChainId {
             ChainId::PolkadotAssetHub => "wss://polkadot-asset-hub-rpc.polkadot.io",
             ChainId::PaseoAssetHub => "wss://asset-hub-paseo.dotters.network",
             ChainId::Previewnet => "wss://previewnet.dotsamalabs.com/asset-hub",
+            ChainId::Ethereum => "", // Helios uses consensus/execution RPC, not a single endpoint
+            ChainId::Bitcoin => "", // Kyoto connects directly to Bitcoin P2P network
         }
     }
 
@@ -37,10 +43,24 @@ impl ChainId {
             ChainId::PolkadotAssetHub => "Polkadot Asset Hub",
             ChainId::PaseoAssetHub => "Paseo Asset Hub",
             ChainId::Previewnet => "Previewnet",
+            ChainId::Ethereum => "Ethereum",
+            ChainId::Bitcoin => "Bitcoin",
         }
     }
 
+    /// All chain IDs including ETH/BTC. UI should gate display on settings flags.
     pub fn all() -> &'static [ChainId] {
+        &[
+            ChainId::PolkadotAssetHub,
+            ChainId::PaseoAssetHub,
+            ChainId::Previewnet,
+            ChainId::Ethereum,
+            ChainId::Bitcoin,
+        ]
+    }
+
+    /// Substrate/Polkadot chains only (for existing chain settings UI).
+    pub fn substrate_chains() -> &'static [ChainId] {
         &[
             ChainId::PolkadotAssetHub,
             ChainId::PaseoAssetHub,
@@ -53,6 +73,8 @@ impl ChainId {
         match self {
             ChainId::PolkadotAssetHub | ChainId::PaseoAssetHub => ConnectionBackend::Smoldot,
             ChainId::Previewnet => ConnectionBackend::Rpc,
+            ChainId::Ethereum => ConnectionBackend::Rpc, // Helios in Phase 4; RPC placeholder
+            ChainId::Bitcoin => ConnectionBackend::Kyoto,
         }
     }
 
@@ -67,7 +89,7 @@ impl ChainId {
                 include_str!("../chain-specs/paseo.json"),
                 include_str!("../chain-specs/paseo_asset_hub.json"),
             )),
-            ChainId::Previewnet => None,
+            ChainId::Previewnet | ChainId::Ethereum | ChainId::Bitcoin => None,
         }
     }
 }
@@ -81,11 +103,27 @@ pub enum ChainState {
     Error(String),
 }
 
+/// Chain-specific extra data surfaced to the UI.
+#[derive(Debug, Clone, Default)]
+pub enum ChainExtra {
+    #[default]
+    None,
+    Eth {
+        finalized_block: u64,
+        gas_price_gwei: u64,
+    },
+    Btc {
+        tip_height: u64,
+        fee_rate_sat_vb: u32,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct ChainStatus {
     pub id: ChainId,
     pub name: &'static str,
     pub state: ChainState,
+    pub extra: ChainExtra,
 }
 
 pub struct ChainClient {
@@ -103,6 +141,7 @@ impl ChainClient {
                     id,
                     name: id.display_name(),
                     state: ChainState::Disconnected,
+                    extra: ChainExtra::None,
                 },
             );
         }
@@ -126,6 +165,7 @@ impl ChainClient {
         thread::spawn(move || match chain.backend() {
             ConnectionBackend::Smoldot => run_smoldot_connection(chain, statuses, stop),
             ConnectionBackend::Rpc => run_rpc_connection(chain, statuses, stop),
+            ConnectionBackend::Kyoto => super::btc::run_kyoto_connection(chain, statuses, stop),
         });
     }
 
@@ -148,6 +188,7 @@ impl ChainClient {
                 id: chain,
                 name: chain.display_name(),
                 state: ChainState::Disconnected,
+                extra: ChainExtra::None,
             })
     }
 

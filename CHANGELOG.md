@@ -8,12 +8,23 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
-- **ETH + BTC key derivation (Phase 1)** — secp256k1 BIP-44 key derivation from the shared BIP-39
-  mnemonic. ETH: `m/44'/60'/0'/0/0` with EIP-55 checksummed addresses. BTC: `m/44'/0'/0'/0/0` with
-  P2WPKH bech32 addresses. `WalletManager` extended with `eth_key`/`btc_key` fields, `eth_address()`,
-  `btc_address()`, `eth_sign_personal()` (EIP-191), `btc_sign_raw()` (DER ECDSA). Keys derived on
-  unlock/create/import, cleared on lock. New deps: `k256`, `bip32`, `sha2`, `sha3`, `ripemd`, `bech32`.
-  18 tests including known-vector verification against MetaMask. `derive.rs`, `lib.rs`. (2026-03-05)
+- **ETH + BTC key derivation (Phase 1)** — secp256k1 key derivation from the shared BIP-39
+  mnemonic. ETH: BIP-44 `m/44'/60'/0'/0/0` with EIP-55 checksummed addresses. BTC: BIP-84
+  `m/84'/0'/0'/0/0` with P2WPKH bech32 addresses. `WalletManager` extended with `eth_key`/`btc_key`
+  fields, `eth_address()`, `btc_address()`, `eth_sign_personal()` (EIP-191 with signature recovery),
+  `btc_sign_raw()` (DER ECDSA). Keys derived on unlock/create/import, cleared on lock. Seed arrays
+  and mnemonic strings zeroized after use. New deps: `k256`, `bip32`, `sha2`, `sha3`, `ripemd`,
+  `bech32`. 20 tests including BIP-84 spec vector and ETH address recovery. `derive.rs`, `lib.rs`.
+  (2026-03-05)
+
+- **Bitcoin Kyoto light client (Phase 2/2.5)** — `ChainId::Ethereum` and `ChainId::Bitcoin` added to
+  `epoca-chain`. Bitcoin backend uses Kyoto BIP-157/158 compact block filter light client — connects
+  directly to Bitcoin P2P network, downloads block headers and compact filters, verifies proof-of-work
+  locally. No trusted servers. `ConnectionBackend::Kyoto` variant. Tokio current-thread runtime on
+  dedicated std::thread. Block header/filter data persisted to `~/Library/Application Support/Epoca/
+  chain-db/bitcoin/`. `ChainExtra` enum surfaces chain-specific data (ETH finalized block + gas, BTC
+  tip height + fee rate). Settings flags `experimental_eth` and `experimental_btc`. New deps: `bip157`,
+  `tokio`. `btc.rs`, `client.rs`, `settings.rs`. (2026-03-05)
 
 - **SPA Tab (sandboxed single-page app)** — New `SpaTab` tab type and `TabKind::Spa` for hosting
   bundled client-side web apps in a sandboxed WKWebView. `.prod` bundle format extended: `type = "spa"`
