@@ -25,6 +25,8 @@ pub enum ConnectionBackend {
     Rpc,
     /// Kyoto BIP-157/158 compact block filter light client (Bitcoin P2P).
     Kyoto,
+    /// Helios Ethereum light client (consensus + execution verification).
+    Helios,
 }
 
 impl ChainId {
@@ -73,7 +75,7 @@ impl ChainId {
         match self {
             ChainId::PolkadotAssetHub | ChainId::PaseoAssetHub => ConnectionBackend::Smoldot,
             ChainId::Previewnet => ConnectionBackend::Rpc,
-            ChainId::Ethereum => ConnectionBackend::Rpc, // Helios in Phase 4; RPC placeholder
+            ChainId::Ethereum => ConnectionBackend::Helios,
             ChainId::Bitcoin => ConnectionBackend::Kyoto,
         }
     }
@@ -166,6 +168,7 @@ impl ChainClient {
             ConnectionBackend::Smoldot => run_smoldot_connection(chain, statuses, stop),
             ConnectionBackend::Rpc => run_rpc_connection(chain, statuses, stop),
             ConnectionBackend::Kyoto => super::btc::run_kyoto_connection(chain, statuses, stop),
+            ConnectionBackend::Helios => super::eth::run_helios_connection(chain, statuses, stop),
         });
     }
 

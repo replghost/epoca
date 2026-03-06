@@ -318,6 +318,37 @@ pub fn drain_title_events() -> Vec<(usize, String)> {
     events
 }
 
+// ---------------------------------------------------------------------------
+// Loading progress channel — page load state from LOADING_PROGRESS_SCRIPT
+// ---------------------------------------------------------------------------
+
+static LOADING_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, f64)>,
+    Mutex<mpsc::Receiver<(usize, f64)>>,
+)> = OnceLock::new();
+
+fn loading_channel() -> &'static (
+    mpsc::SyncSender<(usize, f64)>,
+    Mutex<mpsc::Receiver<(usize, f64)>>,
+) {
+    LOADING_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(256);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain all pending loading progress events.
+/// Returns `(webview_ptr, progress)` pairs where progress is 0.0..1.0.
+pub fn drain_loading_events() -> Vec<(usize, f64)> {
+    let ch = loading_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
 /// Register the `epocaMeta` WKScriptMessageHandler on the given
 /// WKUserContentController. The JS side posts:
 ///   { type: 'titleChanged', title: '...' }
@@ -356,30 +387,46 @@ pub fn register_meta_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: us
                     AnyClass::get("NSString").unwrap(),
                     stringWithUTF8String: b"type\0".as_ptr() as *const i8
                 ];
-                let title_key: *mut AnyObject = objc2::msg_send![
-                    AnyClass::get("NSString").unwrap(),
-                    stringWithUTF8String: b"title\0".as_ptr() as *const i8
-                ];
                 let type_val: *mut AnyObject = objc2::msg_send![body, objectForKey: type_key];
-                let title_val: *mut AnyObject = objc2::msg_send![body, objectForKey: title_key];
-                if type_val.is_null() || title_val.is_null() { return; }
+                if type_val.is_null() { return; }
 
                 let type_cstr: *const i8 = objc2::msg_send![type_val, UTF8String];
-                let title_cstr: *const i8 = objc2::msg_send![title_val, UTF8String];
-                if type_cstr.is_null() || title_cstr.is_null() { return; }
+                if type_cstr.is_null() { return; }
 
                 let type_str = std::ffi::CStr::from_ptr(type_cstr).to_string_lossy();
-                if type_str != "titleChanged" { return; }
-
-                let title = std::ffi::CStr::from_ptr(title_cstr)
-                    .to_string_lossy()
-                    .to_string();
-                if title.is_empty() { return; }
-
-                // Look up which tab this UC belongs to.
                 let uc_key = uc as usize;
-                if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
-                    let _ = title_channel().0.try_send((wv_ptr, title));
+
+                match type_str.as_ref() {
+                    "titleChanged" => {
+                        let title_key: *mut AnyObject = objc2::msg_send![
+                            AnyClass::get("NSString").unwrap(),
+                            stringWithUTF8String: b"title\0".as_ptr() as *const i8
+                        ];
+                        let title_val: *mut AnyObject = objc2::msg_send![body, objectForKey: title_key];
+                        if title_val.is_null() { return; }
+                        let title_cstr: *const i8 = objc2::msg_send![title_val, UTF8String];
+                        if title_cstr.is_null() { return; }
+                        let title = std::ffi::CStr::from_ptr(title_cstr)
+                            .to_string_lossy()
+                            .to_string();
+                        if title.is_empty() { return; }
+                        if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                            let _ = title_channel().0.try_send((wv_ptr, title));
+                        }
+                    }
+                    "loading" => {
+                        let progress_key: *mut AnyObject = objc2::msg_send![
+                            AnyClass::get("NSString").unwrap(),
+                            stringWithUTF8String: b"progress\0".as_ptr() as *const i8
+                        ];
+                        let progress_val: *mut AnyObject = objc2::msg_send![body, objectForKey: progress_key];
+                        if progress_val.is_null() { return; }
+                        let progress: f64 = objc2::msg_send![progress_val, doubleValue];
+                        if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                            let _ = loading_channel().0.try_send((wv_ptr, progress));
+                        }
+                    }
+                    _ => {}
                 }
             }
 

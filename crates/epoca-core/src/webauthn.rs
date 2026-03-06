@@ -42,6 +42,26 @@ function unb64(s){
   return a.buffer;
 }
 
+// Ensure PublicKeyCredential exists and advertises capability.
+// Google, GitHub, etc. check these static methods before offering WebAuthn options.
+if(!window.PublicKeyCredential){
+  window.PublicKeyCredential=function PublicKeyCredential(){};
+  window.PublicKeyCredential.prototype.type='public-key';
+  window.PublicKeyCredential.prototype.getClientExtensionResults=function(){return {};};
+}
+// "Is a platform authenticator (Touch ID / passkey) available?"
+window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable=function(){
+  return Promise.resolve(true);
+};
+// "Is conditional mediation (autofill passkey) available?"
+window.PublicKeyCredential.isConditionalMediationAvailable=function(){
+  return Promise.resolve(true);
+};
+// "Is the external authenticator (security key) available?" — macOS 14+
+window.PublicKeyCredential.isExternalCTAP2SecurityKeySupported=function(){
+  return Promise.resolve(true);
+};
+
 window.__epocaWebAuthnResolve=function(cbId,ok,json,err){
   var p=_cbs.get(cbId);
   if(!p)return;
@@ -64,15 +84,17 @@ window.__epocaWebAuthnResolve=function(cbId,ok,json,err){
   }catch(e){p.reject(new DOMException('Failed to parse response','OperationError'));}
 };
 
-if(!navigator.credentials||!navigator.credentials.create)return;
-
-var origCreate=navigator.credentials.create.bind(navigator.credentials);
-var origGet=navigator.credentials.get.bind(navigator.credentials);
+// Ensure navigator.credentials exists
+if(!navigator.credentials){
+  navigator.credentials={};
+}
+var origCreate=navigator.credentials.create?navigator.credentials.create.bind(navigator.credentials):null;
+var origGet=navigator.credentials.get?navigator.credentials.get.bind(navigator.credentials):null;
 
 navigator.credentials.create=function(opts){
-  if(!opts||!opts.publicKey)return origCreate(opts);
+  if(!opts||!opts.publicKey)return origCreate?origCreate(opts):Promise.reject(new DOMException('Not supported','NotSupportedError'));
   if(!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaWebAuthn)
-    return origCreate(opts);
+    return origCreate?origCreate(opts):Promise.reject(new DOMException('Not supported','NotSupportedError'));
   return new Promise(function(resolve,reject){
     var cbId=String(++_id);
     _cbs.set(cbId,{resolve:resolve,reject:reject});
@@ -102,9 +124,9 @@ navigator.credentials.create=function(opts){
 };
 
 navigator.credentials.get=function(opts){
-  if(!opts||!opts.publicKey)return origGet(opts);
+  if(!opts||!opts.publicKey)return origGet?origGet(opts):Promise.reject(new DOMException('Not supported','NotSupportedError'));
   if(!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaWebAuthn)
-    return origGet(opts);
+    return origGet?origGet(opts):Promise.reject(new DOMException('Not supported','NotSupportedError'));
   return new Promise(function(resolve,reject){
     var cbId=String(++_id);
     _cbs.set(cbId,{resolve:resolve,reject:reject});
@@ -201,7 +223,10 @@ pub fn register_webauthn_handler(
                 uc_obj: *mut AnyObject,
                 message: *mut AnyObject,
             ) {
-                handle_webauthn_message(uc_obj, message);
+                // Wrap in catch_unwind: panics in extern "C" abort the process.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    handle_webauthn_message(uc_obj, message);
+                }));
             }
 
             builder.add_method(
@@ -341,6 +366,18 @@ unsafe fn handle_webauthn_message(
 
     let body: *mut AnyObject = objc2::msg_send![message, body];
     if body.is_null() {
+        return;
+    }
+
+    // Guard: body must be NSDictionary — calling objectForKey: on a
+    // non-dict (e.g. NSString) throws an ObjC exception that Rust
+    // cannot catch (foreign exception → abort).
+    let is_dict: bool = objc2::msg_send![
+        body,
+        isKindOfClass: objc2::runtime::AnyClass::get("NSDictionary").unwrap()
+    ];
+    if !is_dict {
+        log::warn!("WebAuthn: message body is not NSDictionary, ignoring");
         return;
     }
 

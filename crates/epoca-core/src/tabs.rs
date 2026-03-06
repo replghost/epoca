@@ -48,6 +48,8 @@ pub struct TabEntry {
     pub favicon_url: Option<String>,
     /// Session context ID — `None` = isolated (private), `Some(id)` = shared named context.
     pub context_id: Option<String>,
+    /// Page load progress: 0.0 = idle/done, 0.0..1.0 = loading.
+    pub loading_progress: f64,
 }
 
 /// The kind of tab that can be opened in the workbench.
@@ -876,6 +878,9 @@ use epoca_sandbox::{InputEvent, ProdBundle};
 struct FramebufferShared {
     /// Latest rendered frame (background thread writes, main thread reads).
     frame: Option<std::sync::Arc<gpui::RenderImage>>,
+    /// Guest framebuffer dimensions of the latest frame.
+    frame_width: u32,
+    frame_height: u32,
     /// Input events queued by the main thread for the sandbox.
     input_queue: VecDeque<InputEvent>,
     /// Error from the background thread.
@@ -894,6 +899,11 @@ pub struct FramebufferAppTab {
     error: Option<String>,
     /// Controls hint from manifest — dismissed on first keypress.
     controls_hint: Option<String>,
+    /// Last known guest framebuffer dimensions for mouse coordinate mapping.
+    fb_width: u32,
+    fb_height: u32,
+    /// Element bounds (window coords) from last paint — for mouse mapping.
+    panel_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
 }
 
 impl FramebufferAppTab {
@@ -924,6 +934,8 @@ impl FramebufferAppTab {
 
         let shared = Arc::new(Mutex::new(FramebufferShared {
             frame: None,
+            frame_width: 0,
+            frame_height: 0,
             input_queue: VecDeque::new(),
             error: None,
             stopped: false,
@@ -988,6 +1000,9 @@ impl FramebufferAppTab {
             broker,
             error: init_error,
             controls_hint,
+            fb_width: 0,
+            fb_height: 0,
+            panel_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
         }
     }
 
@@ -1056,6 +1071,8 @@ impl FramebufferAppTab {
                     );
                     let mut s = shared.lock().unwrap();
                     s.frame = Some(render_image);
+                    s.frame_width = w;
+                    s.frame_height = h;
                 }
             }
 
@@ -1079,6 +1096,10 @@ impl FramebufferAppTab {
 
         if let Some(frame) = s.frame.take() {
             self.current_frame = Some(frame);
+            if s.frame_width > 0 && s.frame_height > 0 {
+                self.fb_width = s.frame_width;
+                self.fb_height = s.frame_height;
+            }
             cx.notify();
         }
     }
@@ -1114,6 +1135,45 @@ impl FramebufferAppTab {
             }
         }
         None
+    }
+
+    /// Map a GPUI window-absolute point to guest framebuffer coordinates.
+    /// The framebuffer is rendered with `ObjectFit::Contain` inside the panel,
+    /// so we account for letterboxing/pillarboxing.
+    fn map_mouse(&self, pos: gpui::Point<gpui::Pixels>, _cx: &Context<Self>) -> (u16, u16) {
+        if self.fb_width == 0 || self.fb_height == 0 {
+            return (0, 0);
+        }
+        let bounds = self.panel_bounds.get();
+        let panel_w: f32 = bounds.size.width.into();
+        let panel_h: f32 = bounds.size.height.into();
+        if panel_w <= 0.0 || panel_h <= 0.0 {
+            return (0, 0);
+        }
+
+        let fb_w = self.fb_width as f32;
+        let fb_h = self.fb_height as f32;
+
+        // ObjectFit::Contain scale factor
+        let scale = (panel_w / fb_w).min(panel_h / fb_h);
+        let rendered_w = fb_w * scale;
+        let rendered_h = fb_h * scale;
+
+        // Offset from letterbox/pillarbox centering
+        let offset_x = (panel_w - rendered_w) * 0.5;
+        let offset_y = (panel_h - rendered_h) * 0.5;
+
+        // Relative position within the rendered image
+        let ox: f32 = bounds.origin.x.into();
+        let oy: f32 = bounds.origin.y.into();
+        let px: f32 = pos.x.into();
+        let py: f32 = pos.y.into();
+        let rel_x = (px - ox - offset_x) / scale;
+        let rel_y = (py - oy - offset_y) / scale;
+
+        let mx = rel_x.clamp(0.0, fb_w - 1.0) as u16;
+        let my = rel_y.clamp(0.0, fb_h - 1.0) as u16;
+        (mx, my)
     }
 }
 
@@ -1213,10 +1273,21 @@ impl Render for FramebufferAppTab {
                 )
         });
 
+        // Capture element bounds during layout for mouse coordinate mapping.
+        let pb = self.panel_bounds.clone();
+
         div()
             .track_focus(&self.focus_handle)
             .size_full()
             .relative()
+            .child(
+                canvas(
+                    move |bounds, _window, _cx| { pb.set(bounds); },
+                    |_bounds, _, _window, _cx| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .child(content)
             .children(hint_overlay)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
@@ -1226,6 +1297,8 @@ impl Render for FramebufferAppTab {
                         s.input_queue.push_back(InputEvent {
                             event_type: 1, // key down
                             key_code: code,
+                            mouse_x: 0,
+                            mouse_y: 0,
                             _pad: [0, 0],
                         });
                     }
@@ -1238,9 +1311,81 @@ impl Render for FramebufferAppTab {
                         s.input_queue.push_back(InputEvent {
                             event_type: 2, // key up
                             key_code: code,
+                            mouse_x: 0,
+                            mouse_y: 0,
                             _pad: [0, 0],
                         });
                     }
+                }
+            }))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|this, ev: &gpui::MouseDownEvent, _window, cx| {
+                let (mx, my) = this.map_mouse(ev.position, cx);
+                if let Ok(mut s) = this.shared.lock() {
+                    s.input_queue.push_back(InputEvent {
+                        event_type: 3, // mouse down
+                        key_code: 1,   // left button
+                        mouse_x: mx,
+                        mouse_y: my,
+                        _pad: [0, 0],
+                    });
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseDownEvent, _window, cx| {
+                let (mx, my) = this.map_mouse(ev.position, cx);
+                if let Ok(mut s) = this.shared.lock() {
+                    s.input_queue.push_back(InputEvent {
+                        event_type: 3, // mouse down
+                        key_code: 2,   // right button
+                        mouse_x: mx,
+                        mouse_y: my,
+                        _pad: [0, 0],
+                    });
+                }
+                cx.notify();
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, ev: &gpui::MouseUpEvent, _window, cx| {
+                let (mx, my) = this.map_mouse(ev.position, cx);
+                if let Ok(mut s) = this.shared.lock() {
+                    s.input_queue.push_back(InputEvent {
+                        event_type: 4, // mouse up
+                        key_code: 1,   // left button
+                        mouse_x: mx,
+                        mouse_y: my,
+                        _pad: [0, 0],
+                    });
+                }
+            }))
+            .on_mouse_up(gpui::MouseButton::Right, cx.listener(|this, ev: &gpui::MouseUpEvent, _window, cx| {
+                let (mx, my) = this.map_mouse(ev.position, cx);
+                if let Ok(mut s) = this.shared.lock() {
+                    s.input_queue.push_back(InputEvent {
+                        event_type: 4, // mouse up
+                        key_code: 2,   // right button
+                        mouse_x: mx,
+                        mouse_y: my,
+                        _pad: [0, 0],
+                    });
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, _window, cx| {
+                let (mx, my) = this.map_mouse(ev.position, cx);
+                if let Ok(mut s) = this.shared.lock() {
+                    // Coalesce: replace pending move rather than flooding the queue
+                    if let Some(last) = s.input_queue.back_mut() {
+                        if last.event_type == 5 {
+                            last.mouse_x = mx;
+                            last.mouse_y = my;
+                            return;
+                        }
+                    }
+                    s.input_queue.push_back(InputEvent {
+                        event_type: 5, // mouse move
+                        key_code: 0,
+                        mouse_x: mx,
+                        mouse_y: my,
+                        _pad: [0, 0],
+                    });
                 }
             }))
             .into_any_element()
@@ -1481,6 +1626,26 @@ new MutationObserver(function(){
 })();
 })();"#;
 
+/// Reports page load progress via epocaMeta: {type:"loading",progress:0..1}.
+/// Fires at document_start (0.1), DOMContentLoaded (0.7), load (1.0).
+const LOADING_PROGRESS_SCRIPT: &str = r#"(function(){
+if(window.__epocaLoading)return;
+window.__epocaLoading=true;
+function _lp(p){
+  if(!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaMeta)return;
+  window.webkit.messageHandlers.epocaMeta.postMessage({type:'loading',progress:p});
+}
+_lp(0.1);
+if(document.readyState==='loading'){
+  document.addEventListener('DOMContentLoaded',function(){_lp(0.7);});
+}else if(document.readyState==='interactive'){
+  _lp(0.7);
+}else{
+  _lp(1.0);
+}
+window.addEventListener('load',function(){_lp(1.0);});
+})();"#;
+
 /// Arc-style link status bar: fixed bottom-left pill showing the URL of a
 /// hovered link.  While ⌘ is held, shows "Open in new tab: [url]".
 /// While ⌘⇧ is held, shows "Open in new tab → switch: [url]".
@@ -1680,6 +1845,42 @@ document.addEventListener('contextmenu',function(e){
     });
   }
 },true);
+})();"#;
+
+/// Relay console.log/warn/error to native via epocaConsole WKScriptMessageHandler
+/// so JS output appears in the Epoca terminal log (log level = info/warn/error).
+/// Buffers messages if the handler isn't ready yet, flushes once it becomes available.
+const CONSOLE_RELAY_SCRIPT: &str = r#"(function(){
+if(window.__epocaConsole)return;
+window.__epocaConsole=true;
+var buf=[];
+function send(level,msg){
+  var h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaConsole;
+  if(h){
+    if(buf.length>0){for(var i=0;i<buf.length;i++)h.postMessage(buf[i]);buf=[];}
+    h.postMessage({level:level,msg:msg});
+  }else{
+    buf.push({level:level,msg:msg});
+  }
+}
+['log','warn','error','info','debug'].forEach(function(m){
+  var orig=console[m];
+  console[m]=function(){
+    try{
+      var args=Array.prototype.slice.call(arguments).map(function(a){
+        if(typeof a==='string')return a;
+        try{return JSON.stringify(a);}catch(e){return String(a);}
+      }).join(' ');
+      send(m,args);
+    }catch(e){}
+    if(orig)orig.apply(console,arguments);
+  };
+});
+// Flush buffer after a short delay (handler may be registered slightly after script injection)
+setTimeout(function(){
+  var h=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaConsole;
+  if(h&&buf.length>0){for(var i=0;i<buf.length;i++)h.postMessage(buf[i]);buf=[];}
+},50);
 })();"#;
 
 /// Injected into every page at document creation time. Styles the WebKit
@@ -1936,10 +2137,48 @@ fn apply_webview_corner_radius(wv: &gpui_component::wry::WebView, radius: f64) {
 /// Returns the WKWebView pointer cast to `usize` (used as a stable tab identity
 /// for routing title-change events back to the correct `TabEntry`).
 /// Returns 0 on failure (missing configuration / null pointers).
-fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
+fn install_shield_message_handler(wv: &gpui_component::wry::WebView, btc_wallet_enabled: bool) -> usize {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
     use gpui_component::wry::WebViewExtMacOS;
+
+    // Install a global uncaught ObjC exception handler (once) so we get
+    // diagnostic output before the process aborts.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        unsafe extern "C" fn objc_exception_handler(exception: *mut AnyObject) {
+            if exception.is_null() {
+                eprintln!("[ObjC-exception] (null exception)");
+                return;
+            }
+            let reason: *mut AnyObject = objc2::msg_send![exception, reason];
+            let name: *mut AnyObject = objc2::msg_send![exception, name];
+            let r = if !reason.is_null() {
+                let c: *const i8 = objc2::msg_send![reason, UTF8String];
+                if !c.is_null() { std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() }
+                else { "(null)".into() }
+            } else { "(null)".into() };
+            let n = if !name.is_null() {
+                let c: *const i8 = objc2::msg_send![name, UTF8String];
+                if !c.is_null() { std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() }
+                else { "(null)".into() }
+            } else { "(null)".into() };
+            eprintln!("[ObjC-exception] {n}: {r}");
+            // Print call stack symbols if available
+            let symbols: *mut AnyObject = objc2::msg_send![exception, callStackSymbols];
+            if !symbols.is_null() {
+                let desc: *mut AnyObject = objc2::msg_send![symbols, description];
+                if !desc.is_null() {
+                    let c: *const i8 = objc2::msg_send![desc, UTF8String];
+                    if !c.is_null() {
+                        eprintln!("[ObjC-exception] stack: {}", std::ffi::CStr::from_ptr(c).to_string_lossy());
+                    }
+                }
+            }
+        }
+        extern "C" { fn NSSetUncaughtExceptionHandler(handler: unsafe extern "C" fn(*mut AnyObject)); }
+        unsafe { NSSetUncaughtExceptionHandler(objc_exception_handler); }
+    });
 
     unsafe {
         let wk = wv.webview();
@@ -1951,6 +2190,11 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         log::debug!("Shield: WKUserContentController at {:p}", uc);
         // Use the WKWebView pointer as a stable tab identity key.
         let webview_ptr = obj as usize;
+
+        // Enable Safari Web Inspector (Develop menu → Epoca) for debugging.
+        // Only effective on macOS 13.3+ (WKWebView.isInspectable).
+        let _: () = msg_send![obj, setInspectable: true];
+
         crate::shield::register_nav_handler(uc);
         crate::shield::register_meta_handler(uc, webview_ptr);
         crate::shield::register_shield_handler(uc, webview_ptr);
@@ -1958,7 +2202,14 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_context_menu_handler(uc, webview_ptr);
         crate::shield::register_cursor_handler(uc, webview_ptr);
         crate::webauthn::register_webauthn_handler(uc, webview_ptr);
+        // Inject polyfill in page world so overrides are visible to page JS.
+        // wry's with_initialization_script may use an isolated content world.
+        inject_page_world_script(uc, crate::webauthn::WEBAUTHN_POLYFILL);
+        register_console_handler(uc);
         crate::wallet::register_wallet_handler(uc, webview_ptr);
+        if btc_wallet_enabled {
+            crate::wallet::register_btc_wallet_handler(uc, webview_ptr);
+        }
         #[cfg(feature = "test-server")]
         crate::test_server::register_test_result_handler(uc, webview_ptr);
 
@@ -1970,6 +2221,123 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
 
         webview_ptr
     }
+}
+
+/// Inject a JavaScript string as a WKUserScript running in `[WKContentWorld pageWorld]`
+/// at document-start. This ensures overrides (e.g. PublicKeyCredential polyfill) are
+/// visible to page scripts, unlike wry's `with_initialization_script` which may use
+/// an isolated content world.
+#[cfg(target_os = "macos")]
+unsafe fn inject_page_world_script(
+    uc: *mut objc2::runtime::AnyObject,
+    js: &str,
+) {
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let page_world: *mut AnyObject = objc2::msg_send![
+        AnyClass::get("WKContentWorld").unwrap(),
+        pageWorld
+    ];
+    let ns_source: *mut AnyObject = {
+        let cls = AnyClass::get("NSString").unwrap();
+        let alloc: *mut AnyObject = objc2::msg_send![cls, alloc];
+        objc2::msg_send![
+            alloc,
+            initWithBytes: js.as_ptr() as *const std::ffi::c_void
+            length: js.len()
+            encoding: 4u64 // NSUTF8StringEncoding
+        ]
+    };
+    if ns_source.is_null() { return; }
+    // WKUserScriptInjectionTimeAtDocumentStart = 0
+    let script: *mut AnyObject = {
+        let cls = AnyClass::get("WKUserScript").unwrap();
+        let alloc: *mut AnyObject = objc2::msg_send![cls, alloc];
+        objc2::msg_send![
+            alloc,
+            initWithSource: ns_source
+            injectionTime: 0i64 // WKUserScriptInjectionTimeAtDocumentStart
+            forMainFrameOnly: false
+            inContentWorld: page_world
+        ]
+    };
+    if script.is_null() { return; }
+    let _: () = objc2::msg_send![uc, addUserScript: script];
+}
+
+/// Register a minimal `epocaConsole` WKScriptMessageHandler that logs JS
+/// console output to Rust's `log` facade (visible in the terminal).
+#[cfg(target_os = "macos")]
+unsafe fn register_console_handler(uc: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+    use std::sync::OnceLock;
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaConsoleHandler") { return c; }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaConsoleHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                _uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                // Wrap in catch_unwind: panics in extern "C" abort the process.
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let body: *mut AnyObject = objc2::msg_send![message, body];
+                    if body.is_null() { return; }
+
+                    // Verify body is NSDictionary before calling objectForKey:
+                    let is_dict: bool = objc2::msg_send![
+                        body,
+                        isKindOfClass: AnyClass::get("NSDictionary").unwrap()
+                    ];
+                    if !is_dict { return; }
+
+                    let get = |key: &[u8]| -> Option<String> {
+                        let ns_key: *mut AnyObject = objc2::msg_send![
+                            AnyClass::get("NSString").unwrap(),
+                            stringWithUTF8String: key.as_ptr() as *const i8
+                        ];
+                        let val: *mut AnyObject = objc2::msg_send![body, objectForKey: ns_key];
+                        if val.is_null() { return None; }
+                        let cstr: *const i8 = objc2::msg_send![val, UTF8String];
+                        if cstr.is_null() { return None; }
+                        Some(std::ffi::CStr::from_ptr(cstr).to_string_lossy().into_owned())
+                    };
+
+                    let level = get(b"level\0").unwrap_or_default();
+                    let msg = get(b"msg\0").unwrap_or_default();
+                    match level.as_str() {
+                        "error" => log::error!("[js] {msg}"),
+                        "warn"  => log::warn!("[js] {msg}"),
+                        _       => log::info!("[js] {msg}"),
+                    }
+                }));
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+            if let Some(p) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(p);
+            }
+            builder.register()
+        }
+    });
+
+    let handler: *mut AnyObject = objc2::msg_send![*cls, new];
+    if handler.is_null() { return; }
+    let name: *mut AnyObject = objc2::msg_send![
+        AnyClass::get("NSString").unwrap(),
+        stringWithUTF8String: b"epocaConsole\0".as_ptr() as *const i8
+    ];
+    let _: () = objc2::msg_send![uc, addScriptMessageHandler: handler name: name];
+    let _: () = objc2::msg_send![handler, release];
 }
 
 pub struct WebViewTab {
@@ -2074,20 +2442,33 @@ impl WebViewTab {
         let mut builder = gpui_component::wry::WebViewBuilder::new()
             .with_url(&url)
             .with_incognito(isolated)
+            .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Epoca/1.0")
+            .with_initialization_script(CONSOLE_RELAY_SCRIPT)
             .with_initialization_script(SCROLLBAR_CSS_SCRIPT)
             .with_initialization_script(TITLE_TRACKER_SCRIPT)
+            .with_initialization_script(LOADING_PROGRESS_SCRIPT)
             .with_initialization_script(LINK_STATUS_SCRIPT)
             .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(RIPPLE_SCRIPT)
             .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(CONTEXT_MENU_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
-            .with_initialization_script(crate::webauthn::WEBAUTHN_POLYFILL)
+            // WebAuthn polyfill is injected in [WKContentWorld pageWorld] via
+            // inject_page_world_script() so page JS sees the overrides.
             .with_initialization_script(&shield.document_start_script)
             .with_initialization_script(&shield.document_end_script);
 
         if wallet_enabled {
             builder = builder.with_initialization_script(crate::wallet::WALLET_INJECT_SCRIPT);
+        }
+
+        let btc_wallet_enabled = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_wallet && g.settings.experimental_btc)
+            .unwrap_or(false);
+
+        if btc_wallet_enabled {
+            builder = builder.with_initialization_script(crate::wallet::BTC_WALLET_INJECT_SCRIPT);
         }
 
         match builder.build_as_child(window)
@@ -2099,7 +2480,7 @@ impl WebViewTab {
                 apply_webview_corner_radius(&wry_wv, 10.0);
 
                 #[cfg(target_os = "macos")]
-                { webview_ptr = install_shield_message_handler(&wry_wv); }
+                { webview_ptr = install_shield_message_handler(&wry_wv, btc_wallet_enabled); }
 
                 #[cfg(target_os = "macos")]
                 { sidebar_blocker_ptr = create_sidebar_blocker(&wry_wv); }

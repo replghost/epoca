@@ -143,6 +143,7 @@ video-overlay sweeping which Brave does not have.
 - [ ] Full-screen mode (hide sidebar, maximize content)
 
 ### Wallet
+- [ ] **ETH wallet bridge (`window.ethereum` EIP-1193)** — Expose Epoca wallet to Ethereum dapps via a `window.ethereum` provider object. Relay `eth_requestAccounts`, `eth_sendTransaction`, `personal_sign`, `eth_signTypedData_v4` to the native wallet layer. Mirrors existing BTC wallet bridge pattern (JS init script → WKScriptMessageHandler → mpsc channel → workbench drain). Requires Helios light client for `eth_call` / `eth_getBalance` verification.
 - [ ] Multi-account wallet selection — "Connect wallet?" prompt should let user pick which account to share (currently single root keypair, no choice). Requires: multiple mnemonics or HD-derived accounts, account picker UI in the connect banner, per-tab tracking of which account is connected.
 - [ ] Per-app derived accounts in dapp flow — `app_keypair(app_id)` infra exists but `enable()` always exposes root address. Option to use derived per-origin accounts for isolation.
 
@@ -409,10 +410,10 @@ App identity = `app.id` from manifest. Two `.prod` files with the same `id` are 
 Allow users to authenticate to websites using USB security keys (YubiKey, SoloKeys, etc.)
 via the WebAuthn / FIDO2 standard. This is table-stakes for security-conscious users.
 
-- [ ] **WebAuthn API relay** — intercept `navigator.credentials.create()` / `navigator.credentials.get()` JS calls via `WKScriptMessageHandler`, relay to native authenticator
-- [ ] **macOS AuthenticationServices integration** — use `ASAuthorizationPlatformPublicKeyCredentialProvider` (macOS 13+) to bridge WKWebView ↔ USB HID authenticator
+- [x] ~~**WebAuthn API relay**~~ — JS polyfill intercepts `navigator.credentials.create()` / `.get()`, relays via `epocaWebAuthn` WKScriptMessageHandler → mpsc channel → `evaluate_script` to resolve promises (`webauthn.rs`)
+- [x] ~~**macOS AuthenticationServices integration**~~ — `ASAuthorizationController` with both `ASAuthorizationPlatformPublicKeyCredentialProvider` and `ASAuthorizationSecurityKeyPublicKeyCredentialProvider`, delegate + presentation anchor, full create/get ceremony flow (`webauthn.rs`)
 - [ ] **Fallback: direct USB HID** — if AuthenticationServices doesn't cover the flow, use `IOKit` HID manager to talk CTAP2 directly to FIDO2 keys
-- [ ] **Passkey support** — `ASAuthorizationPlatformPublicKeyCredentialProvider` also handles iCloud Keychain passkeys; support both hardware keys and platform passkeys
+- [x] ~~**Passkey support**~~ — platform passkey provider (`ASAuthorizationPlatformPublicKeyCredentialProvider`) included alongside security key provider in both create and get ceremonies
 - [ ] **UI chrome** — security key prompt overlay (tap your key animation) when WebAuthn ceremony is in progress
 - [ ] **Attestation policy** — broker-level setting to allow/deny attestation conveyance per origin
 
@@ -469,6 +470,7 @@ via the WebAuthn / FIDO2 standard. This is table-stakes for security-conscious u
 
 ## P3 — Moonshots
 
+- [ ] **OpenTTD AI opponents**: re-enable Squirrel VM scripting via `setjmp`/`longjmp` exception shim, or write a simple hardcoded AI in C
 - [ ] **Retro game/emulator ecosystem**: NES, GB, CHIP-8 emulators as `.prod` bundles using framebuffer API — "the app store for sandboxed retro gaming"
 - [ ] **GPU-accelerated 3D apps**: scene graph protocol + Metal renderer for real 3D games in sandboxed tabs
 - [ ] **WASM guest apps**: compile Rust/TS/Python to WASM, run as sandboxed tabs (alternative to PolkaVM for web-origin code)

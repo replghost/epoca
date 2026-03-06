@@ -6,14 +6,23 @@ use epoca_protocol::{
     deserialize_view_tree, serialize_event, GuestEvent, ViewTree,
 };
 
-/// A simple input event for framebuffer guests (4 bytes, packed).
+/// An input event for framebuffer guests (8 bytes, packed).
+///
+/// Event types:
+///   1 = key down,  2 = key up        → key_code set, mouse_x/y zero
+///   3 = mouse down, 4 = mouse up     → key_code = button (1=left,2=right,3=middle), mouse_x/y set
+///   5 = mouse move                   → key_code zero, mouse_x/y set
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct InputEvent {
-    /// 1 = key down, 2 = key up
+    /// Event discriminant (see above).
     pub event_type: u8,
-    /// Scancode / key identifier
+    /// Key scancode (events 1-2) or mouse button (events 3-4), 0 otherwise.
     pub key_code: u8,
+    /// Mouse X position in guest framebuffer coordinates.
+    pub mouse_x: u16,
+    /// Mouse Y position in guest framebuffer coordinates.
+    pub mouse_y: u16,
     pub _pad: [u8; 2],
 }
 
@@ -228,22 +237,25 @@ impl SandboxInstance {
 
         // host_poll_input(buf_ptr: u32, buf_len: u32) -> u32
         // Pops InputEvents from the queue, writes into guest memory, returns bytes written.
+        // Each event is 8 bytes: [event_type, key_code, mouse_x_lo, mouse_x_hi, mouse_y_lo, mouse_y_hi, pad, pad]
         linker
             .define_typed(
                 "host_poll_input",
                 |caller: polkavm::Caller<'_, HostState>, buf_ptr: u32, buf_len: u32| -> Result<u32, anyhow::Error> {
-                    let max_events = (buf_len as usize) / 4; // InputEvent is 4 bytes
+                    let max_events = (buf_len as usize) / 8; // InputEvent is 8 bytes
                     let mut written = 0u32;
                     for _ in 0..max_events {
                         let Some(evt) = caller.user_data.input_queue.pop_front() else {
                             break;
                         };
-                        let bytes = [evt.event_type, evt.key_code, evt._pad[0], evt._pad[1]];
+                        let mx = evt.mouse_x.to_le_bytes();
+                        let my = evt.mouse_y.to_le_bytes();
+                        let bytes = [evt.event_type, evt.key_code, mx[0], mx[1], my[0], my[1], evt._pad[0], evt._pad[1]];
                         caller
                             .instance
                             .write_memory(buf_ptr + written, &bytes)
                             .map_err(|e| anyhow!("Memory write error: {:?}", e))?;
-                        written += 4;
+                        written += 8;
                     }
                     Ok(written)
                 },

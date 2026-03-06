@@ -318,3 +318,256 @@ pub fn register_wallet_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: 
 
 #[cfg(not(target_os = "macos"))]
 pub fn register_wallet_handler(_uc: *mut std::ffi::c_void, _webview_ptr: usize) {}
+
+// ---------------------------------------------------------------------------
+// Bitcoin wallet injection script (window.bitcoin — Unisat-compatible)
+// ---------------------------------------------------------------------------
+
+/// Injected at document_start into every WebView tab (when btc wallet is enabled).
+/// Installs `window.bitcoin` — Unisat-compatible API surface.
+/// Private keys never cross the bridge — only addresses and signatures.
+pub const BTC_WALLET_INJECT_SCRIPT: &str = r#"(function(){
+    'use strict';
+    if (window.__epocaBtcInjected) return;
+    window.__epocaBtcInjected = true;
+
+    let _nextId = 1;
+    const _pending = new Map();
+    let _listeners = {};
+
+    function _call(method, params) {
+        const id = _nextId++;
+        return new Promise((resolve, reject) => {
+            _pending.set(id, { resolve, reject });
+            if (window.webkit?.messageHandlers?.epocaBtcWallet) {
+                window.webkit.messageHandlers.epocaBtcWallet.postMessage(
+                    { id, method, params: params || {} }
+                );
+            } else {
+                _pending.delete(id);
+                reject(new Error('Bitcoin wallet handler not available'));
+            }
+        });
+    }
+
+    Object.defineProperty(window, '__epocaBtcResolve', {
+        value: function(id, error, result) {
+            const p = _pending.get(id);
+            if (!p) return;
+            _pending.delete(id);
+            if (error) { p.reject(new Error(error)); }
+            else { p.resolve(result); }
+        },
+        writable: false, configurable: false
+    });
+
+    Object.defineProperty(window, '__epocaBtcAccounts', {
+        value: function(accounts) {
+            (_listeners['accountsChanged'] || []).forEach(h => {
+                try { h(accounts); } catch(e) {}
+            });
+        },
+        writable: false, configurable: false
+    });
+
+    const bitcoin = Object.freeze({
+        requestAccounts:  () => _call('requestAccounts', {}),
+        getAccounts:      () => _call('getAccounts', {}),
+        getNetwork:       () => _call('getNetwork', {}),
+        getBalance:       () => _call('getBalance', {}),
+        signMessage: (msg, sigType) => _call('signMessage', { message: msg, type: sigType || 'ecdsa' }),
+
+        on: function(event, handler) {
+            if (!_listeners[event]) _listeners[event] = [];
+            _listeners[event].push(handler);
+        },
+        removeListener: function(event, handler) {
+            if (!_listeners[event]) return;
+            _listeners[event] = _listeners[event].filter(h => h !== handler);
+        },
+    });
+
+    Object.defineProperty(window, 'bitcoin', {
+        value: bitcoin, writable: false, configurable: false
+    });
+})();"#;
+
+// ---------------------------------------------------------------------------
+// epocaBtcWallet WKScriptMessageHandler — receives calls from window.bitcoin
+// ---------------------------------------------------------------------------
+
+/// Event from a WebView tab's window.bitcoin calls.
+pub struct BtcWalletEvent {
+    pub webview_ptr: usize,
+    pub id: u64,
+    pub method: String,
+    pub params_json: String,
+}
+
+static BTC_WALLET_CHANNEL: OnceLock<(
+    mpsc::SyncSender<BtcWalletEvent>,
+    Mutex<mpsc::Receiver<BtcWalletEvent>>,
+)> = OnceLock::new();
+
+fn btc_wallet_channel() -> &'static (
+    mpsc::SyncSender<BtcWalletEvent>,
+    Mutex<mpsc::Receiver<BtcWalletEvent>>,
+) {
+    BTC_WALLET_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(64);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain pending BTC wallet events from WebView tabs.
+pub fn drain_btc_wallet_events() -> Vec<BtcWalletEvent> {
+    let ch = btc_wallet_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        out.push(ev);
+    }
+    out
+}
+
+/// UC → webview_ptr mapping for the BTC wallet handler.
+static BTC_WALLET_UC_MAP: std::sync::LazyLock<Mutex<HashMap<usize, usize>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Register the `epocaBtcWallet` WKScriptMessageHandler on a WebViewTab's
+/// WKUserContentController.
+#[cfg(target_os = "macos")]
+pub fn register_btc_wallet_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: usize) {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, ClassBuilder};
+
+    static CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+    let cls = CLASS.get_or_init(|| {
+        if let Some(c) = AnyClass::get("EpocaBtcWalletHandler") {
+            return c;
+        }
+        unsafe {
+            let superclass = AnyClass::get("NSObject").unwrap();
+            let mut builder = ClassBuilder::new("EpocaBtcWalletHandler", superclass).unwrap();
+
+            unsafe extern "C" fn did_receive(
+                _this: *mut AnyObject,
+                _sel: objc2::runtime::Sel,
+                uc: *mut AnyObject,
+                message: *mut AnyObject,
+            ) {
+                let body: *mut AnyObject = msg_send![message, body];
+                if body.is_null() {
+                    return;
+                }
+
+                let id_key: *mut AnyObject = msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"id\0".as_ptr() as *const i8
+                ];
+                let method_key: *mut AnyObject = msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"method\0".as_ptr() as *const i8
+                ];
+                let params_key: *mut AnyObject = msg_send![
+                    AnyClass::get("NSString").unwrap(),
+                    stringWithUTF8String: b"params\0".as_ptr() as *const i8
+                ];
+
+                let id_val: *mut AnyObject = msg_send![body, objectForKey: id_key];
+                let method_val: *mut AnyObject = msg_send![body, objectForKey: method_key];
+                let params_val: *mut AnyObject = msg_send![body, objectForKey: params_key];
+
+                if id_val.is_null() || method_val.is_null() {
+                    return;
+                }
+
+                let id_num: u64 = msg_send![id_val, unsignedLongLongValue];
+                let method_cstr: *const i8 = msg_send![method_val, UTF8String];
+                if method_cstr.is_null() {
+                    return;
+                }
+                let method = std::ffi::CStr::from_ptr(method_cstr)
+                    .to_string_lossy()
+                    .to_string();
+
+                let params_json = if params_val.is_null() {
+                    "{}".to_string()
+                } else {
+                    let json_data: *mut AnyObject = msg_send![
+                        AnyClass::get("NSJSONSerialization").unwrap(),
+                        dataWithJSONObject: params_val
+                        options: 0u64
+                        error: std::ptr::null_mut::<*mut AnyObject>()
+                    ];
+                    if json_data.is_null() {
+                        "{}".to_string()
+                    } else {
+                        let alloc: *mut AnyObject =
+                            msg_send![AnyClass::get("NSString").unwrap(), alloc];
+                        let ns_str: *mut AnyObject =
+                            msg_send![alloc, initWithData: json_data encoding: 4u64];
+                        if ns_str.is_null() {
+                            "{}".to_string()
+                        } else {
+                            let cstr: *const i8 = msg_send![ns_str, UTF8String];
+                            if cstr.is_null() {
+                                "{}".to_string()
+                            } else {
+                                std::ffi::CStr::from_ptr(cstr)
+                                    .to_string_lossy()
+                                    .to_string()
+                            }
+                        }
+                    }
+                };
+
+                let uc_addr = uc as usize;
+                let webview_ptr = BTC_WALLET_UC_MAP
+                    .lock()
+                    .unwrap()
+                    .get(&uc_addr)
+                    .copied()
+                    .unwrap_or(0);
+
+                let _ = btc_wallet_channel().0.try_send(BtcWalletEvent {
+                    webview_ptr,
+                    id: id_num,
+                    method,
+                    params_json,
+                });
+            }
+
+            builder.add_method(
+                objc2::sel!(userContentController:didReceiveScriptMessage:),
+                did_receive as unsafe extern "C" fn(_, _, _, _),
+            );
+
+            if let Some(proto) = objc2::runtime::AnyProtocol::get("WKScriptMessageHandler") {
+                builder.add_protocol(proto);
+            }
+
+            builder.register()
+        }
+    });
+
+    BTC_WALLET_UC_MAP
+        .lock()
+        .unwrap()
+        .insert(uc as usize, webview_ptr);
+
+    unsafe {
+        let handler: *mut objc2::runtime::AnyObject = msg_send![*cls, new];
+        if handler.is_null() {
+            return;
+        }
+        let name: *mut objc2::runtime::AnyObject = msg_send![
+            AnyClass::get("NSString").unwrap(),
+            stringWithUTF8String: b"epocaBtcWallet\0".as_ptr() as *const i8
+        ];
+        let _: () = msg_send![uc, addScriptMessageHandler: handler name: name];
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn register_btc_wallet_handler(_uc: *mut std::ffi::c_void, _webview_ptr: usize) {}

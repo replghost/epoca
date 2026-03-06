@@ -213,6 +213,32 @@ If unsure, ask rather than assume.
 - Broker `Permissions` extended with `sign: bool`, `statement_store: bool`, `media: Vec<String>`
 - **Pending**: `WKURLSchemeHandler` for `epocaapp://` scheme, `window.epoca` host API injection, signing relay, Statement Store relay, WebSocket proxy, block-all content rules
 
+### Ethereum Helios Light Client
+- `ConnectionBackend::Helios` dispatches to `eth::run_helios_connection()` in `epoca-chain`
+- Helios verifies beacon chain consensus + execution state locally — trustless ETH verification
+- Public consensus RPC: `https://ethereum.operationsolarstorm.org` (a16z, no key needed)
+- Public execution RPC: `https://eth.llamarpc.com` (LlamaRPC aggregator, no key needed)
+- `EthereumClientBuilder::<FileDB>::new()` → `wait_synced()` → poll loop (12s interval)
+- `FileDB` checkpoint persistence at `~/Library/Application Support/Epoca/chain-db/ethereum/`
+- Reports `ChainState::Syncing` during beacon sync, then `ChainState::Live` with block + gas
+- `ChainExtra::Eth { finalized_block, gas_price_gwei }` surfaced to UI
+- `poll_stop_flag()` + `tokio::select!` ensures clean shutdown during sync
+- Gated behind `experimental_eth` setting flag
+
+### BTC Wallet Bridge (window.bitcoin — Unisat-compatible)
+- `BTC_WALLET_INJECT_SCRIPT` (document_start) installs `window.bitcoin` with `requestAccounts`, `getAccounts`, `signMessage`, `getNetwork`, `getBalance`, `on`/`removeListener`
+- Gated behind `experimental_wallet` AND `experimental_btc` settings flags (both must be true)
+- `EpocaBtcWalletHandler` ObjC class (`register_btc_wallet_handler(uc, webview_ptr)` in wallet.rs); routes via `BTC_WALLET_UC_MAP`; sends to `BTC_WALLET_CHANNEL`
+- `drain_btc_wallet_events()` called in `process_pending_nav` after Polkadot wallet drain
+- Address exposure: requires `connected_sites` membership (shared with Polkadot wallet), established through `approve_wallet_connect` with `WalletChannel::Btc` discriminant
+- `getAccounts` is non-prompting: returns `[]` if not connected (Unisat semantics)
+- `signMessage`: BIP-137 Bitcoin Signed Message, SHA256d digest, recoverable ECDSA, native SegWit header (39+recid). Returns Base64. Requires per-request approval dialog (`PendingBtcWalletSign`)
+- `getBalance` stub returns zeros (real UTXO scanning requires Kyoto integration, Phase 3.5)
+- `getNetwork` returns "livenet" synchronously
+- `window.bitcoin` and `__epocaBtcResolve` are `Object.defineProperty(..., writable: false, configurable: false)`
+- `render_btc_sign_dialog` shows origin + message preview (truncated 200 chars) with Reject/Sign buttons
+- Private keys never cross the JS boundary — only addresses and Base64 signatures
+
 ### Embedded Test Server (feature-gated)
 - `#[cfg(feature = "test-server")]` + `EPOCA_TEST=1` env var
 - HTTP on `localhost:9223`: `GET /state`, `POST /action`, `GET /webview/eval?js=X`

@@ -8,6 +8,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Ethereum Helios light client (Phase 4)** — `ConnectionBackend::Helios` variant added.
+  Helios verifies beacon chain consensus and execution state locally — no trusted RPC servers.
+  Public endpoints: consensus `ethereum.operationsolarstorm.org` (a16z), execution `eth.llamarpc.com`.
+  Dedicated std::thread with tokio current-thread runtime. `FileDB` checkpoint persistence at
+  `~/Library/Application Support/Epoca/chain-db/ethereum/` for fast restarts (<5s after first sync).
+  Polls block number + gas price every 12s (one Ethereum slot). Reports `ChainExtra::Eth { finalized_block,
+  gas_price_gwei }`. Gated behind `experimental_eth` setting. New dep: `helios-ethereum` (git, rev 204c998a).
+  `eth.rs`, `client.rs`, `lib.rs`. (2026-03-06)
+
+- **BTC wallet bridge (Phase 3)** — `window.bitcoin` Unisat-compatible JavaScript API injected into
+  every WebView when `experimental_wallet` + `experimental_btc` are enabled. Methods: `requestAccounts`,
+  `getAccounts` (non-prompting), `signMessage` (BIP-137 with SHA256d, recoverable ECDSA, native SegWit
+  header 39+recid), `getNetwork` ("livenet"), `getBalance` (stub zeros — real UTXO scanning in Phase 3.5),
+  `on`/`removeListener` event emitter. User approval required for address exposure (shared `connected_sites`
+  with Polkadot wallet) and per-request sign confirmation dialog. `WalletChannel` enum dispatches shared
+  connect banner. Private keys never cross JS boundary. `btc_sign_message()` in `WalletManager`,
+  `BTC_WALLET_INJECT_SCRIPT`, `EpocaBtcWalletHandler` ObjC class, `BTC_WALLET_CHANNEL`. 5 new tests
+  (varint, base64 output, recovery, locked, oversized). `wallet.rs`, `workbench.rs`, `tabs.rs`,
+  `lib.rs`. (2026-03-06)
+
 - **ETH + BTC key derivation (Phase 1)** — secp256k1 key derivation from the shared BIP-39
   mnemonic. ETH: BIP-44 `m/44'/60'/0'/0/0` with EIP-55 checksummed addresses. BTC: BIP-84
   `m/84'/0'/0'/0/0` with P2WPKH bech32 addresses. `WalletManager` extended with `eth_key`/`btc_key`

@@ -95,11 +95,19 @@ pub enum SidebarMode {
 pub struct WorkbenchRef(pub WeakEntity<Workbench>);
 impl Global for WorkbenchRef {}
 
+/// Which wallet bridge initiated a connect request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalletChannel {
+    Polkadot,
+    Btc,
+}
+
 /// A pending wallet connection request awaiting user consent.
 pub(crate) struct PendingWalletConnect {
     pub webview_ptr: usize,
     pub id: u64,
     pub origin: String,
+    pub channel: WalletChannel,
 }
 
 /// A pending wallet sign request awaiting user confirmation.
@@ -118,6 +126,14 @@ pub(crate) struct PendingWalletSign {
     pub origin: String,
 }
 
+/// A pending BTC wallet sign request awaiting user confirmation.
+pub(crate) struct PendingBtcWalletSign {
+    pub webview_ptr: usize,
+    pub id: u64,
+    pub message: String,
+    pub origin: String,
+}
+
 /// Arc browser-style workbench.
 pub struct Workbench {
     // Sidebar
@@ -133,6 +149,14 @@ pub struct Workbench {
     /// is stale and exits. Prevents rapid-toggle from leaving multiple
     /// concurrent animation loops in flight.
     sidebar_anim_gen: u64,
+
+    // Loading glow animation
+    /// Phase of the pulsing glow (0.0..2π), driven by a timer task.
+    loading_glow_phase: f32,
+    /// Overall intensity multiplier (1.0 while loading, fades to 0.0 after).
+    loading_glow_intensity: f32,
+    /// Running animation task — dropped to cancel when loading finishes.
+    _loading_glow_task: Option<Task<()>>,
 
     // Tabs
     pub(crate) tabs: Vec<TabEntry>,
@@ -181,6 +205,7 @@ pub struct Workbench {
     // Wallet
     pending_wallet_sign: Option<PendingWalletSign>,
     pending_wallet_connect: Option<PendingWalletConnect>,
+    pending_btc_wallet_sign: Option<PendingBtcWalletSign>,
     connected_sites: std::collections::HashSet<String>,
     wallet_popover_open: bool,
 }
@@ -280,6 +305,9 @@ impl Workbench {
             sidebar_target: 1.0,
             _sidebar_anim_task: None,
             sidebar_anim_gen: 0,
+            loading_glow_phase: 0.0,
+            loading_glow_intensity: 0.0,
+            _loading_glow_task: None,
             tabs: Vec::new(),
             active_tab_id: None,
             next_tab_id: 1,
@@ -302,6 +330,7 @@ impl Workbench {
             omnibox_history_results: Vec::new(),
             pending_wallet_sign: None,
             pending_wallet_connect: None,
+            pending_btc_wallet_sign: None,
             connected_sites: std::collections::HashSet::new(),
             wallet_popover_open: false,
         }
@@ -552,6 +581,30 @@ impl Workbench {
                 cx.notify();
             }
         }
+        // Drain loading progress events from LOADING_PROGRESS_SCRIPT
+        let loading_events = crate::shield::drain_loading_events();
+        if !loading_events.is_empty() {
+            for (ev_ptr, progress) in loading_events {
+                for tab in &mut self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        if entity.read(cx).webview_ptr == ev_ptr {
+                            tab.loading_progress = progress;
+                        }
+                    }
+                }
+            }
+            // Start glow animation when active tab begins loading.
+            // The animation loop handles fade-out on its own.
+            let active_loading = self
+                .active_tab_id
+                .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+                .map(|t| t.loading_progress > 0.0 && t.loading_progress < 1.0)
+                .unwrap_or(false);
+            if active_loading && self._loading_glow_task.is_none() {
+                self.start_loading_glow(cx);
+            }
+            cx.notify();
+        }
         // Drain favicon URL events (epocaFavicon WKScriptMessageHandler)
         let favicon_events = crate::shield::drain_favicon_events();
         if !favicon_events.is_empty() {
@@ -651,6 +704,7 @@ impl Workbench {
                         nav: Some(nav),
                         favicon_url: None,
                         context_id: ctx,
+                        loading_progress: 0.0,
                     });
                     cx.notify();
                 }
@@ -670,6 +724,7 @@ impl Workbench {
                         nav: Some(nav),
                         favicon_url: None,
                         context_id: None,
+                        loading_progress: 0.0,
                     });
                     cx.notify();
                 }
@@ -832,6 +887,7 @@ impl Workbench {
                                                     webview_ptr: ev.webview_ptr,
                                                     id: ev.id,
                                                     origin,
+                                                    channel: WalletChannel::Polkadot,
                                                 });
                                                 cx.notify();
                                             }
@@ -886,6 +942,132 @@ impl Workbench {
                 }
                 if !found {
                     log::warn!("Wallet event for unknown webview_ptr={}", ev.webview_ptr);
+                }
+            }
+        }
+
+        // Drain BTC wallet events (window.bitcoin → epocaBtcWallet handler)
+        let btc_wallet_enabled = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_wallet && g.settings.experimental_btc)
+            .unwrap_or(false);
+
+        if btc_wallet_enabled {
+            let btc_events = crate::wallet::drain_btc_wallet_events();
+            for ev in btc_events {
+                let mut found = false;
+                for tab in &self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        if entity.read(cx).webview_ptr == ev.webview_ptr {
+                            found = true;
+                            match ev.method.as_str() {
+                                "requestAccounts" | "getAccounts" => {
+                                    if !cx.has_global::<crate::wallet::WalletGlobal>() {
+                                        let js = format!(
+                                            "window.__epocaBtcResolve({}, 'no wallet configured', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else {
+                                        let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+                                        if matches!(wg.manager.state(), epoca_wallet::WalletState::Locked) {
+                                            let _ = wg.manager.unlock();
+                                        }
+                                        if !matches!(wg.manager.state(), epoca_wallet::WalletState::Unlocked { .. }) {
+                                            let js = format!(
+                                                "window.__epocaBtcResolve({}, 'wallet is locked', null)",
+                                                ev.id,
+                                            );
+                                            entity.read(cx).evaluate_script(&js, cx);
+                                        } else {
+                                            let origin = hostname_from_url(entity.read(cx).url()).to_string();
+                                            if self.connected_sites.contains(&origin) {
+                                                self.resolve_btc_accounts(ev.webview_ptr, ev.id, &origin, cx);
+                                            } else if ev.method == "getAccounts" {
+                                                // getAccounts is non-prompting — return empty
+                                                let js = format!(
+                                                    "window.__epocaBtcResolve({}, null, [])", ev.id
+                                                );
+                                                entity.read(cx).evaluate_script(&js, cx);
+                                            } else if self.pending_wallet_connect.is_some() {
+                                                let js = format!(
+                                                    "window.__epocaBtcResolve({}, 'another connection request is pending', null)",
+                                                    ev.id,
+                                                );
+                                                entity.read(cx).evaluate_script(&js, cx);
+                                            } else {
+                                                self.pending_wallet_connect = Some(PendingWalletConnect {
+                                                    webview_ptr: ev.webview_ptr,
+                                                    id: ev.id,
+                                                    origin,
+                                                    channel: WalletChannel::Btc,
+                                                });
+                                                cx.notify();
+                                            }
+                                        }
+                                    }
+                                }
+                                "getNetwork" => {
+                                    let js = format!(
+                                        "window.__epocaBtcResolve({}, null, 'livenet')", ev.id
+                                    );
+                                    entity.read(cx).evaluate_script(&js, cx);
+                                }
+                                "getBalance" => {
+                                    // Stub — zeros until Kyoto UTXO scanning (Phase 3.5)
+                                    let js = format!(
+                                        "window.__epocaBtcResolve({}, null, {{confirmed:0,unconfirmed:0,total:0}})",
+                                        ev.id
+                                    );
+                                    entity.read(cx).evaluate_script(&js, cx);
+                                }
+                                "signMessage" => {
+                                    let origin_url = entity.read(cx).url().to_string();
+                                    let origin_host = hostname_from_url(&origin_url).to_string();
+                                    if !self.connected_sites.contains(&origin_host) {
+                                        let js = format!(
+                                            "window.__epocaBtcResolve({}, 'site not connected — call requestAccounts first', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else if self.pending_btc_wallet_sign.is_some() {
+                                        let js = format!(
+                                            "window.__epocaBtcResolve({}, 'another signing request is pending', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else {
+                                        let mut message = serde_json::from_str::<serde_json::Value>(&ev.params_json)
+                                            .ok()
+                                            .and_then(|v| v["message"].as_str().map(|s| s.to_string()))
+                                            .unwrap_or_default();
+                                        // Cap message size held in memory before sign dialog (64 KiB matches WalletManager limit)
+                                        message.truncate(65_536);
+                                        self.pending_btc_wallet_sign = Some(PendingBtcWalletSign {
+                                            webview_ptr: ev.webview_ptr,
+                                            id: ev.id,
+                                            message,
+                                            origin: origin_host,
+                                        });
+                                        cx.notify();
+                                    }
+                                }
+                                other => {
+                                    let msg = format!("unknown method '{}'", other)
+                                        .replace('\'', "\\'");
+                                    let js = format!(
+                                        "window.__epocaBtcResolve({}, '{}', null)",
+                                        ev.id, msg,
+                                    );
+                                    entity.read(cx).evaluate_script(&js, cx);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    log::warn!("BtcWallet event for unknown webview_ptr={}", ev.webview_ptr);
                 }
             }
         }
@@ -1406,6 +1588,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: Some(nav),
             favicon_url: None,
             context_id,
+            loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         record_history_visit(&url_clone, "", cx);
@@ -1471,6 +1654,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: Some(nav),
             favicon_url: None,
             context_id,
+            loading_progress: 0.0,
         });
         // Do NOT change active_tab_id — stay on current tab.
         record_history_visit(&url_clone, "", cx);
@@ -1627,6 +1811,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -1657,6 +1842,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -1784,6 +1970,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -1815,6 +2002,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -1845,6 +2033,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -1874,6 +2063,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -1905,6 +2095,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
+                        loading_progress: 0.0,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -2068,6 +2259,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         nav: Some(nav),
                         favicon_url: stab.favicon_url.clone(),
                         context_id: ctx,
+                        loading_progress: 0.0,
                     });
                     restored_count += 1;
                 }
@@ -2096,6 +2288,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         nav: None,
                         favicon_url: None,
                         context_id: None,
+                        loading_progress: 0.0,
                     });
                     restored_count += 1;
                 }
@@ -2119,6 +2312,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         nav: None,
                         favicon_url: None,
                         context_id: None,
+                        loading_progress: 0.0,
                     });
                     restored_count += 1;
                 }
@@ -2139,6 +2333,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         nav: None,
                         favicon_url: None,
                         context_id: None,
+                        loading_progress: 0.0,
                     });
                     restored_count += 1;
                 }
@@ -2268,6 +2463,66 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 entity.read(cx).evaluate_script(&js, cx);
             }
         }
+    }
+
+    /// Start the pulsing glow animation loop (~60fps).
+    fn start_loading_glow(&mut self, cx: &mut Context<Self>) {
+        self.loading_glow_intensity = 1.0;
+        let task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let done = cx
+                    .update(|cx| -> bool {
+                        let Some(entity) = this.upgrade() else { return true };
+                        let mut finished = false;
+                        entity.update(cx, |wb, cx| {
+                            let active_loading = wb
+                                .active_tab_id
+                                .and_then(|id| wb.tabs.iter().find(|t| t.id == id))
+                                .map(|t| t.loading_progress > 0.0 && t.loading_progress < 1.0)
+                                .unwrap_or(false);
+                            if active_loading {
+                                // Pulse phase while loading
+                                wb.loading_glow_intensity = 1.0;
+                                wb.loading_glow_phase += 0.07; // ~1.5s cycle
+                                if wb.loading_glow_phase > std::f32::consts::TAU {
+                                    wb.loading_glow_phase -= std::f32::consts::TAU;
+                                }
+                            } else {
+                                // Fade out: decay intensity ~1s
+                                wb.loading_glow_intensity -= 0.015;
+                                if wb.loading_glow_intensity <= 0.0 {
+                                    wb.loading_glow_intensity = 0.0;
+                                    wb.loading_glow_phase = 0.0;
+                                    wb._loading_glow_task = None;
+                                    finished = true;
+                                }
+                            }
+                            cx.notify();
+                        });
+                        finished
+                    })
+                    .unwrap_or(true);
+                if done { break; }
+            }
+        });
+        self._loading_glow_task = Some(task);
+    }
+
+    /// Returns the loading glow border color (pulsing), or `None` if idle.
+    fn loading_glow_color(&self) -> Option<gpui::Rgba> {
+        if self.loading_glow_intensity <= 0.0 {
+            return None;
+        }
+        // Sine wave: 0.0..1.0 pulsing between dim and bright.
+        let t = (self.loading_glow_phase.sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+        // Pulse between alpha 0.10 and 0.40, modulated by fade-out intensity
+        let alpha = (0.10 + t * 0.30) * self.loading_glow_intensity;
+        Some(gpui::rgba(
+            ((180u32) << 24) | ((180u32) << 16) | (255u32 << 8) | ((alpha * 255.0) as u32),
+        ))
     }
 
     fn render_find_bar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3121,14 +3376,25 @@ impl Workbench {
 
     fn approve_wallet_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_wallet_connect.take() else { return };
-        self.resolve_wallet_enable(req.webview_ptr, req.id, &req.origin, cx);
+        match req.channel {
+            WalletChannel::Polkadot => {
+                self.resolve_wallet_enable(req.webview_ptr, req.id, &req.origin, cx);
+            }
+            WalletChannel::Btc => {
+                self.resolve_btc_accounts(req.webview_ptr, req.id, &req.origin, cx);
+            }
+        }
         cx.notify();
     }
 
     fn deny_wallet_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_wallet_connect.take() else { return };
+        let resolver = match req.channel {
+            WalletChannel::Polkadot => "__epocaWalletResolve",
+            WalletChannel::Btc => "__epocaBtcResolve",
+        };
         let js = format!(
-            "window.__epocaWalletResolve({}, 'user rejected the request', null)", req.id,
+            "window.{}({}, 'user rejected the request', null)", resolver, req.id,
         );
         self.evaluate_on_webview(req.webview_ptr, &js, cx);
         cx.notify();
@@ -3144,6 +3410,67 @@ impl Workbench {
                 }
             }
         }
+    }
+
+    fn resolve_btc_accounts(&mut self, webview_ptr: usize, id: u64, origin: &str, cx: &mut Context<Self>) {
+        self.connected_sites.insert(origin.to_string());
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                if entity.read(cx).webview_ptr == webview_ptr {
+                    entity.update(cx, |wv, _| wv.wallet_connected = true);
+                    break;
+                }
+            }
+        }
+        if cx.has_global::<crate::wallet::WalletGlobal>() {
+            let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+            if let Ok(addr) = wg.manager.btc_address() {
+                let js = format!(
+                    "window.__epocaBtcResolve({}, null, ['{}'])", id, addr,
+                );
+                self.evaluate_on_webview(webview_ptr, &js, cx);
+                return;
+            }
+        }
+        let js = format!(
+            "window.__epocaBtcResolve({}, 'wallet is not available', null)", id,
+        );
+        self.evaluate_on_webview(webview_ptr, &js, cx);
+    }
+
+    fn approve_btc_wallet_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_btc_wallet_sign.take() else { return };
+        if !cx.has_global::<crate::wallet::WalletGlobal>() {
+            let js = format!("window.__epocaBtcResolve({}, 'no wallet', null)", req.id);
+            self.evaluate_on_webview(req.webview_ptr, &js, cx);
+            cx.notify();
+            return;
+        }
+        let result = cx
+            .global_mut::<crate::wallet::WalletGlobal>()
+            .manager
+            .btc_sign_message(req.message.as_bytes());
+        match result {
+            Ok(b64) => {
+                let js = format!("window.__epocaBtcResolve({}, null, '{}')", req.id, b64);
+                self.evaluate_on_webview(req.webview_ptr, &js, cx);
+            }
+            Err(e) => {
+                let msg = e.to_string().replace('\'', "\\'");
+                let js = format!("window.__epocaBtcResolve({}, '{}', null)", req.id, msg);
+                self.evaluate_on_webview(req.webview_ptr, &js, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_btc_wallet_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_btc_wallet_sign.take() else { return };
+        let js = format!(
+            "window.__epocaBtcResolve({}, 'user rejected signing request', null)", req.id,
+        );
+        self.evaluate_on_webview(req.webview_ptr, &js, cx);
+        cx.notify();
     }
 
     fn lock_wallet(&mut self, cx: &mut Context<Self>) {
@@ -3562,6 +3889,110 @@ impl Workbench {
         }
     }
 
+    fn render_btc_sign_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_btc_wallet_sign.as_ref()?;
+        let origin = req.origin.clone();
+        let message = if req.message.chars().count() > 200 {
+            let truncated: String = req.message.chars().take(200).collect();
+            format!("{truncated}…")
+        } else {
+            req.message.clone()
+        };
+
+        Some(
+            div()
+                .id("btc-sign-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_btc_wallet_sign(cx);
+                }))
+                .child(
+                    div()
+                        .id("btc-sign-dialog")
+                        .w(px(380.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new("Bitcoin Sign Message")
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(origin)
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .max_h(px(120.0))
+                                .overflow_y_hidden()
+                                .child(
+                                    gpui_component::label::Label::new(message)
+                                        .text_size(px(12.0))
+                                        .text_color(cx.theme().foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("btc-sign-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_btc_wallet_sign(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("btc-sign-approve")
+                                        .primary()
+                                        .label("Sign")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_btc_wallet_sign(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
+
     fn render_wallet_sign_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let req = self.pending_wallet_sign.as_ref()?;
         let origin = req.origin.clone();
@@ -3699,6 +4130,8 @@ impl Render for Workbench {
                             .rounded(px(RADIUS))
                             .overflow_hidden()
                             .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(self.loading_glow_color().unwrap_or(gpui::rgba(0x00000000)))
                             .child(self.render_content(window, cx)),
                     );
 
@@ -3709,6 +4142,8 @@ impl Render for Workbench {
                 };
 
                 let wallet_dialog = self.render_wallet_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let btc_sign_dialog = self.render_btc_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
 
                 // Backdrop to dismiss wallet popover when clicking outside
@@ -3759,6 +4194,7 @@ impl Render for Workbench {
                     .children(ctx_backdrop)
                     .children(omnibox)
                     .children(wallet_dialog)
+                    .children(btc_sign_dialog)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -3842,6 +4278,8 @@ impl Render for Workbench {
                             .rounded(px(RADIUS))
                             .overflow_hidden()
                             .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(self.loading_glow_color().unwrap_or(gpui::rgba(0x00000000)))
                             .child(self.render_content(window, cx)),
                     );
 
@@ -3883,6 +4321,8 @@ impl Render for Workbench {
                 };
 
                 let wallet_dialog_overlay = self.render_wallet_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let btc_sign_dialog_overlay = self.render_btc_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
 
                 let wallet_backdrop_overlay = if self.wallet_popover_open {
@@ -3959,6 +4399,7 @@ impl Render for Workbench {
                     .children(fullscreen_bar)
                     .children(omnibox)
                     .children(wallet_dialog_overlay)
+                    .children(btc_sign_dialog_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {

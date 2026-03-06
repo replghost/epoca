@@ -294,6 +294,50 @@ impl WalletManager {
         Ok(sig.to_der().to_bytes().to_vec())
     }
 
+    /// Sign a UTF-8 message using BIP-137 (Bitcoin Signed Message).
+    /// Returns a 65-byte recoverable signature encoded as Base64.
+    /// Digest: SHA256d of `"\x18Bitcoin Signed Message:\n" + varint(len) + msg`.
+    /// Header byte: 39 + recid (native SegWit P2WPKH, Electrum convention).
+    pub fn btc_sign_message(&mut self, msg: &[u8]) -> Result<String> {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use sha2::{Digest, Sha256};
+
+        self.touch();
+        if msg.len() > MAX_SIGN_PAYLOAD {
+            return Err(anyhow!(
+                "Message too large ({} bytes, max {})",
+                msg.len(),
+                MAX_SIGN_PAYLOAD,
+            ));
+        }
+        let key = self
+            .btc_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("Wallet is locked"))?;
+
+        // BIP-137 message prefix
+        let prefix = b"\x18Bitcoin Signed Message:\n";
+        let msg_len = encode_varint(msg.len() as u64);
+        let mut preimage = Vec::with_capacity(prefix.len() + msg_len.len() + msg.len());
+        preimage.extend_from_slice(prefix);
+        preimage.extend_from_slice(&msg_len);
+        preimage.extend_from_slice(msg);
+
+        // SHA256d (double SHA-256)
+        let digest: [u8; 32] = Sha256::digest(Sha256::digest(&preimage)).into();
+
+        let (sig, recid) = key
+            .sign_prehash_recoverable(&digest)
+            .map_err(|e| anyhow!("BTC signing failed: {e}"))?;
+
+        // Header: 39 + recid for native SegWit P2WPKH (BIP-84)
+        let header = 39u8 + recid.to_byte();
+        let mut out = Vec::with_capacity(65);
+        out.push(header);
+        out.extend_from_slice(&sig.to_bytes());
+        Ok(STANDARD.encode(&out))
+    }
+
     /// Return the SS58 address for a given app_id (derived account).
     pub fn app_address(&mut self, app_id: &str) -> Result<String> {
         self.touch();
@@ -367,6 +411,25 @@ impl WalletManager {
     }
 }
 
+/// Bitcoin varint encoding (CompactSize).
+fn encode_varint(n: u64) -> Vec<u8> {
+    if n < 0xfd {
+        vec![n as u8]
+    } else if n <= 0xffff {
+        let mut v = vec![0xfd];
+        v.extend_from_slice(&(n as u16).to_le_bytes());
+        v
+    } else if n <= 0xffff_ffff {
+        let mut v = vec![0xfe];
+        v.extend_from_slice(&(n as u32).to_le_bytes());
+        v
+    } else {
+        let mut v = vec![0xff];
+        v.extend_from_slice(&n.to_le_bytes());
+        v
+    }
+}
+
 impl Drop for WalletManager {
     fn drop(&mut self) {
         self.lock();
@@ -411,7 +474,7 @@ pub fn register_sleep_observer() {
 
             let observer: *mut AnyObject = msg_send![*cls, new];
             // Prevent deallocation — leaked intentionally for process lifetime.
-            let _: () = msg_send![observer, retain];
+            let _: *mut AnyObject = msg_send![observer, retain];
 
             // NSWorkspace.sharedWorkspace
             let ws_cls = AnyClass::get("NSWorkspace").unwrap();
@@ -592,6 +655,125 @@ mod tests {
         let expected_addr = wm.eth_address().unwrap();
         let recovered_addr = derive::secp256k1::eth_address_from_verifying_key(&recovered);
         assert_eq!(recovered_addr, expected_addr, "Recovered signer must match wallet ETH address");
+    }
+
+    #[test]
+    fn encode_varint_boundary_values() {
+        assert_eq!(encode_varint(0), vec![0]);
+        assert_eq!(encode_varint(1), vec![1]);
+        assert_eq!(encode_varint(0xfc), vec![0xfc]);
+        assert_eq!(encode_varint(0xfd), vec![0xfd, 0xfd, 0x00]);
+        assert_eq!(encode_varint(0xffff), vec![0xfd, 0xff, 0xff]);
+        assert_eq!(encode_varint(0x10000), vec![0xfe, 0x00, 0x00, 0x01, 0x00]);
+        assert_eq!(
+            encode_varint(0x1_0000_0000),
+            vec![0xff, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn btc_sign_message_produces_base64_65_bytes() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let b64 = wm.btc_sign_message(b"Hello Bitcoin!").unwrap();
+        let raw = STANDARD.decode(&b64).unwrap();
+        assert_eq!(raw.len(), 65, "BIP-137 sig must be 65 bytes");
+        // Header byte for native SegWit P2WPKH: 39..42
+        assert!(
+            (39..=42).contains(&raw[0]),
+            "header must be 39+recid, got {}",
+            raw[0]
+        );
+    }
+
+    #[test]
+    fn btc_sign_message_recovers_to_correct_key() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+        use sha2::{Digest, Sha256};
+
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let msg = b"test message for recovery";
+        let b64 = wm.btc_sign_message(msg).unwrap();
+        let raw = STANDARD.decode(&b64).unwrap();
+
+        // Reconstruct the digest
+        let prefix = b"\x18Bitcoin Signed Message:\n";
+        let msg_len = encode_varint(msg.len() as u64);
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(prefix);
+        preimage.extend_from_slice(&msg_len);
+        preimage.extend_from_slice(msg);
+        let digest: [u8; 32] = Sha256::digest(Sha256::digest(&preimage)).into();
+
+        let recid = RecoveryId::from_byte(raw[0] - 39).unwrap();
+        let sig = Signature::from_slice(&raw[1..]).unwrap();
+        let recovered = VerifyingKey::recover_from_prehash(&digest, &sig, recid).unwrap();
+
+        let expected_vk = VerifyingKey::from(wm.btc_key.as_ref().unwrap());
+        assert_eq!(recovered, expected_vk, "Recovered key must match BTC key");
+    }
+
+    #[test]
+    fn btc_sign_message_fails_when_locked() {
+        let mut wm = WalletManager::new();
+        assert!(wm.btc_sign_message(b"test").is_err());
+    }
+
+    #[test]
+    fn btc_sign_message_rejects_oversized() {
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let big = vec![0u8; MAX_SIGN_PAYLOAD + 1];
+        assert!(wm.btc_sign_message(&big).is_err());
+    }
+
+    #[test]
+    fn btc_sign_message_deterministic() {
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let sig1 = wm.btc_sign_message(b"deterministic test").unwrap();
+        let sig2 = wm.btc_sign_message(b"deterministic test").unwrap();
+        assert_eq!(sig1, sig2, "RFC 6979 nonces must produce identical signatures");
+    }
+
+    #[test]
+    fn btc_sign_message_empty_string() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let b64 = wm.btc_sign_message(b"").unwrap();
+        let raw = STANDARD.decode(&b64).unwrap();
+        assert_eq!(raw.len(), 65);
     }
 
     #[test]
