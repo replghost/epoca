@@ -865,6 +865,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
  "bitcoin_hashes",
+ "rand 0.8.5",
+ "rand_core 0.6.4",
+ "serde",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -974,6 +978,15 @@ dependencies = [
  "bytemuck",
  "log",
  "profiling",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -2378,6 +2391,7 @@ dependencies = [
  "epoca-core",
  "epoca-protocol",
  "epoca-sandbox",
+ "epoca-wallet",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -2429,6 +2443,7 @@ name = "epoca-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "blake2",
  "block2 0.5.1",
  "epoca-broker",
  "epoca-chain",
@@ -2436,6 +2451,7 @@ dependencies = [
  "epoca-protocol",
  "epoca-sandbox",
  "epoca-shield",
+ "epoca-wallet",
  "gpui",
  "gpui-component",
  "image",
@@ -2497,6 +2513,24 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
+]
+
+[[package]]
+name = "epoca-wallet"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bip39",
+ "blake2",
+ "bs58",
+ "core-foundation 0.10.0",
+ "log",
+ "rand_core 0.6.4",
+ "schnorrkel",
+ "security-framework",
+ "security-framework-sys",
+ "serde",
+ "zeroize",
 ]
 
 [[package]]
@@ -3203,6 +3237,7 @@ version = "0.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ea1015b5a70616b688dc230cfe50c8af89d972cb132d5a622814d29773b10b9"
 dependencies = [
+ "rand 0.8.5",
  "rand_core 0.6.4",
 ]
 
@@ -9548,6 +9583,15 @@ name = "unicode-linebreak"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b09c83c3c29d37506a3e260c08c03743a6bb66a9cd432c6934ab501a190571f"
+
+[[package]]
+name = "unicode-normalization"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+dependencies = [
+ "tinyvec",
+]
 
 [[package]]
 name = "unicode-properties"

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Epoca Test SPA</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    padding: 2rem;
+    min-height: 100vh;
+  }
+  h1 { color: #44bb66; margin-bottom: 1rem; }
+  .card {
+    background: #16213e;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    border: 1px solid #0f3460;
+  }
+  .card h2 { font-size: 0.9rem; color: #888; margin-bottom: 0.5rem; }
+  .result {
+    font-family: 'SF Mono', monospace;
+    font-size: 0.85rem;
+    color: #44bb66;
+    word-break: break-all;
+  }
+  .error { color: #ef4444; }
+  .pending { color: #888; }
+  button {
+    background: #44bb66;
+    color: #1a1a2e;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    margin-right: 0.5rem;
+    margin-top: 0.5rem;
+  }
+  button:hover { background: #33aa55; }
+  #log {
+    font-family: 'SF Mono', monospace;
+    font-size: 0.8rem;
+    background: #0d1117;
+    border-radius: 4px;
+    padding: 0.75rem;
+    max-height: 200px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: #8b949e;
+  }
+</style>
+</head>
+<body>
+  <h1>Epoca Test SPA</h1>
+
+  <div class="card">
+    <h2>Host API: getAddress()</h2>
+    <div id="addr" class="result pending">not yet called</div>
+    <button onclick="testGetAddress()">Call getAddress()</button>
+  </div>
+
+  <div class="card">
+    <h2>Host API: sign()</h2>
+    <div id="sig" class="result pending">not yet called</div>
+    <button onclick="testSign()">Call sign("hello")</button>
+  </div>
+
+  <div class="card">
+    <h2>Network Isolation Test</h2>
+    <div id="net" class="result pending">not yet tested</div>
+    <button onclick="testNetwork()">Try fetch(https://...)</button>
+  </div>
+
+  <div class="card">
+    <h2>Event Log</h2>
+    <div id="log"></div>
+  </div>
+
+<script>
+  function log(msg) {
+    const el = document.getElementById('log');
+    el.textContent += new Date().toISOString().slice(11,19) + ' ' + msg + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+
+  log('SPA loaded');
+  log('window.epoca exists: ' + (typeof window.epoca !== 'undefined'));
+  if (window.epoca) {
+    log('window.epoca.sign: ' + typeof window.epoca.sign);
+    log('window.epoca.getAddress: ' + typeof window.epoca.getAddress);
+    log('window.epoca.on: ' + typeof window.epoca.on);
+  }
+
+  async function testGetAddress() {
+    const el = document.getElementById('addr');
+    el.className = 'result pending';
+    el.textContent = 'calling...';
+    log('getAddress() called');
+    try {
+      const addr = await window.epoca.getAddress();
+      el.className = 'result';
+      el.textContent = addr;
+      log('getAddress() resolved: ' + addr);
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('getAddress() rejected: ' + e.message);
+    }
+  }
+
+  async function testSign() {
+    const el = document.getElementById('sig');
+    el.className = 'result pending';
+    el.textContent = 'calling...';
+    log('sign("hello") called');
+    try {
+      const sig = await window.epoca.sign('hello');
+      el.className = 'result';
+      el.textContent = sig;
+      log('sign() resolved: ' + sig);
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('sign() rejected: ' + e.message);
+    }
+  }
+
+  async function testNetwork() {
+    const el = document.getElementById('net');
+    el.className = 'result pending';
+    el.textContent = 'fetching...';
+    log('fetch() called');
+    try {
+      const resp = await fetch('https://httpbin.org/get');
+      el.className = 'result error';
+      el.textContent = 'FAIL: network request succeeded (status ' + resp.status + ')';
+      log('fetch() succeeded unexpectedly');
+    } catch (e) {
+      el.className = 'result';
+      el.textContent = 'PASS: blocked (' + e.message + ')';
+      log('fetch() blocked: ' + e.message);
+    }
+  }
+</script>
+</body>
+</html>

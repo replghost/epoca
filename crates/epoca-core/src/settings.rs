@@ -129,6 +129,8 @@ pub struct AppSettings {
     pub contexts: Vec<SessionContext>,
     #[serde(default)]
     pub history_retention: HistoryRetention,
+    #[serde(default)]
+    pub experimental_wallet: bool,
 }
 
 impl Default for AppSettings {
@@ -143,6 +145,7 @@ impl Default for AppSettings {
             experimental_contexts: false,
             contexts: Vec::new(),
             history_retention: HistoryRetention::default(),
+            experimental_wallet: false,
         }
     }
 }

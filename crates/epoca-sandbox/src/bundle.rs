@@ -10,6 +10,7 @@ pub struct ProdManifest {
     pub app: AppMeta,
     pub permissions: Option<PermissionsMeta>,
     pub sandbox: Option<SandboxMeta>,
+    pub webapp: Option<WebAppMeta>,
 }
 
 /// Application metadata.
@@ -18,7 +19,7 @@ pub struct AppMeta {
     pub id: String,
     pub name: String,
     pub version: String,
-    /// "application", "extension", "widget"
+    /// "application", "extension", "widget", "spa"
     #[serde(default = "default_app_type")]
     pub app_type: String,
     pub icon: Option<String>,
@@ -32,6 +33,15 @@ fn default_app_type() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PermissionsMeta {
     pub network: Option<Vec<String>>,
+    /// Whether the app can request transaction signing.
+    #[serde(default)]
+    pub sign: bool,
+    /// Whether the app can use Statement Store.
+    #[serde(default)]
+    pub statement_store: bool,
+    /// Media permissions (e.g. ["camera", "audio"]).
+    #[serde(default)]
+    pub media: Vec<String>,
 }
 
 /// Sandbox-specific settings.
@@ -42,11 +52,25 @@ pub struct SandboxMeta {
     pub max_gas_per_update: Option<u64>,
 }
 
+/// Web app-specific settings (for `type = "spa"` bundles).
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebAppMeta {
+    /// Entry HTML file inside `assets/` (e.g. "index.html").
+    pub entry: String,
+    /// Sandbox mode: "strict" blocks all network except host APIs.
+    #[serde(default = "default_webapp_sandbox")]
+    pub sandbox: String,
+}
+
+fn default_webapp_sandbox() -> String {
+    "strict".into()
+}
+
 /// A loaded `.prod` bundle (ZIP archive containing manifest + binary + assets).
 pub struct ProdBundle {
     pub manifest: ProdManifest,
-    /// Contents of `app.polkavm` from the archive.
-    pub program_bytes: Vec<u8>,
+    /// Contents of `app.polkavm` from the archive. `None` for `type = "spa"` bundles.
+    pub program_bytes: Option<Vec<u8>>,
     /// Files under `assets/` in the archive, keyed by relative path (e.g. `doom1.wad`).
     pub assets: HashMap<String, Vec<u8>>,
 }
@@ -81,7 +105,10 @@ impl ProdBundle {
             } else if name == "app.polkavm" {
                 program_bytes = Some(buf);
             } else if let Some(asset_name) = name.strip_prefix("assets/") {
-                if !asset_name.is_empty() {
+                if !asset_name.is_empty()
+                    && !asset_name.contains("..")
+                    && !asset_name.starts_with('/')
+                {
                     assets.insert(asset_name.to_string(), buf);
                 }
             }
@@ -95,8 +122,10 @@ impl ProdBundle {
         let manifest: ProdManifest = toml::from_str(&manifest_str)
             .context("Failed to parse manifest.toml")?;
 
-        let program_bytes = program_bytes
-            .ok_or_else(|| anyhow!("Missing app.polkavm in .prod bundle"))?;
+        // Web apps don't require app.polkavm; all other types do.
+        if manifest.app.app_type != "spa" && program_bytes.is_none() {
+            return Err(anyhow!("Missing app.polkavm in .prod bundle"));
+        }
 
         Ok(Self {
             manifest,

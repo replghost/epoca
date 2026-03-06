@@ -9,7 +9,9 @@ pub mod webauthn;
 pub mod settings;
 pub mod session;
 pub mod history;
+pub mod spa;
 pub mod chain;
+pub mod wallet;
 
 #[cfg(feature = "test-server")]
 pub mod test_server;

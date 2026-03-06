@@ -13,6 +13,7 @@ epoca-chain = { path = "../epoca-chain" }
 epoca-sandbox = { path = "../epoca-sandbox" }
 epoca-protocol = { path = "../epoca-protocol" }
 epoca-broker = { path = "../epoca-broker" }
+epoca-wallet = { path = "../epoca-wallet" }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }

@@ -203,6 +203,16 @@ If unsure, ask rather than assume.
 - Edit menu with Find entry in macOS menu bar
 - `FindPrev`, `CloseFindBar` actions; find input with search icon prefix
 
+### SPA Tab (Sandboxed Single-Page App)
+- `SpaTab` struct in `tabs.rs`: loads a `.prod` bundle with `type = "spa"`, renders bundled HTML/JS/CSS in a sandboxed WKWebView
+- `TabKind::Spa { app_id }` variant; session-restorable
+- `.prod` bundle format extended: `program_bytes` optional for SPA bundles; `[webapp]` TOML section with `entry` and `sandbox` fields
+- `ProdManifest.webapp: Option<WebAppMeta>` in `epoca-sandbox/src/bundle.rs`
+- `PermissionsMeta` extended with `sign`, `statement_store`, `media` fields
+- `open_webapp()` in Workbench dispatches SPA bundles from `.prod` file open path
+- Broker `Permissions` extended with `sign: bool`, `statement_store: bool`, `media: Vec<String>`
+- **Pending**: `WKURLSchemeHandler` for `epocaapp://` scheme, `window.epoca` host API injection, signing relay, Statement Store relay, WebSocket proxy, block-all content rules
+
 ### Embedded Test Server (feature-gated)
 - `#[cfg(feature = "test-server")]` + `EPOCA_TEST=1` env var
 - HTTP on `localhost:9223`: `GET /state`, `POST /action`, `GET /webview/eval?js=X`

@@ -8,6 +8,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **SPA Tab (sandboxed single-page app)** — New `SpaTab` tab type and `TabKind::Spa` for hosting
+  bundled client-side web apps in a sandboxed WKWebView. `.prod` bundle format extended: `type = "spa"`
+  in manifest, `[webapp]` section with `entry` + `sandbox`, `program_bytes` now optional. Broker
+  `Permissions` extended with `sign`, `statement_store`, `media`. `open_webapp()` dispatches SPA
+  bundles. Placeholder UI renders while WKURLSchemeHandler integration is pending. `bundle.rs`,
+  `tabs.rs`, `workbench.rs`, `session.rs`, `broker/lib.rs`. (2026-03-05)
+
+- **Content Shield description updated** — Settings subtitle now accurately lists all 9 filter lists
+  (EasyList, AdGuard, uBlock Origin, Fanboy, Peter Lowe) instead of just "EasyList + EasyPrivacy". (2026-03-05)
+
 - **Browsing history (ephemeral with TTL)** — SQLite-backed browsing history at
   `~/.epoca/history.db`. Configurable retention: Session Only / 8h / 24h (default) / 7d / 30d.
   Hard DELETE on expiry, incremental vacuum. Frecency-ordered search in omnibox (⌘T) with

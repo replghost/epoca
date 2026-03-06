@@ -167,7 +167,7 @@ my-app.prod (ZIP)
 - [ ] **`open_prod_bundle(path)`** in Workbench — reads `.prod`, dispatches to correct tab type based on `manifest.toml` type field
 
 ### Manifest Types
-Three app archetypes, each with different surface area, lifecycle, and host API:
+Four app archetypes, each with different surface area, lifecycle, and host API:
 
 **`type = "application"` — Full Tab App** (extends current `SandboxAppTab`)
 ```toml
@@ -228,6 +228,40 @@ geolocation = "coarse"
 - [ ] `WidgetBoard` panel — grid layout of widget cards with host-controlled chrome
 - [ ] `WidgetHost` — manages widget lifecycle, refresh timers, size negotiation
 - [ ] Widget size negotiation protocol (`widget.sizes` in manifest ↔ host available space)
+
+**`type = "spa"` — Sandboxed Single-Page App** (NEW — `SpaTab`)
+```toml
+[app]
+type = "spa"
+id = "com.example.meet"
+name = "SS Meet"
+version = "1.0.0"
+[webapp]
+entry = "index.html"
+sandbox = "strict"
+[permissions]
+statement_store = true
+sign = true
+media = ["camera", "audio"]
+network = []
+```
+- Hosts a bundled client-side SPA (HTML/JS/CSS) in a WKWebView, loaded via `epocaapp://` custom URL scheme
+- **No network access** — `WKURLSchemeHandler` serves assets from bundle; `block-all` WKContentRuleList prevents outbound HTTP
+- **Host API injection** — `window.epoca` injected at `documentStart` provides signing, Statement Store, and WebSocket proxy
+- **Per-request signing confirmation** — user sees payload summary + approve/reject dialog (reuses `PendingPermission` pattern)
+- **Isolated data store** — each SpaTab uses `nonPersistentDataStore`, never shared default store
+- Use cases: video conferencing (ss-meet), chat, collaborative editors, dashboards — any client-side web app that talks to Substrate
+- [x] **`SpaTab` struct + `TabKind::Spa`** — placeholder UI, bundle loading, session restore support (2026-03-05)
+- [x] **`ProdBundle` extended** — `program_bytes` optional for `type = "spa"`, `WebAppMeta` parsed from `[webapp]` section
+- [x] **`open_webapp()` in Workbench** — dispatches `.prod` bundles with `type = "spa"` to `SpaTab`
+- [ ] **`WKURLSchemeHandler` for `epocaapp://`** — ObjC class serves assets from in-memory `HashMap`
+- [ ] **`window.epoca` injection** — `addUserScript` at `documentStart`; Promise-based API with correlation IDs
+- [ ] **Signing relay** — `epocaSign` WKScriptMessageHandler → GPUI confirmation dialog → host signs → JS Promise resolves
+- [ ] **Statement Store relay** — `epocaStore` WKScriptMessageHandler → broker check → Rust-side Substrate client
+- [ ] **WebSocket proxy** — `epocaWs` handler; host opens native WebSocket, relays messages; broker checks `network` allowlist
+- [ ] **`block-all` WKContentRuleList** — installed on SPA WebViews (separate from shield rules)
+- [ ] **Bundle signature verification** — required for apps requesting `sign = true`
+- [ ] **TypeScript type definitions** — `@epoca/host-api` package for `window.epoca` type safety
 
 ### Guest Host API (all app types)
 Expand the host function surface beyond current `host_set_view`/`host_poll_event`/`host_fetch`/`host_log`:

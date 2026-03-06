@@ -70,8 +70,8 @@ fn is_window_fullscreen() -> bool {
 }
 
 use crate::tabs::{
-    CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab, SettingsTab, TabEntry,
-    TabKind, WebViewTab,
+    CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab, SettingsTab, SpaTab,
+    TabEntry, TabKind, WebViewTab,
 };
 use epoca_sandbox::ProdBundle;
 
@@ -94,6 +94,29 @@ pub enum SidebarMode {
 /// Used by the Quit handler to trigger a synchronous session save.
 pub struct WorkbenchRef(pub WeakEntity<Workbench>);
 impl Global for WorkbenchRef {}
+
+/// A pending wallet connection request awaiting user consent.
+pub(crate) struct PendingWalletConnect {
+    pub webview_ptr: usize,
+    pub id: u64,
+    pub origin: String,
+}
+
+/// A pending wallet sign request awaiting user confirmation.
+pub(crate) struct PendingWalletSign {
+    /// Which WebView originated this request.
+    pub webview_ptr: usize,
+    /// Callback ID to resolve in JS.
+    pub id: u64,
+    /// "signPayload" or "signRaw".
+    pub method: String,
+    /// The raw params JSON from the dapp.
+    pub params_json: String,
+    /// Human-readable summary for the dialog.
+    pub display_message: String,
+    /// The URL of the dapp requesting the signature.
+    pub origin: String,
+}
 
 /// Arc browser-style workbench.
 pub struct Workbench {
@@ -154,6 +177,12 @@ pub struct Workbench {
     // History
     _history_cleanup: Option<Task<()>>,
     omnibox_history_results: Vec<crate::history::HistoryEntry>,
+
+    // Wallet
+    pending_wallet_sign: Option<PendingWalletSign>,
+    pending_wallet_connect: Option<PendingWalletConnect>,
+    connected_sites: std::collections::HashSet<String>,
+    wallet_popover_open: bool,
 }
 
 /// Extract the hostname from a URL string without pulling in the `url` crate.
@@ -271,6 +300,10 @@ impl Workbench {
             _find_subscription,
             _history_cleanup: Some(history_cleanup_task),
             omnibox_history_results: Vec::new(),
+            pending_wallet_sign: None,
+            pending_wallet_connect: None,
+            connected_sites: std::collections::HashSet::new(),
+            wallet_popover_open: false,
         }
     }
 
@@ -659,6 +692,169 @@ impl Workbench {
             }
         }
 
+        // Drain SPA host API calls (window.epoca.* → epocaHost WKScriptMessageHandler)
+        let spa_events = crate::spa::drain_spa_host_events();
+        for (ev_ptr, id, method, _params_json) in spa_events {
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == ev_ptr {
+                        let app_id = entity.read(cx).app_id().to_string();
+                        let wallet_enabled = cx
+                            .try_global::<crate::settings::SettingsGlobal>()
+                            .map(|g| g.settings.experimental_wallet)
+                            .unwrap_or(false);
+                        let js = match method.as_str() {
+                            "getAddress" if wallet_enabled => {
+                                if !cx.has_global::<crate::wallet::WalletGlobal>() {
+                                    format!(
+                                        "window.__epocaResolve({}, 'no wallet configured', null)",
+                                        id,
+                                    )
+                                } else {
+                                    let result = cx
+                                        .global_mut::<crate::wallet::WalletGlobal>()
+                                        .manager
+                                        .app_address(&app_id);
+                                    match result {
+                                        Ok(addr) => format!(
+                                            "window.__epocaResolve({}, null, '{}')",
+                                            id, addr,
+                                        ),
+                                        Err(e) => {
+                                            let msg = e.to_string().replace('\'', "\\'");
+                                            format!(
+                                                "window.__epocaResolve({}, '{}', null)",
+                                                id, msg,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            "sign" if wallet_enabled => {
+                                // TODO: parse payload, show confirmation dialog, then sign
+                                format!(
+                                    "window.__epocaResolve({}, 'signing not yet implemented', null)",
+                                    id,
+                                )
+                            }
+                            other => {
+                                let msg = format!("method '{}' not yet implemented", other)
+                                    .replace('\'', "\\'");
+                                format!(
+                                    "window.__epocaResolve({}, '{}', null)",
+                                    id, msg,
+                                )
+                            }
+                        };
+                        entity.read(cx).evaluate_script(&js, cx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Drain wallet events from regular WebView tabs (injectedWeb3 → epocaWallet handler)
+        let wallet_enabled = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_wallet)
+            .unwrap_or(false);
+        if wallet_enabled {
+            let wallet_events = crate::wallet::drain_wallet_events();
+            for ev in wallet_events {
+                // Find the WebViewTab matching this event's webview_ptr
+                let mut found = false;
+                for tab in &self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        if entity.read(cx).webview_ptr == ev.webview_ptr {
+                            found = true;
+                            match ev.method.as_str() {
+                                "enable" => {
+                                    if !cx.has_global::<crate::wallet::WalletGlobal>() {
+                                        let js = format!(
+                                            "window.__epocaWalletResolve({}, 'no wallet configured', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else {
+                                        // Auto-unlock if locked
+                                        let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+                                        if matches!(wg.manager.state(), epoca_wallet::WalletState::Locked) {
+                                            let _ = wg.manager.unlock();
+                                        }
+                                        if !matches!(wg.manager.state(), epoca_wallet::WalletState::Unlocked { .. }) {
+                                            let js = format!(
+                                                "window.__epocaWalletResolve({}, 'wallet is locked or not configured', null)",
+                                                ev.id,
+                                            );
+                                            entity.read(cx).evaluate_script(&js, cx);
+                                        } else {
+                                            let origin = hostname_from_url(entity.read(cx).url()).to_string();
+                                            // Auto-approve if already connected this session
+                                            if self.connected_sites.contains(&origin) {
+                                                self.resolve_wallet_enable(ev.webview_ptr, ev.id, &origin, cx);
+                                            } else if self.pending_wallet_connect.is_some() {
+                                                let js = format!(
+                                                    "window.__epocaWalletResolve({}, 'another connection request is pending', null)",
+                                                    ev.id,
+                                                );
+                                                entity.read(cx).evaluate_script(&js, cx);
+                                            } else {
+                                                self.pending_wallet_connect = Some(PendingWalletConnect {
+                                                    webview_ptr: ev.webview_ptr,
+                                                    id: ev.id,
+                                                    origin,
+                                                });
+                                                cx.notify();
+                                            }
+                                        }
+                                    }
+                                }
+                                method @ ("signPayload" | "signRaw") => {
+                                    // Queue for user confirmation — only one at a time
+                                    if self.pending_wallet_sign.is_some() {
+                                        let js = format!(
+                                            "window.__epocaWalletResolve({}, 'another signing request is pending', null)",
+                                            ev.id,
+                                        );
+                                        entity.read(cx).evaluate_script(&js, cx);
+                                    } else {
+                                        let origin = entity.read(cx).url().to_string();
+                                        let display_message = if method == "signPayload" {
+                                            "Sign an extrinsic (transaction)".to_string()
+                                        } else {
+                                            "Sign a raw message".to_string()
+                                        };
+                                        self.pending_wallet_sign = Some(PendingWalletSign {
+                                            webview_ptr: ev.webview_ptr,
+                                            id: ev.id,
+                                            method: method.to_string(),
+                                            params_json: ev.params_json,
+                                            display_message,
+                                            origin: hostname_from_url(&origin).to_string(),
+                                        });
+                                        cx.notify();
+                                    }
+                                }
+                                other => {
+                                    let msg = format!("unknown wallet method '{}'", other)
+                                        .replace('\'', "\\'");
+                                    let js = format!(
+                                        "window.__epocaWalletResolve({}, '{}', null)",
+                                        ev.id, msg,
+                                    );
+                                    entity.read(cx).evaluate_script(&js, cx);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                if !found {
+                    log::warn!("Wallet event for unknown webview_ptr={}", ev.webview_ptr);
+                }
+            }
+        }
+
         // Drain keyboard shortcuts from NSApp local event monitor
         for action in crate::shield::drain_shortcuts() {
             use crate::shield::ShortcutAction;
@@ -1032,15 +1228,17 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 Some("prod") => {
                     match ProdBundle::from_file(path) {
                         Ok(bundle) => {
-                            if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+                            if bundle.manifest.app.app_type == "spa" {
+                                self.open_spa(bundle, window, cx);
+                            } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
                                 self.open_framebuffer_app(bundle, window, cx);
                             } else {
                                 // Non-framebuffer .prod — open as regular sandbox app
                                 let name = bundle.manifest.app.name.clone();
                                 let config = epoca_sandbox::SandboxConfig::default();
-                                match epoca_sandbox::SandboxInstance::from_bytes(&bundle.program_bytes, &config) {
+                                let program_bytes = bundle.program_bytes.as_deref().unwrap_or(&[]);
+                                match epoca_sandbox::SandboxInstance::from_bytes(program_bytes, &config) {
                                     Ok(_) => {
-                                        // Re-open via sandbox path (create temp or use bundle bytes directly)
                                         log::info!("Non-framebuffer .prod bundle: {name}");
                                     }
                                     Err(e) => log::error!("Failed to load .prod sandbox: {e}"),
@@ -1093,6 +1291,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::DeclarativeApp { path } => path.clone(),
                 TabKind::SandboxApp { app_id } => app_id.clone(),
                 TabKind::FramebufferApp { app_id } => app_id.clone(),
+                TabKind::Spa { app_id } => app_id.clone(),
                 TabKind::CodeEditor { path } => path.clone().unwrap_or_default(),
                 TabKind::Welcome | TabKind::Settings => String::new(),
             })
@@ -1503,6 +1702,35 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         cx.notify();
     }
 
+    pub fn open_spa(
+        &mut self,
+        bundle: ProdBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.alloc_id();
+        let app_id = bundle.manifest.app.id.clone();
+        let title = bundle.manifest.app.name.clone();
+        let entity = cx.new(|cx| {
+            SpaTab::new(bundle, window, cx)
+        });
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::Spa { app_id: app_id.clone() },
+            title,
+            icon: IconName::Globe,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+        });
+        self.active_tab_id = Some(id);
+        self.url_input
+            .update(cx, |s, inner_cx| s.set_value(app_id, window, inner_cx));
+        cx.notify();
+    }
+
     pub fn open_editor(
         &mut self,
         path: Option<String>,
@@ -1832,6 +2060,46 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         cx.notify();
     }
 
+    /// Forward a clipboard command to the active WebViewTab.
+    /// `cmd` is one of "copy", "cut", "paste", "selectAll".
+    fn clipboard_to_webview(&self, cmd: &str, cx: &mut App) {
+        let Some(id) = self.active_tab_id else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == id) else { return };
+        if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+            if cmd == "paste" {
+                // Read the system clipboard and insert text via JS.
+                if let Some(item) = cx.read_from_clipboard() {
+                    if let Some(text) = item.text() {
+                        let escaped = text
+                            .replace('\\', "\\\\")
+                            .replace('\'', "\\'")
+                            .replace('\n', "\\n")
+                            .replace('\r', "\\r")
+                            .replace('\t', "\\t");
+                        let js = format!(
+                            r#"(function(){{
+                                var el = document.activeElement;
+                                if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {{
+                                    var dt = new DataTransfer();
+                                    dt.setData('text/plain', '{}');
+                                    var ev = new ClipboardEvent('paste', {{clipboardData: dt, bubbles: true, cancelable: true}});
+                                    if (el.dispatchEvent(ev)) {{
+                                        document.execCommand('insertText', false, '{}');
+                                    }}
+                                }}
+                            }})()"#,
+                            escaped, escaped
+                        );
+                        entity.read(cx).evaluate_script(&js, cx);
+                    }
+                }
+            } else {
+                let js = format!("document.execCommand('{cmd}')");
+                entity.read(cx).evaluate_script(&js, cx);
+            }
+        }
+    }
+
     fn render_find_bar(&self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let find_bar_bg = rgba(0x3a3a3aff);
         let border_color = rgba(0xffffff1e);
@@ -1970,6 +2238,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
 
         // Context indicator dot — sits inside the URL bar prefix, left of the globe.
         // Colored dot = named context, EyeOff icon = private. Click opens dropdown.
+        //
         let url_prefix: AnyElement = if experimental_contexts_on {
             let dot_color = match &active_ctx {
                 None => None,
@@ -2004,7 +2273,12 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .child(Icon::new(IconName::Globe).size(px(13.0)))
                 .into_any_element()
         } else {
-            Icon::new(IconName::Globe).size(px(13.0)).into_any_element()
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(Icon::new(IconName::Globe).size(px(13.0)))
+                .into_any_element()
         };
 
         // Context dropdown — rendered below the URL bar when open
@@ -2187,6 +2461,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             is_active: bool,
                             _pinned: bool,
                             context_color: Option<Rgba>,
+                            wallet_connected: bool,
                             cx: &mut Context<Self>| {
             let close_icon = IconName::Close;
             let close_id = SharedString::from(format!("close-{tab_id}"));
@@ -2232,6 +2507,26 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .truncate()
                         .child(title),
                 )
+                // Wallet connected indicator — CircleCheck icon next to close button
+                .when(wallet_connected, |d| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("wallet-{tab_id}")))
+                            .cursor_pointer()
+                            .flex_shrink_0()
+                            .on_click(cx.listener(move |this, _ev, _window, cx| {
+                                cx.stop_propagation();
+                                this.wallet_popover_open = !this.wallet_popover_open;
+                                this.context_picker_open = false;
+                                cx.notify();
+                            }))
+                            .child(
+                                Icon::new(IconName::CircleCheck)
+                                    .size(px(11.0))
+                                    .text_color(rgba(0x44bb66ccu32))
+                            )
+                    )
+                })
                 .child(close_btn)
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     this.switch_tab(tab_id, window, cx);
@@ -2246,6 +2541,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .filter(|t| t.pinned)
             .map(|t| {
                 let cc = context_color_for(&t.context_id);
+                let wc = t.entity.clone().downcast::<WebViewTab>()
+                    .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
@@ -2254,6 +2551,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     Some(t.id) == self.active_tab_id,
                     true,
                     cc,
+                    wc,
                     cx,
                 )
             })
@@ -2266,6 +2564,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .filter(|t| !t.pinned)
             .map(|t| {
                 let cc = context_color_for(&t.context_id);
+                let wc = t.entity.clone().downcast::<WebViewTab>()
+                    .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
                 make_tab_row(
                     t.id,
                     t.icon.clone(),
@@ -2274,6 +2574,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     Some(t.id) == self.active_tab_id,
                     false,
                     cc,
+                    wc,
                     cx,
                 )
             })
@@ -2359,10 +2660,14 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .text_color(gpui::white())
             .child(top_row)
             .child(url_row)
+            // Wallet connection consent banner — between URL bar and tab list
+            .children(self.render_wallet_connect_banner(_window, cx).map(|b| b.into_any_element()))
             .child(tabs_area)
             .child(bottom_bar)
             // Context picker dropdown — painted last so it sits on top of tabs
             .children(context_dropdown)
+            // Wallet popover — painted on top of everything in the sidebar
+            .children(self.render_wallet_popover(_window, cx).map(|p| p.into_any_element()))
     }
 
     // ------------------------------------------------------------------
@@ -2610,6 +2915,578 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Wallet connection consent + popover + indicator
+// ---------------------------------------------------------------------------
+impl Workbench {
+    fn resolve_wallet_enable(&mut self, webview_ptr: usize, id: u64, origin: &str, cx: &mut Context<Self>) {
+        self.connected_sites.insert(origin.to_string());
+        // Mark the WebViewTab as connected
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                if entity.read(cx).webview_ptr == webview_ptr {
+                    entity.update(cx, |wv, _| wv.wallet_connected = true);
+                    break;
+                }
+            }
+        }
+        // Resolve the JS promise with accounts
+        if cx.has_global::<crate::wallet::WalletGlobal>() {
+            let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+            if let epoca_wallet::WalletState::Unlocked { ref root_address } = wg.manager.state() {
+                let addr = root_address.clone();
+                let js = format!(
+                    "window.__epocaWalletResolve({}, null, {{accounts: [{{address: '{}', name: 'Epoca'}}]}})",
+                    id, addr,
+                );
+                self.evaluate_on_webview(webview_ptr, &js, cx);
+                return;
+            }
+        }
+        let js = format!(
+            "window.__epocaWalletResolve({}, 'wallet is not available', null)", id,
+        );
+        self.evaluate_on_webview(webview_ptr, &js, cx);
+    }
+
+    fn approve_wallet_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_wallet_connect.take() else { return };
+        self.resolve_wallet_enable(req.webview_ptr, req.id, &req.origin, cx);
+        cx.notify();
+    }
+
+    fn deny_wallet_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_wallet_connect.take() else { return };
+        let js = format!(
+            "window.__epocaWalletResolve({}, 'user rejected the request', null)", req.id,
+        );
+        self.evaluate_on_webview(req.webview_ptr, &js, cx);
+        cx.notify();
+    }
+
+    fn disconnect_wallet_site(&mut self, hostname: &str, cx: &mut Context<Self>) {
+        self.connected_sites.remove(hostname);
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                let tab_host = hostname_from_url(entity.read(cx).url()).to_string();
+                if tab_host == hostname {
+                    entity.update(cx, |wv, _| wv.wallet_connected = false);
+                }
+            }
+        }
+    }
+
+    fn lock_wallet(&mut self, cx: &mut Context<Self>) {
+        if cx.has_global::<crate::wallet::WalletGlobal>() {
+            cx.global_mut::<crate::wallet::WalletGlobal>().manager.lock();
+        }
+        self.connected_sites.clear();
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                entity.update(cx, |wv, _| wv.wallet_connected = false);
+            }
+        }
+        self.wallet_popover_open = false;
+        cx.notify();
+    }
+
+    fn render_wallet_connect_banner(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_wallet_connect.as_ref()?;
+        let origin = req.origin.clone();
+
+        Some(
+            div()
+                .mx(px(8.0))
+                .mb(px(4.0))
+                .p(px(10.0))
+                .rounded(px(8.0))
+                .bg(rgba(0x1e1e1eff))
+                .border_1()
+                .border_color(rgba(0xffffff22u32))
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                // Title
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            Icon::new(IconName::CircleUser)
+                                .size(px(14.0))
+                                .text_color(rgba(0x44bb66ffu32)),
+                        )
+                        .child(
+                            gpui_component::label::Label::new("Connect wallet?")
+                                .text_size(px(13.0)),
+                        ),
+                )
+                // Origin pill
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgba(0xffffff0cu32))
+                        .child(
+                            gpui_component::label::Label::new(origin)
+                                .text_size(px(11.0))
+                                .text_color(rgba(0xffffff99u32)),
+                        ),
+                )
+                // Buttons
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .justify_end()
+                        .child(
+                            Button::new("wallet-connect-deny")
+                                .ghost()
+                                .compact()
+                                .label("Deny")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_wallet_connect(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("wallet-connect-allow")
+                                .primary()
+                                .compact()
+                                .label("Allow")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_wallet_connect(cx);
+                                })),
+                        ),
+                ),
+        )
+    }
+
+    fn render_wallet_popover(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        if !self.wallet_popover_open { return None; }
+
+        let wallet_state = cx
+            .try_global::<crate::wallet::WalletGlobal>()
+            .map(|g| g.manager.state())
+            .unwrap_or(epoca_wallet::WalletState::NoWallet);
+
+        // Get active tab's connection status and hostname
+        let (tab_connected, tab_hostname) = if let Some(id) = self.active_tab_id {
+            self.tabs.iter().find(|t| t.id == id).and_then(|tab| {
+                tab.entity.clone().downcast::<WebViewTab>().ok().map(|e| {
+                    let wv = e.read(cx);
+                    (wv.wallet_connected, hostname_from_url(wv.url()).to_string())
+                })
+            }).unwrap_or((false, String::new()))
+        } else {
+            (false, String::new())
+        };
+
+        let content: gpui::AnyElement = match wallet_state {
+            epoca_wallet::WalletState::NoWallet => {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        gpui_component::label::Label::new("No wallet configured")
+                            .text_size(px(12.0))
+                            .text_color(rgba(0xffffff66u32)),
+                    )
+                    .child(
+                        Button::new("wallet-pop-settings")
+                            .compact()
+                            .label("Set up in Settings")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.wallet_popover_open = false;
+                                this.open_settings(window, cx);
+                            })),
+                    )
+                    .into_any_element()
+            }
+            epoca_wallet::WalletState::Locked => {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    .child(
+                        gpui_component::label::Label::new("Wallet is locked")
+                            .text_size(px(12.0))
+                            .text_color(rgba(0xffffff66u32)),
+                    )
+                    .child(
+                        Button::new("wallet-pop-unlock")
+                            .primary()
+                            .compact()
+                            .label("Unlock")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                    let _ = cx.global_mut::<crate::wallet::WalletGlobal>().manager.unlock();
+                                }
+                                this.wallet_popover_open = false;
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            }
+            epoca_wallet::WalletState::Unlocked { ref root_address } => {
+                let addr = root_address.clone();
+                let addr_display = if addr.len() > 16 {
+                    format!("{}...{}", &addr[..8], &addr[addr.len()-6..])
+                } else {
+                    addr.clone()
+                };
+                let addr_for_copy = addr.clone();
+                let hostname = tab_hostname.clone();
+
+                let mut col = div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.0))
+                    // Address row
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                gpui_component::label::Label::new("Account")
+                                    .text_size(px(10.0))
+                                    .text_color(rgba(0xffffff66u32)),
+                            )
+                            .child(
+                                div()
+                                    .id("wallet-addr-copy")
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .cursor_pointer()
+                                    .child(
+                                        gpui_component::label::Label::new(addr_display)
+                                            .text_size(px(12.0))
+                                            .text_color(rgba(0x44bb66ffu32)),
+                                    )
+                                    .child(
+                                        Icon::new(IconName::Copy)
+                                            .size(px(12.0))
+                                            .text_color(rgba(0xffffff44u32)),
+                                    )
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(addr_for_copy.clone()));
+                                    })),
+                            ),
+                    )
+                    // Separator
+                    .child(div().h(px(1.0)).bg(rgba(0xffffff14u32)));
+
+                // Connection status
+                if tab_connected {
+                    let disconnect_host = hostname.clone();
+                    col = col
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(Icon::new(IconName::Check).size(px(12.0)).text_color(rgba(0x44bb66ffu32)))
+                                .child(
+                                    gpui_component::label::Label::new(format!("Connected to {}", hostname))
+                                        .text_size(px(11.0)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .justify_between()
+                                .child(
+                                    Button::new("wallet-pop-disconnect")
+                                        .ghost()
+                                        .compact()
+                                        .label("Disconnect")
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.disconnect_wallet_site(&disconnect_host, cx);
+                                            this.wallet_popover_open = false;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("wallet-pop-lock")
+                                        .ghost()
+                                        .compact()
+                                        .label("Lock")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.lock_wallet(cx);
+                                        })),
+                                ),
+                        );
+                } else {
+                    col = col
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(Icon::new(IconName::Info).size(px(12.0)).text_color(rgba(0xffffff44u32)))
+                                .child(
+                                    gpui_component::label::Label::new("Not connected to this site")
+                                        .text_size(px(11.0))
+                                        .text_color(rgba(0xffffff66u32)),
+                                ),
+                        )
+                        .child(
+                            Button::new("wallet-pop-lock2")
+                                .ghost()
+                                .compact()
+                                .label("Lock Wallet")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.lock_wallet(cx);
+                                })),
+                        );
+                }
+
+                col.into_any_element()
+            }
+        };
+
+        Some(
+            div()
+                .absolute()
+                .top(px(76.0))
+                .left(px(8.0))
+                .right(px(8.0))
+                .p(px(12.0))
+                .rounded(px(8.0))
+                .bg(rgba(0x1e1e1eff))
+                .border_1()
+                .border_color(rgba(0xffffff22u32))
+                .child(content)
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wallet sign confirmation dialog
+// ---------------------------------------------------------------------------
+impl Workbench {
+    fn approve_wallet_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_wallet_sign.take() else { return };
+
+        if !cx.has_global::<crate::wallet::WalletGlobal>() {
+            self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err("no wallet"), cx);
+            return;
+        }
+
+        let result = if req.method == "signRaw" {
+            // Parse raw.data from params JSON
+            self.wallet_sign_raw(&req.params_json, cx)
+        } else {
+            // signPayload — sign the method (call data) hex bytes
+            self.wallet_sign_payload(&req.params_json, cx)
+        };
+
+        match result {
+            Ok(sig_hex) => {
+                // Return { id: 1, signature: "0x01..." } — 0x01 prefix = sr25519 type byte
+                let js = format!(
+                    "window.__epocaWalletResolve({}, null, {{id: 1, signature: '0x01{}'}})",
+                    req.id, &sig_hex[2..], // strip "0x" from sig_hex, prepend "0x01"
+                );
+                self.evaluate_on_webview(req.webview_ptr, &js, cx);
+            }
+            Err(e) => {
+                self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err(&e), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_wallet_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_wallet_sign.take() else { return };
+        self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err("user rejected signing request"), cx);
+        cx.notify();
+    }
+
+    fn wallet_sign_raw(&mut self, params_json: &str, cx: &mut Context<Self>) -> Result<String, String> {
+        // params_json: {"raw":{"address":"...","data":"0x...","type":"bytes"}}
+        let parsed: serde_json::Value = serde_json::from_str(params_json)
+            .map_err(|e| format!("invalid params: {e}"))?;
+        let data_hex = parsed["raw"]["data"]
+            .as_str()
+            .ok_or_else(|| "missing raw.data".to_string())?;
+        let data_hex = data_hex.strip_prefix("0x").unwrap_or(data_hex);
+        let payload = hex_decode(data_hex).map_err(|e| format!("invalid hex: {e}"))?;
+
+        let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+        // Sign with root keypair (not per-app derived — dapps use the root address)
+        let sig_bytes = wg.manager.sign_root(&payload)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("0x{}", hex_encode(&sig_bytes)))
+    }
+
+    fn wallet_sign_payload(&mut self, params_json: &str, cx: &mut Context<Self>) -> Result<String, String> {
+        // params_json: {"payload":{"address":"...","method":"0x...","era":"0x...","nonce":"0x...","tip":"0x...",
+        //   "specVersion":"0x...","transactionVersion":"0x...","genesisHash":"0x...","blockHash":"0x...",
+        //   "signedExtensions":[...],"version":4}}
+        //
+        // The signing payload for Substrate extrinsics:
+        //   method ++ era ++ nonce ++ tip ++ specVersion ++ transactionVersion ++ genesisHash ++ blockHash
+        // If the total is > 256 bytes, hash with blake2b-256 first, then sign the hash.
+        let parsed: serde_json::Value = serde_json::from_str(params_json)
+            .map_err(|e| format!("invalid params: {e}"))?;
+        let payload = &parsed["payload"];
+
+        let method = decode_hex_field(payload, "method")?;
+        let era = decode_hex_field(payload, "era")?;
+        let nonce = decode_compact_or_hex(payload, "nonce")?;
+        let tip = decode_compact_or_hex(payload, "tip")?;
+        let spec_version = decode_u32_le(payload, "specVersion")?;
+        let tx_version = decode_u32_le(payload, "transactionVersion")?;
+        let genesis_hash = decode_hex_field(payload, "genesisHash")?;
+        let block_hash = decode_hex_field(payload, "blockHash")?;
+
+        let mut signing_payload = Vec::new();
+        signing_payload.extend_from_slice(&method);
+        signing_payload.extend_from_slice(&era);
+        signing_payload.extend_from_slice(&nonce);
+        signing_payload.extend_from_slice(&tip);
+        signing_payload.extend_from_slice(&spec_version);
+        signing_payload.extend_from_slice(&tx_version);
+        signing_payload.extend_from_slice(&genesis_hash);
+        signing_payload.extend_from_slice(&block_hash);
+
+        // If payload > 256 bytes, hash it first (Substrate standard)
+        let to_sign = if signing_payload.len() > 256 {
+            use blake2::Digest;
+            let hash = blake2::Blake2b::<blake2::digest::consts::U32>::digest(&signing_payload);
+            hash.to_vec()
+        } else {
+            signing_payload
+        };
+
+        let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+        let sig_bytes = wg.manager.sign_root(&to_sign)
+            .map_err(|e| e.to_string())?;
+        Ok(format!("0x{}", hex_encode(&sig_bytes)))
+    }
+
+    fn resolve_wallet_sign_js(&self, webview_ptr: usize, id: u64, result: Result<&str, &str>, cx: &mut Context<Self>) {
+        let js = match result {
+            Ok(val) => format!("window.__epocaWalletResolve({}, null, {})", id, val),
+            Err(e) => {
+                let msg = e.replace('\'', "\\'");
+                format!("window.__epocaWalletResolve({}, '{}', null)", id, msg)
+            }
+        };
+        self.evaluate_on_webview(webview_ptr, &js, cx);
+    }
+
+    fn evaluate_on_webview(&self, webview_ptr: usize, js: &str, cx: &Context<Self>) {
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                if entity.read(cx).webview_ptr == webview_ptr {
+                    entity.read(cx).evaluate_script(js, cx);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn render_wallet_sign_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_wallet_sign.as_ref()?;
+        let origin = req.origin.clone();
+        let message = req.display_message.clone();
+
+        Some(
+            div()
+                .id("wallet-sign-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_wallet_sign(cx);
+                }))
+                .child(
+                    div()
+                        .id("wallet-sign-dialog")
+                        .w(px(380.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        // Stop click propagation so clicking the dialog doesn't dismiss
+                        .on_click(|_, _, _| {})
+                        // Title
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new("Signature Request")
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        // Origin
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(origin)
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        // Message
+                        .child(
+                            gpui_component::label::Label::new(message)
+                                .text_size(px(13.0)),
+                        )
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("wallet-sign-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_wallet_sign(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("wallet-sign-approve")
+                                        .primary()
+                                        .label("Sign")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_wallet_sign(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
+}
+
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_pending_nav(window, cx);
@@ -2661,6 +3538,27 @@ impl Render for Workbench {
                     None
                 };
 
+                let wallet_dialog = self.render_wallet_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+
+                // Backdrop to dismiss wallet popover when clicking outside
+                let wallet_backdrop = if self.wallet_popover_open {
+                    Some(
+                        div()
+                            .id("wallet-backdrop")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.wallet_popover_open = false;
+                                cx.notify();
+                            })),
+                    )
+                } else {
+                    None
+                };
+
                 // Backdrop to dismiss context dropdown when clicking outside
                 let ctx_backdrop = if self.context_picker_open {
                     Some(
@@ -2687,8 +3585,10 @@ impl Render for Workbench {
                     .flex_row()
                     .child(self.render_sidebar(window, cx))
                     .child(content)
+                    .children(wallet_backdrop)
                     .children(ctx_backdrop)
                     .children(omnibox)
+                    .children(wallet_dialog)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -2718,6 +3618,18 @@ impl Render for Workbench {
                     }))
                     .on_action(cx.listener(|this, _: &CloseFindBar, window, cx| {
                         this.close_find(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Copy, _, cx| {
+                        this.clipboard_to_webview("copy", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Cut, _, cx| {
+                        this.clipboard_to_webview("cut", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
+                        this.clipboard_to_webview("paste", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::SelectAll, _, cx| {
+                        this.clipboard_to_webview("selectAll", cx);
                     }))
             }
 
@@ -2798,6 +3710,26 @@ impl Render for Workbench {
                     None
                 };
 
+                let wallet_dialog_overlay = self.render_wallet_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+
+                let wallet_backdrop_overlay = if self.wallet_popover_open {
+                    Some(
+                        div()
+                            .id("wallet-backdrop-overlay")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.wallet_popover_open = false;
+                                cx.notify();
+                            })),
+                    )
+                } else {
+                    None
+                };
+
                 // Backdrop to dismiss context dropdown when clicking outside
                 let ctx_backdrop_overlay = if self.context_picker_open {
                     Some(
@@ -2849,10 +3781,12 @@ impl Render for Workbench {
                     .size_full()
                     .bg(chrome_bg)
                     .child(content)
+                    .children(wallet_backdrop_overlay)
                     .children(ctx_backdrop_overlay)
                     .children(sidebar)
                     .children(fullscreen_bar)
                     .children(omnibox)
+                    .children(wallet_dialog_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -2882,6 +3816,18 @@ impl Render for Workbench {
                     }))
                     .on_action(cx.listener(|this, _: &CloseFindBar, window, cx| {
                         this.close_find(window, cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Copy, _, cx| {
+                        this.clipboard_to_webview("copy", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Cut, _, cx| {
+                        this.clipboard_to_webview("cut", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::Paste, _, cx| {
+                        this.clipboard_to_webview("paste", cx);
+                    }))
+                    .on_action(cx.listener(|this, _: &gpui_component::input::SelectAll, _, cx| {
+                        this.clipboard_to_webview("selectAll", cx);
                     }))
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if this.sidebar_mode != SidebarMode::Overlay {
@@ -2923,6 +3869,54 @@ fn escape_js_string(s: &str) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Hex helpers for wallet payload construction
+// ---------------------------------------------------------------------------
+
+fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
+    if s.len() % 2 != 0 {
+        return Err("odd-length hex".into());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Decode a "0x..." hex field from a JSON value.
+fn decode_hex_field(obj: &serde_json::Value, key: &str) -> Result<Vec<u8>, String> {
+    let s = obj[key].as_str().ok_or_else(|| format!("missing {key}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    hex_decode(s)
+}
+
+/// Decode a SCALE-compact-encoded or hex integer field.
+/// Polkadot.js sends nonce/tip as "0x..." hex strings of the SCALE-compact encoding.
+fn decode_compact_or_hex(obj: &serde_json::Value, key: &str) -> Result<Vec<u8>, String> {
+    let s = obj[key].as_str().ok_or_else(|| format!("missing {key}"))?;
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    hex_decode(s)
+}
+
+/// Decode a JSON value as a u32 and return its little-endian 4 bytes.
+/// Polkadot.js sends specVersion/transactionVersion as hex strings or numbers.
+fn decode_u32_le(obj: &serde_json::Value, key: &str) -> Result<Vec<u8>, String> {
+    let val = &obj[key];
+    if let Some(n) = val.as_u64() {
+        return Ok((n as u32).to_le_bytes().to_vec());
+    }
+    if let Some(s) = val.as_str() {
+        let s = s.strip_prefix("0x").unwrap_or(s);
+        let n = u32::from_str_radix(s, 16).map_err(|e| format!("{key}: {e}"))?;
+        return Ok(n.to_le_bytes().to_vec());
+    }
+    Err(format!("missing or invalid {key}"))
 }
 
 /// Record a browsing history visit, skipping non-http URLs.

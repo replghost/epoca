@@ -7,6 +7,7 @@ use epoca_core::workbench::{
 };
 use epoca_core::settings::SettingsGlobal;
 use epoca_core::chain::ChainGlobal;
+use epoca_core::wallet::WalletGlobal;
 use epoca_chain::ChainClient;
 
 // App-level actions (not workbench-scoped)
@@ -101,6 +102,14 @@ fn main() {
             KeyBinding::new("cmd-shift-r", HardReload, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-f", FindInPage, None),
+            // Global clipboard bindings — allows Edit menu to show shortcuts
+            // and enables clipboard forwarding to WKWebView via Workbench handlers.
+            KeyBinding::new("cmd-c", gpui_component::input::Copy, None),
+            KeyBinding::new("cmd-x", gpui_component::input::Cut, None),
+            KeyBinding::new("cmd-v", gpui_component::input::Paste, None),
+            KeyBinding::new("cmd-a", gpui_component::input::SelectAll, None),
+            KeyBinding::new("cmd-z", gpui_component::input::Undo, None),
+            KeyBinding::new("cmd-shift-z", gpui_component::input::Redo, None),
         ]);
 
         // ── macOS menu bar ───────────────────────────────────────────────────
@@ -127,6 +136,14 @@ fn main() {
             Menu {
                 name: "Edit".into(),
                 items: vec![
+                    MenuItem::os_action("Undo", gpui_component::input::Undo, OsAction::Undo),
+                    MenuItem::os_action("Redo", gpui_component::input::Redo, OsAction::Redo),
+                    MenuItem::separator(),
+                    MenuItem::os_action("Cut", gpui_component::input::Cut, OsAction::Cut),
+                    MenuItem::os_action("Copy", gpui_component::input::Copy, OsAction::Copy),
+                    MenuItem::os_action("Paste", gpui_component::input::Paste, OsAction::Paste),
+                    MenuItem::os_action("Select All", gpui_component::input::SelectAll, OsAction::SelectAll),
+                    MenuItem::separator(),
                     MenuItem::action("Find", FindInPage),
                 ],
             },
@@ -182,6 +199,9 @@ fn main() {
 
         cx.set_global(settings_global);
         cx.set_global(ChainGlobal { client: chain_client });
+        cx.set_global(WalletGlobal {
+            manager: epoca_wallet::WalletManager::new(),
+        });
 
         cx.spawn(async move |cx| {
             cx.open_window(new_window_opts(), |window, cx| {
@@ -200,7 +220,11 @@ fn main() {
                         Some(OpenTarget::ProdBundle(path)) => {
                             match epoca_sandbox::ProdBundle::from_file(path) {
                                 Ok(bundle) => {
-                                    wb.open_framebuffer_app(bundle, window, cx);
+                                    if bundle.manifest.app.app_type == "spa" {
+                                        wb.open_spa(bundle, window, cx);
+                                    } else {
+                                        wb.open_framebuffer_app(bundle, window, cx);
+                                    }
                                 }
                                 Err(e) => {
                                     log::error!("Failed to load .prod bundle: {e}");

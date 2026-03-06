@@ -1,0 +1,13 @@
+[app]
+id = "com.epoca.test-spa"
+name = "Test SPA"
+version = "0.1.0"
+app_type = "spa"
+
+[webapp]
+entry = "index.html"
+sandbox = "strict"
+
+[permissions]
+sign = true
+statement_store = true

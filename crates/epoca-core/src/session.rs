@@ -77,7 +77,8 @@ pub fn load_session() -> Option<SessionState> {
 }
 
 /// Returns true if a TabKind is restorable across sessions.
-/// SandboxApp, FramebufferApp, and Welcome are not restorable.
+/// SandboxApp, FramebufferApp, Welcome, and Spa are not restorable.
+/// (Spa tabs require the original .prod bundle which is not stored in the session.)
 pub fn is_restorable(kind: &TabKind) -> bool {
     matches!(
         kind,

@@ -10,6 +10,7 @@ epoca-sandbox = { path = "../epoca-sandbox" }
 epoca-broker = { path = "../epoca-broker" }
 epoca-dsl = { path = "../epoca-dsl" }
 epoca-shield = { path = "../epoca-shield" }
+epoca-wallet = { path = "../epoca-wallet" }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 anyhow = { workspace = true }
@@ -20,6 +21,7 @@ toml = { workspace = true }
 image = { workspace = true }
 smallvec = { workspace = true }
 rusqlite = { workspace = true }
+blake2 = "0.10"
 
 [features]
 test-server = []

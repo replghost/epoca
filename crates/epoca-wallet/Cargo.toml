@@ -1,0 +1,20 @@
+[package]
+name = "epoca-wallet"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+schnorrkel = "0.11"
+bip39 = { version = "2", features = ["rand"] }
+blake2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+bs58 = "0.5"
+anyhow = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+security-framework-sys = "2"
+core-foundation = "0.10"

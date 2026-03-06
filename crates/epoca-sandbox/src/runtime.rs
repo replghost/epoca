@@ -104,16 +104,25 @@ impl SandboxInstance {
             .context("Failed to parse PolkaVM program blob")?;
 
         let engine_config = Config::from_env().unwrap_or_default();
-        let engine = Engine::new(&engine_config)
-            .context("Failed to create PolkaVM engine")?;
+        let engine = Engine::new(&engine_config).map_err(|e| {
+            log::error!("[sandbox] Engine::new error: {e}");
+            e
+        }).context("Failed to create PolkaVM engine")?;
 
         // Enable synchronous gas metering so call_update() can be interrupted
         // when a guest loops indefinitely (CallError::NotEnoughGas is returned).
         let mut module_config = polkavm::ModuleConfig::default();
         module_config.set_gas_metering(Some(polkavm::GasMeteringKind::Sync));
 
-        let module = Module::from_blob(&engine, &module_config, blob)
-            .context("Failed to compile PolkaVM module")?;
+        // On Apple Silicon the native page size is 16KB; PolkaVM defaults to 4KB
+        // which is incompatible with the JIT compiler's generic sandbox.
+        #[cfg(target_os = "macos")]
+        module_config.set_page_size(16384);
+
+        let module = Module::from_blob(&engine, &module_config, blob).map_err(|e| {
+            log::error!("[sandbox] Module::from_blob error: {e}");
+            e
+        }).context("Failed to compile PolkaVM module")?;
 
         let mut linker: Linker<HostState, anyhow::Error> = Linker::new();
 

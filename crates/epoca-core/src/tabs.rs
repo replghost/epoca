@@ -60,6 +60,7 @@ pub enum TabKind {
     FramebufferApp { app_id: String },
     DeclarativeApp { path: String },
     WebView { url: String },
+    Spa { app_id: String },
 }
 
 
@@ -924,7 +925,8 @@ impl FramebufferAppTab {
 
         // Spawn the sandbox on a background thread — all PolkaVM work happens there.
         let shared_bg = shared.clone();
-        match SandboxInstance::from_bytes(&bundle.program_bytes, &config) {
+        let program_bytes = bundle.program_bytes.as_deref().unwrap_or(&[]);
+        match SandboxInstance::from_bytes(program_bytes, &config) {
             Ok(mut sandbox) => {
                 log::info!("[fb] sandbox loaded, {} assets", bundle.assets.len());
                 for key in bundle.assets.keys() {
@@ -1072,44 +1074,37 @@ impl FramebufferAppTab {
         }
     }
 
-    /// Translate a GPUI keystroke into a simple key_code for the guest.
+    /// Translate a GPUI keystroke into a key_code for the guest.
+    /// Uses Windows Virtual Key codes to match guest shim expectations.
     fn keystroke_to_code(keystroke: &gpui::Keystroke) -> Option<u8> {
+        // Arrow keys and special keys (by key name)
+        match keystroke.key.as_str() {
+            "up" => return Some(0x26),     // VK_UP
+            "down" => return Some(0x28),   // VK_DOWN
+            "left" => return Some(0x25),   // VK_LEFT
+            "right" => return Some(0x27),  // VK_RIGHT
+            "enter" => return Some(0x0D),  // VK_RETURN
+            "escape" => return Some(0x1B), // VK_ESCAPE
+            "tab" => return Some(0x09),    // VK_TAB
+            "shift" => return Some(0x10),  // VK_SHIFT
+            "control" => return Some(0x11),// VK_CONTROL
+            "space" => return Some(0x20),  // VK_SPACE
+            _ => {}
+        }
+        // Character keys — use uppercase ASCII (= Windows VK codes for A-Z)
         let key = keystroke.key_char.as_deref().unwrap_or("");
-        // Map common keys to DOOM-compatible scancodes
-        match key {
-            "w" | "W" => Some(0x11), // up
-            "a" | "A" => Some(0x1E), // strafe left
-            "s" | "S" => Some(0x1F), // down
-            "d" | "D" => Some(0x20), // strafe right
-            "f" | "F" => Some(0x1D), // fire (Ctrl scancode — macOS swallows bare Ctrl)
-            " " => Some(0x39),       // space (use)
-            _ => {
-                // Arrow keys and others
-                match keystroke.key.as_str() {
-                    "up" => Some(0x48),
-                    "down" => Some(0x50),
-                    "left" => Some(0x4B),
-                    "right" => Some(0x4D),
-                    "enter" => Some(0x1C),
-                    "escape" => Some(0x01),
-                    "tab" => Some(0x0F),
-                    "shift" => Some(0x2A),
-                    "control" => Some(0x1D),
-                    _ => {
-                        // Single ASCII character
-                        if let Some(ch) = key.chars().next() {
-                            if ch.is_ascii() {
-                                Some(ch as u8)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                }
+        if let Some(ch) = key.chars().next() {
+            if ch.is_ascii_alphabetic() {
+                return Some(ch.to_ascii_uppercase() as u8);
+            }
+            if ch == ' ' {
+                return Some(0x20);
+            }
+            if ch.is_ascii() {
+                return Some(ch as u8);
             }
         }
+        None
     }
 }
 
@@ -1738,6 +1733,7 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView) -> usize {
         crate::shield::register_context_menu_handler(uc, webview_ptr);
         crate::shield::register_cursor_handler(uc, webview_ptr);
         crate::webauthn::register_webauthn_handler(uc, webview_ptr);
+        crate::wallet::register_wallet_handler(uc, webview_ptr);
         #[cfg(feature = "test-server")]
         crate::test_server::register_test_result_handler(uc, webview_ptr);
 
@@ -1777,6 +1773,8 @@ pub struct WebViewTab {
     /// Drives `.cursor_pointer()` on the GPUI wrapper div so GPUI's cursor
     /// system shows the hand cursor instead of overriding WKWebView's CSS cursor.
     pub cursor_pointer: bool,
+    /// True when this tab's site has been approved for wallet connection.
+    pub wallet_connected: bool,
 }
 
 impl WebViewTab {
@@ -1843,7 +1841,12 @@ impl WebViewTab {
         // still running in the background — that's acceptable for early opens).
         let shield = crate::shield::current_config();
 
-        match gpui_component::wry::WebViewBuilder::new()
+        let wallet_enabled = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_wallet)
+            .unwrap_or(false);
+
+        let mut builder = gpui_component::wry::WebViewBuilder::new()
             .with_url(&url)
             .with_incognito(isolated)
             .with_initialization_script(SCROLLBAR_CSS_SCRIPT)
@@ -1856,8 +1859,13 @@ impl WebViewTab {
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
             .with_initialization_script(crate::webauthn::WEBAUTHN_POLYFILL)
             .with_initialization_script(&shield.document_start_script)
-            .with_initialization_script(&shield.document_end_script)
-            .build_as_child(window)
+            .with_initialization_script(&shield.document_end_script);
+
+        if wallet_enabled {
+            builder = builder.with_initialization_script(crate::wallet::WALLET_INJECT_SCRIPT);
+        }
+
+        match builder.build_as_child(window)
         {
             Ok(wry_wv) => {
                 // Option B: macOS native CALayer corner radius (true clipping like Arc).
@@ -1892,6 +1900,7 @@ impl WebViewTab {
             webview_ptr,
             blocked_count: 0,
             cursor_pointer: false,
+            wallet_connected: false,
         }
     }
 
@@ -2071,6 +2080,251 @@ impl Render for WebViewTab {
 }
 
 // ---------------------------------------------------------------------------
+// SPA Tab — sandboxed single-page app loaded from a .prod bundle
+// ---------------------------------------------------------------------------
+
+/// A sandboxed single-page application tab. The SPA's HTML/JS/CSS is loaded
+/// from a `.prod` bundle via a custom `epocaapp://` URL scheme. Network access
+/// is blocked; the app communicates with the host through `window.epoca.*` APIs
+/// injected at document start.
+pub struct SpaTab {
+    focus_handle: FocusHandle,
+    app_id: String,
+    app_name: String,
+    _entry: String,
+    webview: Option<Entity<webview::WebView>>,
+    error: Option<String>,
+    _inset_subscription: gpui::Subscription,
+    _omnibox_subscription: gpui::Subscription,
+    sidebar_blocker_ptr: u64,
+    pub webview_ptr: usize,
+}
+
+impl SpaTab {
+    pub fn new(
+        bundle: epoca_sandbox::bundle::ProdBundle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let app_id = bundle.manifest.app.id.clone();
+        let app_name = bundle.manifest.app.name.clone();
+        let entry = bundle
+            .manifest
+            .webapp
+            .as_ref()
+            .map(|w| w.entry.clone())
+            .unwrap_or_else(|| "index.html".into());
+
+        // Register assets so the custom protocol handler can serve them.
+        crate::spa::register_spa_assets(&app_id, bundle.assets);
+
+        let _inset_subscription =
+            cx.observe_global::<crate::OverlayLeftInset>(|this: &mut Self, cx| {
+                let inset = cx
+                    .try_global::<crate::OverlayLeftInset>()
+                    .map(|g| g.0)
+                    .unwrap_or(0.0);
+                if let Some(wv_entity) = &this.webview {
+                    let raw = wv_entity.read(cx).raw();
+                    #[cfg(target_os = "macos")]
+                    apply_webview_sidebar_mask(&raw, inset);
+                }
+                #[cfg(target_os = "macos")]
+                update_sidebar_blocker(this.sidebar_blocker_ptr, inset);
+                cx.notify();
+            });
+
+        let _omnibox_subscription =
+            cx.observe_global::<crate::OmniboxOpen>(|this: &mut Self, cx| {
+                let open = cx
+                    .try_global::<crate::OmniboxOpen>()
+                    .map(|g| g.0)
+                    .unwrap_or(false);
+                if let Some(wv_entity) = &this.webview {
+                    let raw = wv_entity.read(cx).raw();
+                    #[cfg(target_os = "macos")]
+                    set_webview_hidden(&raw, open);
+                }
+                if !open {
+                    let inset = cx
+                        .try_global::<crate::OverlayLeftInset>()
+                        .map(|g| g.0)
+                        .unwrap_or(0.0);
+                    #[cfg(target_os = "macos")]
+                    update_sidebar_blocker(this.sidebar_blocker_ptr, inset);
+                }
+                cx.notify();
+            });
+
+        let entry_url = format!("epocaapp://{}/{}", app_id, entry);
+        let mut error = None;
+        let mut wv_entity = None;
+        let mut sidebar_blocker_ptr: u64 = 0;
+        let mut webview_ptr: usize = 0;
+
+        // Build the SPA WebView with custom protocol + host API injection.
+        match gpui_component::wry::WebViewBuilder::new()
+            .with_url(&entry_url)
+            .with_incognito(true) // non-persistent data store — fully isolated
+            .with_initialization_script(crate::spa::HOST_API_SCRIPT)
+            .with_custom_protocol("epocaapp".to_string(), {
+                let app_id_inner = app_id.clone();
+                move |_wv, request| {
+                    let uri = request.uri().to_string();
+                    let rest = uri.strip_prefix("epocaapp://").unwrap_or(&uri);
+                    let (_aid, path) = match rest.find('/') {
+                        Some(i) => (&rest[..i], &rest[i + 1..]),
+                        None => (rest.as_ref(), ""),
+                    };
+                    let path = path.split('?').next().unwrap_or(path);
+                    let path = path.split('#').next().unwrap_or(path);
+                    let path = if path.is_empty() { "index.html" } else { path };
+
+                    match crate::spa::lookup_spa_asset(&app_id_inner, path) {
+                        Some(data) => {
+                            let mime = crate::spa::mime_for_path(path);
+                            gpui_component::wry::http::Response::builder()
+                                .status(200)
+                                .header("Content-Type", mime)
+                                .body(std::borrow::Cow::Owned(data))
+                                .unwrap()
+                        }
+                        None => gpui_component::wry::http::Response::builder()
+                            .status(404)
+                            .header("Content-Type", "text/plain")
+                            .body(std::borrow::Cow::Borrowed(b"404 Not Found" as &[u8]))
+                            .unwrap(),
+                    }
+                }
+            })
+            .build_as_child(window)
+        {
+            Ok(wry_wv) => {
+                #[cfg(target_os = "macos")]
+                apply_webview_corner_radius(&wry_wv, 10.0);
+
+                #[cfg(target_os = "macos")]
+                {
+                    use gpui_component::wry::WebViewExtMacOS;
+                    unsafe {
+                        let wk = wry_wv.webview();
+                        let obj = &*wk as *const _ as *mut objc2::runtime::AnyObject;
+                        webview_ptr = obj as usize;
+
+                        let config: *mut objc2::runtime::AnyObject =
+                            objc2::msg_send![obj, configuration];
+                        if !config.is_null() {
+                            let uc: *mut objc2::runtime::AnyObject =
+                                objc2::msg_send![config, userContentController];
+                            if !uc.is_null() {
+                                crate::spa::install_block_all_rule(uc);
+                                crate::spa::register_host_handler(uc, webview_ptr);
+                            }
+                        }
+                    }
+                }
+
+                #[cfg(target_os = "macos")]
+                { sidebar_blocker_ptr = create_sidebar_blocker(&wry_wv); }
+
+                wv_entity = Some(cx.new(|cx| {
+                    webview::WebView::new(wry_wv, window, cx)
+                }));
+            }
+            Err(e) => {
+                error = Some(format!("SPA WebView creation failed: {e}"));
+                log::error!("Failed to create SPA WebView: {e}");
+            }
+        }
+
+        Self {
+            focus_handle: cx.focus_handle(),
+            app_id,
+            app_name,
+            _entry: entry,
+            webview: wv_entity,
+            error,
+            _inset_subscription,
+            _omnibox_subscription,
+            sidebar_blocker_ptr,
+            webview_ptr,
+        }
+    }
+
+    pub fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    pub fn app_name(&self) -> &str {
+        &self.app_name
+    }
+
+    pub fn evaluate_script(&self, js: &str, cx: &App) {
+        if let Some(wv) = &self.webview {
+            let _ = wv.read(cx).raw().evaluate_script(js);
+        }
+    }
+}
+
+impl Drop for SpaTab {
+    fn drop(&mut self) {
+        crate::spa::unregister_spa_assets(&self.app_id);
+        crate::spa::unregister_host_handler(self.webview_ptr);
+    }
+}
+
+impl EventEmitter<PanelEvent> for SpaTab {}
+
+impl Focusable for SpaTab {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for SpaTab {
+    fn panel_name(&self) -> &'static str {
+        "SpaTab"
+    }
+}
+
+impl Render for SpaTab {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(err) = &self.error {
+            return div()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgba(0xef4444ff))
+                        .child(err.clone()),
+                )
+                .into_any_element();
+        }
+
+        if let Some(wv_entity) = &self.webview {
+            div()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .child(wv_entity.clone())
+                .into_any_element()
+        } else {
+            div()
+                .track_focus(&self.focus_handle)
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(Label::new("Loading..."))
+                .into_any_element()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Settings Panel
 // ---------------------------------------------------------------------------
 
@@ -2086,6 +2340,14 @@ pub struct SettingsTab {
     context_name_inputs: Vec<(String, Entity<InputState>)>,
     /// Subscriptions for context name input blur events.
     _context_subs: Vec<Subscription>,
+    /// After wallet creation, holds the 12-word mnemonic for the user to write down.
+    wallet_mnemonic_display: Option<String>,
+    /// When true, shows the import mnemonic text input.
+    wallet_show_import: bool,
+    /// Text input for importing an existing mnemonic (lazy-created).
+    wallet_import_input: Option<Entity<InputState>>,
+    /// Error message from a failed wallet operation.
+    wallet_error: Option<String>,
 }
 
 impl SettingsTab {
@@ -2114,6 +2376,10 @@ impl SettingsTab {
             _refresh_task,
             context_name_inputs: Vec::new(),
             _context_subs: Vec::new(),
+            wallet_mnemonic_display: None,
+            wallet_show_import: false,
+            wallet_import_input: None,
+            wallet_error: None,
         }
     }
 }
@@ -2208,6 +2474,7 @@ impl Render for SettingsTab {
         let experimental_contexts = settings.experimental_contexts;
         let session_contexts = settings.contexts.clone();
         let history_retention = settings.history_retention;
+        let experimental_wallet = settings.experimental_wallet;
 
         // Chain statuses snapshot (read once for this render)
         let chain_statuses: Option<Vec<epoca_chain::ChainStatus>> =
@@ -2524,7 +2791,7 @@ impl Render for SettingsTab {
                                                 div()
                                                     .text_xs()
                                                     .text_color(text_secondary)
-                                                    .child("Block ads and trackers using EasyList + EasyPrivacy"),
+                                                    .child("Block ads, trackers, and annoyances using 9 filter lists (EasyList, AdGuard, uBlock Origin, and more)"),
                                             ),
                                     )
                                     .child(toggle_pill(shield_enabled)),
@@ -2810,6 +3077,335 @@ impl Render for SettingsTab {
                                         &pre_state,
                                         cx,
                                     ))
+                            })
+                            // Divider
+                            .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                            // Wallet toggle
+                            .child(
+                                div()
+                                    .id("toggle-wallet")
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .px(px(16.0))
+                                    .py(px(12.0))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                            g.settings.experimental_wallet =
+                                                !g.settings.experimental_wallet;
+                                            g.save();
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .gap(px(2.0))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(text_primary)
+                                                    .child("Wallet"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(text_secondary)
+                                                    .child("sr25519 key management for sandboxed apps. Derives a unique account per app from a BIP-39 mnemonic stored in Keychain."),
+                                            ),
+                                    )
+                                    .child(toggle_pill(experimental_wallet)),
+                            )
+                            .when(experimental_wallet, |d| {
+                                let wallet_state = cx
+                                    .try_global::<crate::wallet::WalletGlobal>()
+                                    .map(|wg| wg.manager.state())
+                                    .unwrap_or(epoca_wallet::WalletState::NoWallet);
+
+                                let mut section = d
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color));
+
+                                match &wallet_state {
+                                    epoca_wallet::WalletState::NoWallet => {
+                                        // Show Create / Import buttons
+                                        section = section.child(
+                                            div()
+                                                .px(px(16.0))
+                                                .py(px(10.0))
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(8.0))
+                                                .child(
+                                                    div().text_xs().text_color(text_secondary)
+                                                        .child("No wallet configured"),
+                                                )
+                                                .child(
+                                                    div().flex().gap(px(8.0))
+                                                        .child(
+                                                            div()
+                                                                .id("wallet-create")
+                                                                .px(px(12.0))
+                                                                .py(px(6.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgba(0x44bb66ff))
+                                                                .text_xs()
+                                                                .text_color(rgba(0x1a1a2eff))
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                        let result = cx
+                                                                            .global_mut::<crate::wallet::WalletGlobal>()
+                                                                            .manager
+                                                                            .create();
+                                                                        match result {
+                                                                            Ok(phrase) => {
+                                                                                this.wallet_mnemonic_display = Some(phrase);
+                                                                                this.wallet_error = None;
+                                                                                this.wallet_show_import = false;
+                                                                            }
+                                                                            Err(e) => {
+                                                                                this.wallet_error = Some(e.to_string());
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    cx.notify();
+                                                                }))
+                                                                .child("Create Wallet"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("wallet-import-btn")
+                                                                .px(px(12.0))
+                                                                .py(px(6.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgba(0xffffff18))
+                                                                .text_xs()
+                                                                .text_color(text_primary)
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    this.wallet_show_import = !this.wallet_show_import;
+                                                                    this.wallet_mnemonic_display = None;
+                                                                    this.wallet_error = None;
+                                                                    cx.notify();
+                                                                }))
+                                                                .child("Import Mnemonic"),
+                                                        ),
+                                                ),
+                                        );
+
+                                        // Show import input when toggled
+                                        if self.wallet_show_import {
+                                            // Lazy-create the input entity
+                                            if self.wallet_import_input.is_none() {
+                                                self.wallet_import_input = Some(cx.new(|cx| {
+                                                    let mut s = InputState::new(window, cx);
+                                                    s.set_placeholder("Enter 12-word mnemonic phrase...", window, cx);
+                                                    s
+                                                }));
+                                            }
+                                            let import_input = self.wallet_import_input.clone().unwrap();
+                                            section = section.child(
+                                                div()
+                                                    .px(px(16.0))
+                                                    .pb(px(10.0))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(6.0))
+                                                    .child(
+                                                        Input::new(&import_input)
+                                                            .cleanable(true)
+                                                            .appearance(false),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("wallet-import-confirm")
+                                                            .px(px(12.0))
+                                                            .py(px(6.0))
+                                                            .rounded(px(4.0))
+                                                            .bg(rgba(0x44bb66ff))
+                                                            .text_xs()
+                                                            .text_color(rgba(0x1a1a2eff))
+                                                            .cursor_pointer()
+                                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                                let phrase = if let Some(ref input) = this.wallet_import_input {
+                                                                    input.read(cx).value().to_string()
+                                                                } else {
+                                                                    String::new()
+                                                                };
+                                                                if phrase.trim().is_empty() {
+                                                                    this.wallet_error = Some("Enter a mnemonic phrase".into());
+                                                                    cx.notify();
+                                                                    return;
+                                                                }
+                                                                if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                    let result = cx
+                                                                        .global_mut::<crate::wallet::WalletGlobal>()
+                                                                        .manager
+                                                                        .import(phrase.trim());
+                                                                    match result {
+                                                                        Ok(()) => {
+                                                                            this.wallet_show_import = false;
+                                                                            this.wallet_error = None;
+                                                                            if let Some(ref input) = this.wallet_import_input {
+                                                                                input.update(cx, |s, cx| {
+                                                                                    s.set_value("", window, cx);
+                                                                                });
+                                                                            }
+                                                                        }
+                                                                        Err(e) => {
+                                                                            this.wallet_error = Some(e.to_string());
+                                                                        }
+                                                                    }
+                                                                }
+                                                                cx.notify();
+                                                            }))
+                                                            .child("Import"),
+                                                    ),
+                                            );
+                                        }
+
+                                        // Show mnemonic backup after creation
+                                        if let Some(ref phrase) = self.wallet_mnemonic_display {
+                                            section = section.child(
+                                                div()
+                                                    .px(px(16.0))
+                                                    .pb(px(10.0))
+                                                    .flex()
+                                                    .flex_col()
+                                                    .gap(px(6.0))
+                                                    .child(
+                                                        div().text_xs().text_color(rgba(0xf59e0bff))
+                                                            .child("Write down these 12 words and store them safely. This is the only time they will be shown."),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .px(px(10.0))
+                                                            .py(px(8.0))
+                                                            .rounded(px(6.0))
+                                                            .bg(rgba(0x0d1117ff))
+                                                            .text_xs()
+                                                            .text_color(rgba(0x44bb66ff))
+                                                            .child(phrase.clone()),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id("wallet-dismiss-mnemonic")
+                                                            .px(px(12.0))
+                                                            .py(px(6.0))
+                                                            .rounded(px(4.0))
+                                                            .bg(rgba(0xffffff18))
+                                                            .text_xs()
+                                                            .text_color(text_primary)
+                                                            .cursor_pointer()
+
+                                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                                this.wallet_mnemonic_display = None;
+                                                                cx.notify();
+                                                            }))
+                                                            .child("I've saved it"),
+                                                    ),
+                                            );
+                                        }
+                                    }
+                                    epoca_wallet::WalletState::Locked => {
+                                        section = section.child(
+                                            div()
+                                                .px(px(16.0))
+                                                .py(px(10.0))
+                                                .flex()
+                                                .items_center()
+                                                .justify_between()
+                                                .child(
+                                                    div().text_xs().text_color(text_secondary)
+                                                        .child("Wallet locked"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("wallet-unlock")
+                                                        .px(px(12.0))
+                                                        .py(px(6.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgba(0x44bb66ff))
+                                                        .text_xs()
+                                                        .text_color(rgba(0x1a1a2eff))
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                let result = cx
+                                                                    .global_mut::<crate::wallet::WalletGlobal>()
+                                                                    .manager
+                                                                    .unlock();
+                                                                if let Err(e) = result {
+                                                                    this.wallet_error = Some(e.to_string());
+                                                                } else {
+                                                                    this.wallet_error = None;
+                                                                }
+                                                            }
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Unlock"),
+                                                ),
+                                        );
+                                    }
+                                    epoca_wallet::WalletState::Unlocked { root_address } => {
+                                        section = section.child(
+                                            div()
+                                                .px(px(16.0))
+                                                .py(px(10.0))
+                                                .flex()
+                                                .flex_col()
+                                                .gap(px(4.0))
+                                                .child(
+                                                    div().text_xs().text_color(text_secondary)
+                                                        .child("Root address"),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(rgba(0x44bb66ff))
+                                                        .child(root_address.clone()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .id("wallet-lock")
+                                                        .mt(px(4.0))
+                                                        .px(px(12.0))
+                                                        .py(px(6.0))
+                                                        .rounded(px(4.0))
+                                                        .bg(rgba(0xffffff18))
+                                                        .text_xs()
+                                                        .text_color(text_primary)
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                cx.global_mut::<crate::wallet::WalletGlobal>()
+                                                                    .manager
+                                                                    .lock();
+                                                                this.wallet_error = None;
+                                                            }
+                                                            cx.notify();
+                                                        }))
+                                                        .child("Lock"),
+                                                ),
+                                        );
+                                    }
+                                }
+
+                                // Show error if any
+                                if let Some(ref err) = self.wallet_error {
+                                    section = section.child(
+                                        div()
+                                            .px(px(16.0))
+                                            .pb(px(8.0))
+                                            .text_xs()
+                                            .text_color(rgba(0xef4444ff))
+                                            .child(err.clone()),
+                                    );
+                                }
+
+                                section
                             }),
                     ),
             )

@@ -42,6 +42,15 @@ pub struct Permissions {
     pub gpu: GpuPermission,
     #[serde(default)]
     pub storage: String,
+    /// Whether the app can request transaction signing.
+    #[serde(default)]
+    pub sign: bool,
+    /// Whether the app can use Statement Store.
+    #[serde(default)]
+    pub statement_store: bool,
+    /// Media permissions for SPA tabs (e.g. ["camera", "audio"]).
+    #[serde(default)]
+    pub media: Vec<String>,
 }
 
 fn default_geo() -> GeoPermission {
@@ -60,6 +69,18 @@ pub struct GrantedPermissions {
     pub camera: bool,
     pub gpu: GpuPermission,
     pub storage_bytes: u64,
+    /// Whether the user has granted transaction signing.
+    #[serde(default)]
+    pub sign: bool,
+    /// Whether the user has granted Statement Store access.
+    #[serde(default)]
+    pub statement_store: bool,
+    /// Granted media types (e.g. "camera", "audio").
+    #[serde(default)]
+    pub media: Vec<String>,
+    /// Granted WebSocket URL patterns.
+    #[serde(default)]
+    pub websocket: Vec<String>,
 }
 
 impl Default for GeoPermission {
