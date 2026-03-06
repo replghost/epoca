@@ -10,6 +10,7 @@ pub mod derive;
 pub mod keystore;
 
 use anyhow::{anyhow, Result};
+use k256::ecdsa::SigningKey;
 use schnorrkel::Keypair;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,6 +52,10 @@ pub struct WalletManager {
     root_keypair: Option<Keypair>,
     /// Cached per-app keypairs — cleared on lock.
     app_keys: HashMap<String, Keypair>,
+    /// ETH secp256k1 signing key (BIP-44 m/44'/60'/0'/0/0). ZeroizeOnDrop.
+    eth_key: Option<SigningKey>,
+    /// BTC secp256k1 signing key (BIP-44 m/44'/0'/0'/0/0). ZeroizeOnDrop.
+    btc_key: Option<SigningKey>,
     /// Cached flag: whether a mnemonic exists in the Keychain.
     /// Avoids hitting the Keychain (and triggering macOS auth prompts) on every
     /// render frame. Updated on create/import/delete/unlock.
@@ -69,6 +74,8 @@ impl WalletManager {
         Self {
             root_keypair: None,
             app_keys: HashMap::new(),
+            eth_key: None,
+            btc_key: None,
             has_mnemonic: has,
             last_activity: None,
             auto_lock_timeout: Some(Duration::from_secs(DEFAULT_AUTO_LOCK_SECS)),
@@ -138,6 +145,8 @@ impl WalletManager {
 
         let kp = derive::root_keypair_from_mnemonic(&mnemonic);
         self.root_keypair = Some(kp);
+        self.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+        self.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
         self.app_keys.clear();
         self.touch();
 
@@ -160,6 +169,8 @@ impl WalletManager {
 
         let kp = derive::root_keypair_from_mnemonic(&mnemonic);
         self.root_keypair = Some(kp);
+        self.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+        self.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
         self.app_keys.clear();
         self.touch();
 
@@ -180,6 +191,8 @@ impl WalletManager {
 
         let kp = derive::root_keypair_from_mnemonic(&mnemonic);
         self.root_keypair = Some(kp);
+        self.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+        self.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
         self.app_keys.clear();
         self.touch();
         // Set has_mnemonic after parse succeeded — if parse fails above,
@@ -197,6 +210,8 @@ impl WalletManager {
     pub fn lock(&mut self) {
         self.root_keypair = None;
         self.app_keys.clear();
+        self.eth_key = None;
+        self.btc_key = None;
         self.last_activity = None;
         log::info!("Wallet locked");
     }
@@ -208,6 +223,73 @@ impl WalletManager {
             .as_ref()
             .ok_or_else(|| anyhow!("Wallet is locked"))?;
         Ok(derive::ss58_address(&kp.public))
+    }
+
+    /// Return the checksummed EIP-55 Ethereum address.
+    pub fn eth_address(&self) -> Result<String> {
+        let key = self
+            .eth_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("Wallet is locked"))?;
+        Ok(derive::secp256k1::eth_address(key))
+    }
+
+    /// Return the P2WPKH (bech32) Bitcoin mainnet address.
+    pub fn btc_address(&self) -> Result<String> {
+        let key = self
+            .btc_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("Wallet is locked"))?;
+        Ok(derive::secp256k1::btc_address_p2wpkh(key))
+    }
+
+    /// Sign arbitrary bytes with the ETH private key (EIP-191 personal_sign).
+    /// Returns 65-byte signature: `r (32) || s (32) || v (1)`.
+    pub fn eth_sign_personal(&mut self, data: &[u8]) -> Result<Vec<u8>> {
+        self.touch();
+        if data.len() > MAX_SIGN_PAYLOAD {
+            return Err(anyhow!(
+                "Payload too large ({} bytes, max {})",
+                data.len(),
+                MAX_SIGN_PAYLOAD,
+            ));
+        }
+
+        let key = self
+            .eth_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("Wallet is locked"))?;
+
+        // EIP-191 personal_sign prefix
+        use sha3::{Digest, Keccak256};
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", data.len());
+        let mut hasher = Keccak256::new();
+        hasher.update(prefix.as_bytes());
+        hasher.update(data);
+        let digest = hasher.finalize();
+
+        let (sig, recid) = key
+            .sign_prehash_recoverable(&digest)
+            .map_err(|e| anyhow!("ETH signing failed: {e}"))?;
+        let mut out = Vec::with_capacity(65);
+        out.extend_from_slice(&sig.to_bytes());
+        out.push(recid.to_byte() + 27); // Ethereum v = recid + 27
+        Ok(out)
+    }
+
+    /// Sign a raw 32-byte digest with the BTC private key (ECDSA, no prefix).
+    /// Returns the DER-encoded signature.
+    pub fn btc_sign_raw(&mut self, digest: &[u8; 32]) -> Result<Vec<u8>> {
+        self.touch();
+        let key = self
+            .btc_key
+            .as_ref()
+            .ok_or_else(|| anyhow!("Wallet is locked"))?;
+
+        let (sig, _recid) = key
+            .sign_prehash_recoverable(digest)
+            .map_err(|e| anyhow!("BTC signing failed: {e}"))?;
+        Ok(sig.to_der().to_bytes().to_vec())
     }
 
     /// Return the SS58 address for a given app_id (derived account).
@@ -425,13 +507,74 @@ mod tests {
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
         ).unwrap();
         wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
         let _ = wm.app_address("com.test.app").unwrap();
         assert!(!wm.app_keys.is_empty());
 
         wm.lock();
         assert!(wm.root_keypair.is_none());
         assert!(wm.app_keys.is_empty());
+        assert!(wm.eth_key.is_none());
+        assert!(wm.btc_key.is_none());
         // After lock, state is either NoWallet (no keychain) or Locked (keychain present)
         assert!(!matches!(wm.state(), WalletState::Unlocked { .. }));
+    }
+
+    #[test]
+    fn eth_address_when_unlocked() {
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let eth = wm.eth_address().unwrap();
+        assert!(eth.starts_with("0x"));
+        assert_eq!(eth.len(), 42);
+
+        let btc = wm.btc_address().unwrap();
+        assert!(btc.starts_with("bc1q"));
+    }
+
+    #[test]
+    fn eth_address_fails_when_locked() {
+        let wm = WalletManager::new();
+        assert!(wm.eth_address().is_err());
+        assert!(wm.btc_address().is_err());
+    }
+
+    #[test]
+    fn eth_sign_personal_produces_65_bytes() {
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.eth_key = Some(derive::secp256k1::eth_key(&mnemonic));
+
+        let sig = wm.eth_sign_personal(b"hello ethereum").unwrap();
+        assert_eq!(sig.len(), 65, "ETH personal_sign must be 65 bytes (r+s+v)");
+        // v should be 27 or 28
+        assert!(sig[64] == 27 || sig[64] == 28, "v must be 27 or 28, got {}", sig[64]);
+    }
+
+    #[test]
+    fn btc_sign_raw_produces_der() {
+        let mut wm = WalletManager::new();
+        let mnemonic = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        wm.root_keypair = Some(derive::root_keypair_from_mnemonic(&mnemonic));
+        wm.btc_key = Some(derive::secp256k1::btc_key(&mnemonic));
+
+        let digest = [0x42u8; 32];
+        let sig = wm.btc_sign_raw(&digest).unwrap();
+        // DER-encoded ECDSA signatures are 70-72 bytes typically
+        assert!(sig.len() >= 68 && sig.len() <= 73, "DER sig len: {}", sig.len());
+        // DER starts with 0x30
+        assert_eq!(sig[0], 0x30, "DER encoding must start with 0x30");
     }
 }

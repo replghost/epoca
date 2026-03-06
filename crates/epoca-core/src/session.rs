@@ -77,13 +77,14 @@ pub fn load_session() -> Option<SessionState> {
 }
 
 /// Returns true if a TabKind is restorable across sessions.
-/// SandboxApp, FramebufferApp, Welcome, and Spa are not restorable.
-/// (Spa tabs require the original .prod bundle which is not stored in the session.)
+/// FramebufferApp/SandboxApp/Welcome/Spa are not restorable (FramebufferApp
+/// causes RefCell reentrancy during restore — user can re-launch from App Library).
 pub fn is_restorable(kind: &TabKind) -> bool {
     matches!(
         kind,
         TabKind::WebView { .. }
             | TabKind::Settings
+            | TabKind::AppLibrary
             | TabKind::CodeEditor { .. }
             | TabKind::DeclarativeApp { .. }
     )

@@ -3,7 +3,7 @@ use gpui_component::Root;
 use std::path::PathBuf;
 use epoca_core::workbench::{
     Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
-    OpenSettings, FindInPage,
+    OpenSettings, OpenAppLibrary, OpenApp, FindInPage,
 };
 use epoca_core::settings::SettingsGlobal;
 use epoca_core::chain::ChainGlobal;
@@ -130,6 +130,9 @@ fn main() {
                     MenuItem::action("New Tab", NewTab),
                     MenuItem::action("New Window", NewWindow),
                     MenuItem::separator(),
+                    MenuItem::action("Open App...", OpenApp),
+                    MenuItem::action("App Library", OpenAppLibrary),
+                    MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseActiveTab),
                 ],
             },
@@ -219,8 +222,12 @@ fn main() {
                             wb.open_sandbox_app(name, path, window, cx);
                         }
                         Some(OpenTarget::ProdBundle(path)) => {
+                            // Install to ~/.epoca/apps/ then open.
+                            let _ = epoca_core::app_library::install_prod(path);
                             match epoca_sandbox::ProdBundle::from_file(path) {
                                 Ok(bundle) => {
+                                    let app_id = bundle.manifest.app.id.clone();
+                                    epoca_core::app_library::touch_last_launched(&app_id);
                                     if bundle.manifest.app.app_type == "spa" {
                                         wb.open_spa(bundle, window, cx);
                                     } else {

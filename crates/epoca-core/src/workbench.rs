@@ -1328,7 +1328,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::FramebufferApp { app_id } => app_id.clone(),
                 TabKind::Spa { app_id } => app_id.clone(),
                 TabKind::CodeEditor { path } => path.clone().unwrap_or_default(),
-                TabKind::Welcome | TabKind::Settings => String::new(),
+                TabKind::Welcome | TabKind::Settings | TabKind::AppLibrary => String::new(),
             })
             .unwrap_or_default();
         // Sync the context indicator to reflect this tab's context.
@@ -1630,6 +1630,121 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         });
         self.active_tab_id = Some(id);
         cx.notify();
+    }
+
+    /// Open the App Library tab, or switch to it if already open.
+    pub fn open_app_library(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::AppLibrary).map(|t| t.id) {
+            // Refresh the app list when switching back.
+            if let Some(tab) = self.tabs.iter().find(|t| t.id == id) {
+                if let Ok(entity) = tab.entity.clone().downcast::<AppLibraryTab>() {
+                    entity.update(cx, |tab, _cx| tab.refresh());
+                }
+            }
+            self.active_tab_id = Some(id);
+            cx.notify();
+            return;
+        }
+        let id = self.alloc_id();
+        let entity = cx.new(|cx| AppLibraryTab::new(cx));
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::AppLibrary,
+            title: "App Library".to_string(),
+            icon: IconName::SquareTerminal,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+        });
+        self.active_tab_id = Some(id);
+        cx.notify();
+    }
+
+    /// Handle the OpenApp action: either launch a pending bundle from the library,
+    /// or show a file picker to install a new .prod file.
+    pub fn handle_open_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Check if there's a pending launch from the App Library tab.
+        if let Some(bundle) = crate::tabs::take_pending_launch() {
+            if bundle.manifest.app.app_type == "spa" {
+                self.open_spa(bundle, window, cx);
+            } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+                self.open_framebuffer_app(bundle, window, cx);
+            }
+            return;
+        }
+
+        // No pending launch — show native file picker.
+        let paths: Option<std::path::PathBuf> = {
+            #[cfg(target_os = "macos")]
+            {
+                use objc2::runtime::AnyClass;
+                unsafe {
+                    let panel_cls = AnyClass::get("NSOpenPanel").unwrap();
+                    let panel: *mut objc2::runtime::AnyObject = objc2::msg_send![panel_cls, openPanel];
+                    let _: () = objc2::msg_send![panel, setCanChooseFiles: true];
+                    let _: () = objc2::msg_send![panel, setCanChooseDirectories: false];
+                    let _: () = objc2::msg_send![panel, setAllowsMultipleSelection: false];
+                    // Set allowed file types to .prod
+                    let ns_string_cls = AnyClass::get("NSString").unwrap();
+                    let mut buf = b"prod\0".to_vec();
+                    let ext: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                        ns_string_cls, stringWithUTF8String: buf.as_ptr()
+                    ];
+                    let ns_array_cls = AnyClass::get("NSArray").unwrap();
+                    let types: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                        ns_array_cls, arrayWithObject: ext
+                    ];
+                    let _: () = objc2::msg_send![panel, setAllowedFileTypes: types];
+                    let result: isize = objc2::msg_send![panel, runModal];
+                    if result == 1 {
+                        let url: *mut objc2::runtime::AnyObject = objc2::msg_send![panel, URL];
+                        let path_ns: *mut objc2::runtime::AnyObject = objc2::msg_send![url, path];
+                        let utf8: *const u8 = objc2::msg_send![path_ns, UTF8String];
+                        if !utf8.is_null() {
+                            let c_str = std::ffi::CStr::from_ptr(utf8 as *const i8);
+                            c_str.to_str().ok().map(|s| std::path::PathBuf::from(s))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            { None }
+        };
+
+        if let Some(path) = paths {
+            // Install the bundle first.
+            match crate::app_library::install_prod(&path) {
+                Ok(_install_dir) => {
+                    // Now load from installed location.
+                    match ProdBundle::from_file(&path) {
+                        Ok(bundle) => {
+                            let app_id = bundle.manifest.app.id.clone();
+                            crate::app_library::touch_last_launched(&app_id);
+                            if bundle.manifest.app.app_type == "spa" {
+                                self.open_spa(bundle, window, cx);
+                            } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+                                self.open_framebuffer_app(bundle, window, cx);
+                            }
+                        }
+                        Err(e) => log::error!("Failed to load .prod: {e}"),
+                    }
+                }
+                Err(e) => log::error!("Failed to install .prod: {e}"),
+            }
+
+            // Refresh the App Library tab if it's open.
+            if let Some(tab) = self.tabs.iter().find(|t| t.kind == TabKind::AppLibrary) {
+                if let Ok(entity) = tab.entity.clone().downcast::<AppLibraryTab>() {
+                    entity.update(cx, |tab, _cx| tab.refresh());
+                }
+            }
+        }
     }
 
     pub fn reload_active_tab(&mut self, hard: bool, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2007,8 +2122,28 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     });
                     restored_count += 1;
                 }
+                TabKind::FramebufferApp { .. } => {
+                    // Skip — restoring FramebufferApp causes RefCell reentrancy;
+                    // user can re-launch from App Library.
+                }
+                TabKind::AppLibrary => {
+                    let id = self.alloc_id();
+                    let entity = cx.new(|cx| AppLibraryTab::new(cx));
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: TabKind::AppLibrary,
+                        title: "App Library".to_string(),
+                        icon: IconName::SquareTerminal,
+                        entity: entity.into(),
+                        pinned: stab.pinned,
+                        nav: None,
+                        favicon_url: None,
+                        context_id: None,
+                    });
+                    restored_count += 1;
+                }
                 _ => {
-                    // Welcome, SandboxApp, FramebufferApp — skip
+                    // Welcome, SandboxApp, Spa — skip
                 }
             }
         }
@@ -3638,6 +3773,8 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;
                         if this.find_open {
@@ -3836,6 +3973,8 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &HardReload, window, cx| this.reload_active_tab(true, window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleSiteShield, _, cx| this.toggle_site_shield(cx)))
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;
                         if this.find_open {

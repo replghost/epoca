@@ -14,6 +14,14 @@ anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 
+# secp256k1 / BIP-44 (ETH + BTC key derivation)
+k256 = { version = "0.13", features = ["ecdsa"] }
+bip32 = { version = "0.5", default-features = false, features = ["secp256k1", "alloc"] }
+sha2 = "0.10"
+sha3 = "0.10"
+ripemd = "0.1"
+bech32 = "0.11"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3", features = ["OSX_10_15"] }
 security-framework-sys = "2"

@@ -915,7 +915,7 @@ impl FramebufferAppTab {
             .sandbox
             .as_ref()
             .and_then(|s| s.max_gas_per_update)
-            .unwrap_or(u64::MAX);
+            .unwrap_or(500_000_000);
 
         let config = SandboxConfig {
             max_gas_per_update: max_gas,
@@ -1322,7 +1322,7 @@ impl Render for AppLibraryTab {
                     .label("Open .prod")
                     .small()
                     .on_click(cx.listener(|_this, _ev, _window, cx| {
-                        cx.dispatch_action(Box::new(OpenApp));
+                        cx.dispatch_action(&OpenApp);
                     })),
             );
 
@@ -1406,7 +1406,7 @@ impl Render for AppLibraryTab {
                                         log::info!("[app-library] Launching {}", app_id);
                                         // Store bundle in a static for the workbench to pick up.
                                         *PENDING_LAUNCH.lock().unwrap() = Some(bundle);
-                                        cx.dispatch_action(Box::new(OpenApp));
+                                        cx.dispatch_action(&OpenApp);
                                     }
                                     Err(e) => {
                                         log::error!("[app-library] Failed to load {}: {e}", app_id);
@@ -1421,7 +1421,7 @@ impl Render for AppLibraryTab {
         div()
             .track_focus(&self.focus_handle)
             .size_full()
-            .overflow_y_scroll()
+            .overflow_hidden()
             .bg(bg)
             .child(header)
             .child(cards)

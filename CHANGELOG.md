@@ -8,6 +8,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **ETH + BTC key derivation (Phase 1)** — secp256k1 BIP-44 key derivation from the shared BIP-39
+  mnemonic. ETH: `m/44'/60'/0'/0/0` with EIP-55 checksummed addresses. BTC: `m/44'/0'/0'/0/0` with
+  P2WPKH bech32 addresses. `WalletManager` extended with `eth_key`/`btc_key` fields, `eth_address()`,
+  `btc_address()`, `eth_sign_personal()` (EIP-191), `btc_sign_raw()` (DER ECDSA). Keys derived on
+  unlock/create/import, cleared on lock. New deps: `k256`, `bip32`, `sha2`, `sha3`, `ripemd`, `bech32`.
+  18 tests including known-vector verification against MetaMask. `derive.rs`, `lib.rs`. (2026-03-05)
+
 - **SPA Tab (sandboxed single-page app)** — New `SpaTab` tab type and `TabKind::Spa` for hosting
   bundled client-side web apps in a sandboxed WKWebView. `.prod` bundle format extended: `type = "spa"`
   in manifest, `[webapp]` section with `entry` + `sandbox`, `program_bytes` now optional. Broker

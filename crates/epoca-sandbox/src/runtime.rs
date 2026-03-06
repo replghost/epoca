@@ -76,13 +76,20 @@ impl Default for HostState {
     }
 }
 
+/// Maximum bytes we will allocate for a single guest memory read.
+const MAX_GUEST_READ: usize = 64 * 1024 * 1024; // 64 MiB
+
 /// Helper to read guest memory into a Vec<u8>.
 fn read_guest_memory(
     instance: &polkavm::RawInstance,
     ptr: u32,
     len: u32,
 ) -> Result<Vec<u8>, anyhow::Error> {
-    let mut buf = vec![0u8; len as usize];
+    let size = len as usize;
+    if size > MAX_GUEST_READ {
+        return Err(anyhow!("Guest memory read of {} bytes exceeds limit", size));
+    }
+    let mut buf = vec![0u8; size];
     instance
         .read_memory_into(ptr, buf.as_mut_slice())
         .map_err(|e| anyhow!("Memory read error: {:?}", e))?;
@@ -261,8 +268,9 @@ impl SandboxInstance {
                 "host_asset_read",
                 |caller: polkavm::Caller<'_, HostState>, name_ptr: u32, name_len: u32, offset: u32, dst_ptr: u32, max_len: u32| -> Result<u32, anyhow::Error> {
                     let name_buf = read_guest_memory(caller.instance, name_ptr, name_len)?;
-                    let name = String::from_utf8(name_buf)
-                        .map_err(|_| anyhow!("Invalid UTF-8 asset name"))?;
+                    let Ok(name) = String::from_utf8(name_buf) else {
+                        return Ok(0); // invalid UTF-8 name → not found
+                    };
                     let Some(data) = caller.user_data.assets.get(&name) else {
                         return Ok(0);
                     };
@@ -302,8 +310,10 @@ impl SandboxInstance {
     }
 
     /// Call the guest's `init` function.
+    /// Uses 10x the per-update gas budget (init may load assets, build tables, etc.).
     pub fn call_init(&mut self) -> Result<()> {
-        self.instance.set_gas(i64::MAX);
+        let init_gas = self.max_gas_per_update.saturating_mul(10).min(i64::MAX as u64) as i64;
+        self.instance.set_gas(init_gas);
         let mut state = self.state.lock().unwrap();
         self.instance
             .call_typed_and_get_result::<(), ()>(&mut *state, "init", ())

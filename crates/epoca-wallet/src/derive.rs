@@ -72,6 +72,88 @@ pub fn ss58_address(pubkey: &PublicKey) -> String {
     bs58::encode(payload).into_string()
 }
 
+// ---------------------------------------------------------------------------
+// secp256k1 / BIP-44 derivation (Ethereum + Bitcoin)
+// ---------------------------------------------------------------------------
+
+pub mod secp256k1 {
+    use bip32::{DerivationPath, XPrv};
+    use k256::ecdsa::SigningKey;
+    use sha3::{Digest as Sha3Digest, Keccak256};
+
+    /// BIP-44 ETH derivation path: m/44'/60'/0'/0/0
+    const ETH_PATH: &str = "m/44'/60'/0'/0/0";
+    /// BIP-44 BTC derivation path: m/44'/0'/0'/0/0
+    const BTC_PATH: &str = "m/44'/0'/0'/0/0";
+
+    /// Derive a secp256k1 signing key from a BIP-39 mnemonic using a BIP-44 path.
+    fn derive_key(mnemonic: &bip39::Mnemonic, path: &str) -> SigningKey {
+        let seed = mnemonic.to_seed("");
+        let dp: DerivationPath = path.parse().expect("valid BIP-44 path");
+        let child = XPrv::derive_from_path(seed, &dp).expect("valid derivation");
+        child.into()
+    }
+
+    /// Derive the ETH secp256k1 signing key (m/44'/60'/0'/0/0).
+    pub fn eth_key(mnemonic: &bip39::Mnemonic) -> SigningKey {
+        derive_key(mnemonic, ETH_PATH)
+    }
+
+    /// Derive the BTC secp256k1 signing key (m/44'/0'/0'/0/0).
+    pub fn btc_key(mnemonic: &bip39::Mnemonic) -> SigningKey {
+        derive_key(mnemonic, BTC_PATH)
+    }
+
+    /// EIP-55 checksummed Ethereum address from a signing key.
+    /// Format: `0x` + 40 hex chars with mixed-case checksum.
+    pub fn eth_address(key: &SigningKey) -> String {
+        use k256::ecdsa::VerifyingKey;
+        let vk = VerifyingKey::from(key);
+        // Uncompressed public key (65 bytes: 0x04 || x || y), skip the 0x04 prefix
+        let pubkey_bytes = vk.to_encoded_point(false);
+        let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..]; // 64 bytes
+
+        let hash = Keccak256::digest(pubkey_uncompressed);
+        let addr_bytes = &hash[12..]; // last 20 bytes
+
+        // EIP-55 checksum
+        let hex_lower: String = addr_bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let checksum_hash = Keccak256::digest(hex_lower.as_bytes());
+
+        let mut addr = String::with_capacity(42);
+        addr.push_str("0x");
+        for (i, c) in hex_lower.chars().enumerate() {
+            let nibble = (checksum_hash[i / 2] >> (if i % 2 == 0 { 4 } else { 0 })) & 0xf;
+            if nibble >= 8 {
+                addr.push(c.to_ascii_uppercase());
+            } else {
+                addr.push(c);
+            }
+        }
+        addr
+    }
+
+    /// P2WPKH (bech32) Bitcoin mainnet address from a signing key.
+    pub fn btc_address_p2wpkh(key: &SigningKey) -> String {
+        use bech32::{segwit, Hrp};
+        use k256::ecdsa::VerifyingKey;
+        use ripemd::Ripemd160;
+        use sha2::{Digest as Sha2Digest, Sha256};
+
+        let vk = VerifyingKey::from(key);
+        let compressed = vk.to_encoded_point(true);
+        let compressed_bytes = compressed.as_bytes(); // 33 bytes
+
+        // HASH160 = RIPEMD160(SHA256(compressed_pubkey))
+        let sha = Sha256::digest(compressed_bytes);
+        let hash160 = Ripemd160::digest(&sha);
+
+        // Witness version 0, 20-byte program
+        segwit::encode(Hrp::parse("bc").unwrap(), segwit::VERSION_0, &hash160)
+            .expect("valid witness program")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +210,83 @@ mod tests {
         let decoded = bs58::decode(&addr).into_vec().unwrap();
         assert_eq!(decoded[0], 42); // generic prefix
         assert_eq!(&decoded[1..33], &root.public.to_bytes());
+    }
+
+    // ---- secp256k1 / BIP-44 tests ----
+
+    #[test]
+    fn eth_key_deterministic() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let k1 = secp256k1::eth_key(&m);
+        let k2 = secp256k1::eth_key(&m);
+        assert_eq!(k1.to_bytes(), k2.to_bytes());
+    }
+
+    #[test]
+    fn eth_address_known_vector() {
+        // "abandon x11 about" mnemonic, m/44'/60'/0'/0/0 should produce this address.
+        // Verified against MetaMask and iancoleman.io/bip39
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let key = secp256k1::eth_key(&m);
+        let addr = secp256k1::eth_address(&key);
+        assert!(addr.starts_with("0x"), "ETH address must start with 0x, got: {addr}");
+        assert_eq!(addr.len(), 42, "ETH address must be 42 chars, got: {}", addr.len());
+        // Known address for this mnemonic (lowercase comparison for safety)
+        assert_eq!(
+            addr.to_lowercase(),
+            "0x9858effd232b4033e47d90003d41ec34ecaeda94",
+            "ETH address mismatch"
+        );
+    }
+
+    #[test]
+    fn eth_address_eip55_checksum() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let key = secp256k1::eth_key(&m);
+        let addr = secp256k1::eth_address(&key);
+        // Must have mixed case (EIP-55 checksum), not all lower
+        let hex_part = &addr[2..];
+        let has_upper = hex_part.chars().any(|c| c.is_ascii_uppercase());
+        let has_lower = hex_part.chars().any(|c| c.is_ascii_lowercase());
+        assert!(has_upper && has_lower, "EIP-55 should produce mixed case: {addr}");
+    }
+
+    #[test]
+    fn btc_key_deterministic() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let k1 = secp256k1::btc_key(&m);
+        let k2 = secp256k1::btc_key(&m);
+        assert_eq!(k1.to_bytes(), k2.to_bytes());
+    }
+
+    #[test]
+    fn btc_address_format() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let key = secp256k1::btc_key(&m);
+        let addr = secp256k1::btc_address_p2wpkh(&key);
+        // P2WPKH bech32 addresses start with "bc1q"
+        assert!(addr.starts_with("bc1q"), "BTC P2WPKH should start with bc1q, got: {addr}");
+        // 42-62 chars for bech32
+        assert!(addr.len() >= 42 && addr.len() <= 62, "BTC addr len: {}", addr.len());
+    }
+
+    #[test]
+    fn eth_and_btc_keys_differ() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let eth = secp256k1::eth_key(&m);
+        let btc = secp256k1::btc_key(&m);
+        assert_ne!(eth.to_bytes(), btc.to_bytes(), "ETH and BTC keys must differ (different derivation paths)");
     }
 }

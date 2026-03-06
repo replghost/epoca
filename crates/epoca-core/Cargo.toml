@@ -22,6 +22,7 @@ image = { workspace = true }
 smallvec = { workspace = true }
 rusqlite = { workspace = true }
 blake2 = "0.10"
+zip = { workspace = true }
 
 [features]
 test-server = []
