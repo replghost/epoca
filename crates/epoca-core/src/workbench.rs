@@ -2486,7 +2486,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             if active_loading {
                                 // Pulse phase while loading
                                 wb.loading_glow_intensity = 1.0;
-                                wb.loading_glow_phase += 0.07; // ~1.5s cycle
+                                wb.loading_glow_phase += 0.035; // ~3s cycle
                                 if wb.loading_glow_phase > std::f32::consts::TAU {
                                     wb.loading_glow_phase -= std::f32::consts::TAU;
                                 }
@@ -2518,10 +2518,17 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         }
         // Sine wave: 0.0..1.0 pulsing between dim and bright.
         let t = (self.loading_glow_phase.sin() * 0.5 + 0.5).clamp(0.0, 1.0);
-        // Pulse between alpha 0.10 and 0.40, modulated by fade-out intensity
-        let alpha = (0.10 + t * 0.30) * self.loading_glow_intensity;
+        // Pulse between alpha 0.35 and 0.85 — vivid, not gray.
+        let alpha = (0.35 + t * 0.50) * self.loading_glow_intensity;
+        // GPUI borders don't alpha-blend properly — low alpha renders as
+        // dark/black rather than transparent. Cut off while still visibly
+        // colored so the glow goes straight from blue to gone.
+        if alpha < 0.25 {
+            return None;
+        }
+        // Electric violet: rgb(138, 92, 255)
         Some(gpui::rgba(
-            ((180u32) << 24) | ((180u32) << 16) | (255u32 << 8) | ((alpha * 255.0) as u32),
+            ((138u32) << 24) | ((92u32) << 16) | (255u32 << 8) | ((alpha * 255.0) as u32),
         ))
     }
 
@@ -4127,11 +4134,11 @@ impl Render for Workbench {
                             .relative()
                             .flex_1()
                             .w_full()
-                            .rounded(px(RADIUS))
+                            .rounded(px(RADIUS + 2.0))
                             .overflow_hidden()
                             .bg(cx.theme().background)
-                            .border_1()
-                            .border_color(self.loading_glow_color().unwrap_or(gpui::rgba(0x00000000)))
+                            .border_2()
+                            .border_color(self.loading_glow_color().unwrap_or(chrome_bg.into()))
                             .child(self.render_content(window, cx)),
                     );
 
@@ -4275,11 +4282,11 @@ impl Render for Workbench {
                             .relative()
                             .flex_1()
                             .w_full()
-                            .rounded(px(RADIUS))
+                            .rounded(px(RADIUS + 2.0))
                             .overflow_hidden()
                             .bg(cx.theme().background)
-                            .border_1()
-                            .border_color(self.loading_glow_color().unwrap_or(gpui::rgba(0x00000000)))
+                            .border_2()
+                            .border_color(self.loading_glow_color().unwrap_or(chrome_bg.into()))
                             .child(self.render_content(window, cx)),
                     );
 
