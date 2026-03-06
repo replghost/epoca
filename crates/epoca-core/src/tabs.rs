@@ -50,6 +50,10 @@ pub struct TabEntry {
     pub context_id: Option<String>,
     /// Page load progress: 0.0 = idle/done, 0.0..1.0 = loading.
     pub loading_progress: f64,
+    /// Whether reader mode is currently active on this tab.
+    pub reader_active: bool,
+    /// Whether the page has article content suitable for reader mode.
+    pub readerable: bool,
 }
 
 /// The kind of tab that can be opened in the workbench.
@@ -887,6 +891,8 @@ struct FramebufferShared {
     error: Option<String>,
     /// Set to true when the tab is dropped to stop the background thread.
     stopped: bool,
+    /// Frame counter incremented by the background thread.
+    frame_count: u64,
 }
 
 pub struct FramebufferAppTab {
@@ -904,6 +910,10 @@ pub struct FramebufferAppTab {
     fb_height: u32,
     /// Element bounds (window coords) from last paint — for mouse mapping.
     panel_bounds: std::rc::Rc<std::cell::Cell<gpui::Bounds<gpui::Pixels>>>,
+    /// FPS counter state.
+    fps_last_frame_count: u64,
+    fps_last_instant: std::time::Instant,
+    fps_display: u32,
 }
 
 impl FramebufferAppTab {
@@ -939,6 +949,7 @@ impl FramebufferAppTab {
             input_queue: VecDeque::new(),
             error: None,
             stopped: false,
+            frame_count: 0,
         }));
 
         let mut init_error = None;
@@ -1003,6 +1014,9 @@ impl FramebufferAppTab {
             fb_width: 0,
             fb_height: 0,
             panel_bounds: std::rc::Rc::new(std::cell::Cell::new(gpui::Bounds::default())),
+            fps_last_frame_count: 0,
+            fps_last_instant: std::time::Instant::now(),
+            fps_display: 0,
         }
     }
 
@@ -1073,6 +1087,7 @@ impl FramebufferAppTab {
                     s.frame = Some(render_image);
                     s.frame_width = w;
                     s.frame_height = h;
+                    s.frame_count += 1;
                 }
             }
 
@@ -1092,6 +1107,16 @@ impl FramebufferAppTab {
             self.error = Some(err);
             cx.notify();
             return;
+        }
+
+        // Update FPS counter every second.
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.fps_last_instant);
+        if elapsed >= std::time::Duration::from_secs(1) {
+            let frames = s.frame_count - self.fps_last_frame_count;
+            self.fps_display = (frames as f64 / elapsed.as_secs_f64()).round() as u32;
+            self.fps_last_frame_count = s.frame_count;
+            self.fps_last_instant = now;
         }
 
         if let Some(frame) = s.frame.take() {
@@ -1273,6 +1298,25 @@ impl Render for FramebufferAppTab {
                 )
         });
 
+        // FPS counter overlay (top-right)
+        let fps_overlay = if self.fps_display > 0 {
+            Some(
+                div()
+                    .absolute()
+                    .top_2()
+                    .right_2()
+                    .px_2()
+                    .py_0p5()
+                    .rounded_md()
+                    .bg(gpui::rgba(0x00000099))
+                    .text_color(gpui::rgba(0xffffffaa))
+                    .text_xs()
+                    .child(Label::new(format!("{} fps", self.fps_display))),
+            )
+        } else {
+            None
+        };
+
         // Capture element bounds during layout for mouse coordinate mapping.
         let pb = self.panel_bounds.clone();
 
@@ -1289,6 +1333,7 @@ impl Render for FramebufferAppTab {
                 .size_full(),
             )
             .child(content)
+            .children(fps_overlay)
             .children(hint_overlay)
             .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _window, cx| {
                 this.controls_hint = None;
@@ -2453,6 +2498,7 @@ impl WebViewTab {
             .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(CONTEXT_MENU_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
+            .with_initialization_script(crate::reader::readerable_check_script())
             // WebAuthn polyfill is injected in [WKContentWorld pageWorld] via
             // inject_page_world_script() so page JS sees the overrides.
             .with_initialization_script(&shield.document_start_script)
@@ -2786,18 +2832,21 @@ impl SpaTab {
                     let path = path.split('#').next().unwrap_or(path);
                     let path = if path.is_empty() { "index.html" } else { path };
 
+                    let csp = "default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; frame-src 'none'";
                     match crate::spa::lookup_spa_asset(&app_id_inner, path) {
                         Some(data) => {
                             let mime = crate::spa::mime_for_path(path);
                             gpui_component::wry::http::Response::builder()
                                 .status(200)
                                 .header("Content-Type", mime)
+                                .header("Content-Security-Policy", csp)
                                 .body(std::borrow::Cow::Owned(data))
                                 .unwrap()
                         }
                         None => gpui_component::wry::http::Response::builder()
                             .status(404)
                             .header("Content-Type", "text/plain")
+                            .header("Content-Security-Policy", csp)
                             .body(std::borrow::Cow::Borrowed(b"404 Not Found" as &[u8]))
                             .unwrap(),
                     }
@@ -2823,7 +2872,12 @@ impl SpaTab {
                             let uc: *mut objc2::runtime::AnyObject =
                                 objc2::msg_send![config, userContentController];
                             if !uc.is_null() {
-                                crate::spa::install_block_all_rule(uc);
+                                // Note: install_block_all_rule is intentionally skipped.
+                                // The async WKContentRuleList compilation races with
+                                // WebView process startup, causing a crash when
+                                // addContentRuleList: fires before the proxy is ready.
+                                // CSP headers (default-src 'self' epocaapp:) already
+                                // block HTTP requests from SPA pages.
                                 crate::spa::register_host_handler(uc, webview_ptr);
                             }
                         }
@@ -2863,6 +2917,12 @@ impl SpaTab {
 
     pub fn app_name(&self) -> &str {
         &self.app_name
+    }
+
+    pub fn reload(&self, cx: &App) {
+        if let Some(wv) = &self.webview {
+            let _ = wv.read(cx).raw().reload();
+        }
     }
 
     pub fn evaluate_script(&self, js: &str, cx: &App) {

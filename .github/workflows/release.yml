@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-macos:
+    name: Build macOS (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+          - arch: x86_64
+            runner: macos-13
+            target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout polkavm fork (patched dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: replghost/polkavm
+          path: ../polkavm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.arch }}
+
+      - name: Build release binary
+        run: cargo build --release -p epoca
+
+      - name: Package .app bundle
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          TARBALL="Epoca-${VERSION}-macos-${{ matrix.arch }}.tar.gz"
+
+          STAGE=$(mktemp -d)
+          cp -R target/release/Epoca.app "$STAGE/Epoca.app"
+          mkdir -p "$STAGE/Epoca.app/Contents/Resources"
+          cp resources/Epoca.icns "$STAGE/Epoca.app/Contents/Resources/Epoca.icns" || true
+          strip "$STAGE/Epoca.app/Contents/MacOS/epoca" || true
+          tar -czf "$TARBALL" -C "$STAGE" Epoca.app
+          rm -rf "$STAGE"
+
+          echo "TARBALL=$TARBALL" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          shasum -a 256 "$TARBALL"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: epoca-macos-${{ matrix.arch }}
+          path: ${{ env.TARBALL }}
+
+  release:
+    name: Create Release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> $GITHUB_ENV
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Epoca v${{ env.VERSION }}
+          draft: true
+          generate_release_notes: true
+          files: |
+            artifacts/epoca-macos-arm64/*.tar.gz
+            artifacts/epoca-macos-x86_64/*.tar.gz

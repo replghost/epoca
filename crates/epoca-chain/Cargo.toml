@@ -10,6 +10,8 @@ smol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
+tiny-keccak = { version = "2", features = ["keccak"] }
+ureq = "3"
 
 # Bitcoin Kyoto light client (BIP-157/158 compact block filters)
 bip157 = "0.3"

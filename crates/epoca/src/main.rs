@@ -3,7 +3,7 @@ use gpui_component::Root;
 use std::path::PathBuf;
 use epoca_core::workbench::{
     Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
-    OpenSettings, OpenAppLibrary, OpenApp, FindInPage,
+    OpenSettings, OpenAppLibrary, OpenApp, FindInPage, ToggleReaderMode,
 };
 use epoca_core::settings::SettingsGlobal;
 use epoca_core::chain::ChainGlobal;
@@ -11,7 +11,7 @@ use epoca_core::wallet::WalletGlobal;
 use epoca_chain::ChainClient;
 
 // App-level actions (not workbench-scoped)
-actions!(epoca, [Quit, NewWindow]);
+actions!(epoca, [Quit, NewWindow, OpenTestSpa]);
 
 /// Determines what to open based on the CLI argument.
 enum OpenTarget {
@@ -43,8 +43,7 @@ fn new_window_opts() -> WindowOptions {
 }
 
 fn main() {
-    // Crash reporting. Set SENTRY_DSN to your project DSN to enable.
-    // Silently no-ops if the variable is absent.
+    // Crash reporting (opt-in). Set SENTRY_DSN env var to enable.
     let _sentry = std::env::var("SENTRY_DSN").ok().map(|dsn| {
         sentry::init((
             dsn,
@@ -102,6 +101,8 @@ fn main() {
             KeyBinding::new("cmd-shift-r", HardReload, None),
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-f", FindInPage, None),
+            KeyBinding::new("cmd-shift-m", ToggleReaderMode, None),
+            KeyBinding::new("cmd-shift-d", OpenTestSpa, None),
             // Global clipboard bindings — allows Edit menu to show shortcuts
             // and enables clipboard forwarding to WKWebView via Workbench handlers.
             KeyBinding::new("cmd-c", gpui_component::input::Copy, None),
@@ -132,6 +133,7 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Open App...", OpenApp),
                     MenuItem::action("App Library", OpenAppLibrary),
+                    MenuItem::action("Open Test SPA (dot://)", OpenTestSpa),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseActiveTab),
                 ],
@@ -157,6 +159,8 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Reload Page", Reload),
                     MenuItem::action("Hard Reload", HardReload),
+                    MenuItem::separator(),
+                    MenuItem::action("Reader Mode", ToggleReaderMode),
                 ],
             },
         ]);
@@ -185,6 +189,33 @@ fn main() {
                 Ok::<_, anyhow::Error>(())
             })
             .detach();
+        });
+
+        cx.on_action::<ToggleReaderMode>(|_, cx| {
+            if let Some(wb_ref) = cx.try_global::<WorkbenchRef>() {
+                if let Some(entity) = wb_ref.0.upgrade() {
+                    entity.update(cx, |wb, cx| wb.toggle_reader_mode(cx));
+                }
+            }
+        });
+
+        cx.on_action::<OpenTestSpa>(|_, cx| {
+            if let Some(wb_ref) = cx.try_global::<WorkbenchRef>() {
+                if let Some(entity) = wb_ref.0.upgrade() {
+                    entity.update(cx, |wb, cx| {
+                        // We don't have a Window ref here; use open_spa directly.
+                        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .parent().unwrap().parent().unwrap().to_path_buf();
+                        let path = workspace_root.join("examples/test-spa.prod");
+                        match epoca_sandbox::ProdBundle::from_file(&path) {
+                            Ok(bundle) => {
+                                log::info!("[dot] menu: loaded bundle, app_type={}", bundle.manifest.app.app_type);
+                            }
+                            Err(e) => log::warn!("[dot] menu: failed to load: {e}"),
+                        }
+                    });
+                }
+            }
         });
 
         // Initialize settings and chain globals
@@ -264,6 +295,13 @@ fn main() {
 
                 // Set WorkbenchRef global so Quit handler can save session.
                 cx.set_global(WorkbenchRef(workbench.downgrade()));
+
+                // Auto-open test SPA if DOT_TEST=1
+                if std::env::var("DOT_TEST").as_deref() == Ok("1") {
+                    workbench.update(cx, |wb, cx| {
+                        wb.resolve_dot_url("dot://test-spa.dot", window, cx);
+                    });
+                }
 
                 let view: AnyView = workbench.into();
                 cx.new(|cx| Root::new(view, window, cx))

@@ -15,8 +15,8 @@ mod macos {
     use core_foundation::string::CFString;
     use security_framework::access_control::{ProtectionMode, SecAccessControl};
     use security_framework::passwords::{
-        delete_generic_password, generic_password, set_generic_password_options,
-        AccessControlOptions, PasswordOptions,
+        delete_generic_password, generic_password, set_generic_password,
+        set_generic_password_options, AccessControlOptions, PasswordOptions,
     };
     use security_framework_sys::base::errSecItemNotFound;
     use security_framework_sys::item;
@@ -95,14 +95,21 @@ mod macos {
     }
 
     /// Store the mnemonic in the Keychain with biometric access control.
-    /// Deletes any existing entry first (both legacy and Data Protection).
+    /// Falls back to the legacy keychain if the Data Protection Keychain
+    /// is unavailable (e.g. ad-hoc signed binary without entitlements).
     pub fn store_mnemonic(mnemonic: &str) -> Result<()> {
         // Delete legacy entry if present
         let _ = delete_generic_password(SERVICE, ACCOUNT);
         // Delete Data Protection entry if present
         delete_biometric_entry();
-        set_generic_password_options(mnemonic.as_bytes(), biometric_options())
-            .map_err(|e| anyhow!("Keychain store failed: {e}"))
+        match set_generic_password_options(mnemonic.as_bytes(), biometric_options()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                log::warn!("Data Protection Keychain unavailable ({e}), falling back to legacy keychain");
+                set_generic_password(SERVICE, ACCOUNT, mnemonic.as_bytes())
+                    .map_err(|e| anyhow!("Keychain store failed: {e}"))
+            }
+        }
     }
 
     /// Load the mnemonic from the Keychain.

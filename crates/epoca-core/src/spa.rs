@@ -11,28 +11,39 @@ use std::sync::{Mutex, OnceLock};
 
 /// Global registry of loaded SPA bundles, keyed by app_id.
 /// The WKURLSchemeHandler callback looks up assets here.
-static SPA_ASSETS: OnceLock<Mutex<HashMap<String, HashMap<String, Vec<u8>>>>> = OnceLock::new();
+/// Each entry is reference-counted so multiple tabs with the same app_id
+/// share the asset map and it's only freed when the last tab closes.
+static SPA_ASSETS: OnceLock<Mutex<HashMap<String, (u32, HashMap<String, Vec<u8>>)>>> = OnceLock::new();
 
-fn spa_assets() -> &'static Mutex<HashMap<String, HashMap<String, Vec<u8>>>> {
+fn spa_assets() -> &'static Mutex<HashMap<String, (u32, HashMap<String, Vec<u8>>)>> {
     SPA_ASSETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Register a bundle's assets so the scheme handler can serve them.
+/// If the app_id already exists, increments the reference count.
 pub fn register_spa_assets(app_id: &str, assets: HashMap<String, Vec<u8>>) {
     let mut map = spa_assets().lock().unwrap();
-    map.insert(app_id.to_string(), assets);
+    map.entry(app_id.to_string())
+        .and_modify(|(rc, _)| *rc += 1)
+        .or_insert((1, assets));
 }
 
 /// Unregister a bundle's assets when the tab is closed.
+/// Decrements the reference count; only removes assets when it reaches zero.
 pub fn unregister_spa_assets(app_id: &str) {
     let mut map = spa_assets().lock().unwrap();
-    map.remove(app_id);
+    if let Some((rc, _)) = map.get_mut(app_id) {
+        *rc = rc.saturating_sub(1);
+        if *rc == 0 {
+            map.remove(app_id);
+        }
+    }
 }
 
 /// Look up a single asset by app_id and path.
 pub fn lookup_spa_asset(app_id: &str, path: &str) -> Option<Vec<u8>> {
     let map = spa_assets().lock().unwrap();
-    map.get(app_id)?.get(path).cloned()
+    map.get(app_id)?.1.get(path).cloned()
 }
 
 /// Guess MIME type from file extension.
@@ -68,6 +79,12 @@ const BLOCK_ALL_RULE_JSON: &str = r#"[{"trigger":{"url-filter":"^https?://"},"ac
 
 /// Install a block-all content rule on the given WKUserContentController.
 #[cfg(target_os = "macos")]
+/// Install a block-all content rule on the given WKUserContentController.
+///
+/// The UC pointer is **retained** before the async compilation callback so it
+/// stays alive until the main-thread dispatch completes. `[WKWebView configuration]`
+/// returns a copy, and the UC from that copy is autoreleased — without an explicit
+/// retain it becomes dangling by the time the callback fires.
 pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
@@ -80,6 +97,10 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
     if store.is_null() {
         return;
     }
+
+    // Retain the UC so it survives until the async callback fires.
+    unsafe { let _: *mut AnyObject = msg_send![uc, retain]; }
+    let uc_ptr = uc as usize;
 
     let ns_id: *mut AnyObject = unsafe {
         msg_send![
@@ -95,7 +116,6 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
         ]
     };
 
-    let uc_ptr = uc as usize;
     let block = block2::RcBlock::new(
         move |list: *mut AnyObject, error: *mut AnyObject| unsafe {
             if !error.is_null() {
@@ -107,16 +127,19 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
                         log::warn!("SPA block-all rule compilation failed: {msg}");
                     }
                 }
+                // Release the retained UC even on error.
+                let uc = uc_ptr as *mut AnyObject;
+                let _: () = msg_send![uc, release];
                 return;
             }
             if list.is_null() {
+                let uc = uc_ptr as *mut AnyObject;
+                let _: () = msg_send![uc, release];
                 return;
             }
-            // Dispatch addContentRuleList: to the main thread — the completion
-            // handler fires on an arbitrary WebKit background thread, but
-            // WKUserContentController must be mutated on main.
-            // dispatch_get_main_queue() is a C macro — the real symbol is
-            // _dispatch_main_q. Use dispatch_async_f to bounce to main thread.
+            // Dispatch to main thread — the completion handler fires on a
+            // WebKit background thread, but WKUserContentController must be
+            // mutated on main.
             extern "C" {
                 static _dispatch_main_q: std::ffi::c_void;
                 fn dispatch_async_f(
@@ -131,6 +154,8 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
                     let uc = pair[0] as *mut objc2::runtime::AnyObject;
                     let list = pair[1] as *mut objc2::runtime::AnyObject;
                     let _: () = objc2::msg_send![uc, addContentRuleList: list];
+                    // Balance the retain from install_block_all_rule.
+                    let _: () = objc2::msg_send![uc, release];
                     log::info!("SPA: installed block-all content rule");
                 }
             }

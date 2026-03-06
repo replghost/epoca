@@ -12,3 +12,9 @@
 
 # (macOS linker args are emitted by crates/epoca/build.rs instead of here,
 # so the Info.plist path can be resolved as an absolute path at build time.)
+
+[target.aarch64-apple-darwin]
+runner = "scripts/sign-and-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/sign-and-run.sh"

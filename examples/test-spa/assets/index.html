@@ -42,6 +42,17 @@
     margin-top: 0.5rem;
   }
   button:hover { background: #33aa55; }
+  input[type="text"] {
+    background: #0d1117;
+    border: 1px solid #0f3460;
+    border-radius: 4px;
+    color: #e0e0e0;
+    padding: 0.4rem 0.6rem;
+    font-family: 'SF Mono', monospace;
+    font-size: 0.85rem;
+    width: 100%;
+    margin-top: 0.5rem;
+  }
   #log {
     font-family: 'SF Mono', monospace;
     font-size: 0.8rem;
@@ -71,6 +82,13 @@
   </div>
 
   <div class="card">
+    <h2>system.remark</h2>
+    <div id="rmrk" class="result pending">not yet called</div>
+    <input type="text" id="remark-text" placeholder="Remark text" value="hello from epoca">
+    <button onclick="testRemark()">Sign Remark</button>
+  </div>
+
+  <div class="card">
     <h2>Network Isolation Test</h2>
     <div id="net" class="result pending">not yet tested</div>
     <button onclick="testNetwork()">Try fetch(https://...)</button>
@@ -86,6 +104,38 @@
     const el = document.getElementById('log');
     el.textContent += new Date().toISOString().slice(11,19) + ' ' + msg + '\n';
     el.scrollTop = el.scrollHeight;
+  }
+
+  // SCALE codec helpers (minimal, enough for system.remark)
+  function scaleCompactU32(n) {
+    if (n < 64) return new Uint8Array([n << 2]);
+    if (n < 16384) return new Uint8Array([(n << 2) | 1, n >> 6]);
+    if (n < 1073741824) return new Uint8Array([(n << 2) | 2, n >> 6, n >> 14, n >> 22]);
+    throw new Error('Value too large for compact encoding');
+  }
+
+  function hexEncode(bytes) {
+    return '0x' + Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  function textToBytes(str) {
+    return new TextEncoder().encode(str);
+  }
+
+  // Build a system.remark(remark) call data
+  // Pallet index 0x00, call index 0x00 (System), remark is call 0x00::0x00
+  // Actually on most Substrate chains: System = pallet 0, remark = call 0
+  // Call data: [pallet_idx, call_idx, compact_len, ...remark_bytes]
+  function buildRemarkCallData(remarkStr) {
+    const remarkBytes = textToBytes(remarkStr);
+    const lenCompact = scaleCompactU32(remarkBytes.length);
+    // system.remark: pallet_index=0x00, call_index=0x00
+    const callData = new Uint8Array(2 + lenCompact.length + remarkBytes.length);
+    callData[0] = 0x00; // System pallet
+    callData[1] = 0x00; // remark call
+    callData.set(lenCompact, 2);
+    callData.set(remarkBytes, 2 + lenCompact.length);
+    return callData;
   }
 
   log('SPA loaded');
@@ -127,6 +177,45 @@
       el.className = 'result error';
       el.textContent = e.message;
       log('sign() rejected: ' + e.message);
+    }
+  }
+
+  async function testRemark() {
+    const el = document.getElementById('rmrk');
+    el.className = 'result pending';
+    el.textContent = 'building call data...';
+
+    const remarkText = document.getElementById('remark-text').value.trim();
+    if (!remarkText) {
+      el.className = 'result error';
+      el.textContent = 'Remark text is required';
+      return;
+    }
+
+    const callData = buildRemarkCallData(remarkText);
+    const callDataHex = hexEncode(callData);
+    log('system.remark call data: ' + callDataHex);
+
+    try {
+      el.textContent = 'getting address...';
+      const addr = await window.epoca.getAddress();
+      log('Signer: ' + addr);
+
+      el.textContent = 'signing...';
+      const sig = await window.epoca.sign(callDataHex);
+      log('Signature: ' + sig);
+
+      el.className = 'result';
+      el.textContent =
+        'system.remark signed\n' +
+        'Signer:    ' + addr + '\n' +
+        'Call data: ' + callDataHex + '\n' +
+        'Signature: ' + sig;
+      log('system.remark extrinsic ready');
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('system.remark failed: ' + e.message);
     }
   }
 

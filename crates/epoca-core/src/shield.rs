@@ -349,6 +349,37 @@ pub fn drain_loading_events() -> Vec<(usize, f64)> {
     events
 }
 
+// ---------------------------------------------------------------------------
+// Readerable channel — whether page has article content
+// ---------------------------------------------------------------------------
+
+static READERABLE_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, bool)>,
+    Mutex<mpsc::Receiver<(usize, bool)>>,
+)> = OnceLock::new();
+
+fn readerable_channel() -> &'static (
+    mpsc::SyncSender<(usize, bool)>,
+    Mutex<mpsc::Receiver<(usize, bool)>>,
+) {
+    READERABLE_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(256);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain all pending readerable events.
+/// Returns `(webview_ptr, is_readerable)` pairs.
+pub fn drain_readerable_events() -> Vec<(usize, bool)> {
+    let ch = readerable_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
 /// Register the `epocaMeta` WKScriptMessageHandler on the given
 /// WKUserContentController. The JS side posts:
 ///   { type: 'titleChanged', title: '...' }
@@ -424,6 +455,18 @@ pub fn register_meta_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: us
                         let progress: f64 = objc2::msg_send![progress_val, doubleValue];
                         if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
                             let _ = loading_channel().0.try_send((wv_ptr, progress));
+                        }
+                    }
+                    "readerable" => {
+                        let val_key: *mut AnyObject = objc2::msg_send![
+                            AnyClass::get("NSString").unwrap(),
+                            stringWithUTF8String: b"value\0".as_ptr() as *const i8
+                        ];
+                        let val_obj: *mut AnyObject = objc2::msg_send![body, objectForKey: val_key];
+                        if val_obj.is_null() { return; }
+                        let val: bool = objc2::msg_send![val_obj, boolValue];
+                        if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                            let _ = readerable_channel().0.try_send((wv_ptr, val));
                         }
                     }
                     _ => {}
@@ -949,6 +992,17 @@ pub enum ShortcutAction {
     HardReload,
     OpenSettings,
     FindInPage,
+    UrlBarSubmit,
+    OpenTestSpa,
+}
+
+/// Global flag: when true, the NSApp event monitor forwards plain Enter
+/// as `UrlBarSubmit` instead of letting the WKWebView consume it.
+static URL_BAR_FOCUSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_url_bar_focused(focused: bool) {
+    URL_BAR_FOCUSED.store(focused, std::sync::atomic::Ordering::Relaxed);
 }
 
 static SHORTCUT_CHANNEL: OnceLock<(
@@ -999,6 +1053,16 @@ pub fn install_key_monitor() {
             let shift = (flags & (1 << 17)) != 0; // NSEventModifierFlagShift
 
             if !cmd {
+                // Intercept plain Enter when the URL bar has GPUI focus.
+                // Without this, the WKWebView eats the keypress.
+                let keycode: u16 = msg_send![event, keyCode];
+                if keycode == 36 /* Return */ {
+                    let focused = URL_BAR_FOCUSED.load(std::sync::atomic::Ordering::Relaxed);
+                    if focused {
+                        send_shortcut(ShortcutAction::UrlBarSubmit);
+                        return std::ptr::null_mut(); // consume
+                    }
+                }
                 return event; // Not a Cmd shortcut, pass through
             }
 
@@ -1015,11 +1079,21 @@ pub fn install_key_monitor() {
             let action = match (key.as_ref(), shift) {
                 ("t", false) => Some(ShortcutAction::NewTab),
                 ("w", false) => Some(ShortcutAction::CloseActiveTab),
-                ("l", false) => Some(ShortcutAction::FocusUrlBar),
+                ("l", false) => {
+                    // Resign WKWebView's first responder so subsequent
+                    // keypresses (Enter) flow through the event monitor.
+                    let app: *mut AnyObject = msg_send![AnyClass::get("NSApplication").unwrap(), sharedApplication];
+                    let win: *mut AnyObject = msg_send![app, keyWindow];
+                    if !win.is_null() {
+                        let _: () = msg_send![win, makeFirstResponder: win];
+                    }
+                    Some(ShortcutAction::FocusUrlBar)
+                },
                 ("r", false) => Some(ShortcutAction::Reload),
                 ("r", true) => Some(ShortcutAction::HardReload),
                 (",", false) => Some(ShortcutAction::OpenSettings),
                 ("f", false) => Some(ShortcutAction::FindInPage),
+                ("d", true) => Some(ShortcutAction::OpenTestSpa),
                 _ => None,
             };
 

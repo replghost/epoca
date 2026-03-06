@@ -19,7 +19,6 @@ codesign \
   --force \
   --sign - \
   --identifier "com.replghost.epoca" \
-  --entitlements "$(dirname "$0")/../dev.entitlements" \
   "$BINARY" 2>/dev/null
 
 exec "$BINARY" "$@"

@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, OpenAppLibrary, OpenApp, FindInPage, FindPrev, CloseFindBar]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, OpenAppLibrary, OpenApp, FindInPage, FindPrev, CloseFindBar, ToggleReaderMode]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -126,6 +126,18 @@ pub(crate) struct PendingWalletSign {
     pub origin: String,
 }
 
+/// A pending SPA host API sign request awaiting user confirmation.
+pub(crate) struct PendingSpaSign {
+    /// Which SPA WebView originated this request.
+    pub webview_ptr: usize,
+    /// Callback ID to resolve via __epocaResolve.
+    pub id: u64,
+    /// The app_id for per-app key derivation.
+    pub app_id: String,
+    /// Raw payload string from the SPA.
+    pub payload: String,
+}
+
 /// A pending BTC wallet sign request awaiting user confirmation.
 pub(crate) struct PendingBtcWalletSign {
     pub webview_ptr: usize,
@@ -167,6 +179,7 @@ pub struct Workbench {
     pub(crate) url_input: Entity<InputState>,
     _url_subscription: Subscription,
     pending_nav: Option<String>,
+    url_bar_clicked: bool,
 
     // Omnibox
     pub(crate) omnibox_open: bool,
@@ -206,6 +219,8 @@ pub struct Workbench {
     pending_wallet_sign: Option<PendingWalletSign>,
     pending_wallet_connect: Option<PendingWalletConnect>,
     pending_btc_wallet_sign: Option<PendingBtcWalletSign>,
+    pending_spa_sign: Option<PendingSpaSign>,
+    pending_dotns_bundle: Option<ProdBundle>,
     connected_sites: std::collections::HashSet<String>,
     wallet_popover_open: bool,
 }
@@ -314,6 +329,7 @@ impl Workbench {
             url_input,
             _url_subscription,
             pending_nav: None,
+            url_bar_clicked: false,
             omnibox_open: false,
             omnibox_input,
             _omnibox_subscription,
@@ -331,6 +347,8 @@ impl Workbench {
             pending_wallet_sign: None,
             pending_wallet_connect: None,
             pending_btc_wallet_sign: None,
+            pending_spa_sign: None,
+            pending_dotns_bundle: None,
             connected_sites: std::collections::HashSet::new(),
             wallet_popover_open: false,
         }
@@ -461,12 +479,23 @@ impl Workbench {
     }
 
     fn process_pending_nav(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Keep the global URL-bar-focused flag in sync so the NSApp event monitor
+        // knows to intercept plain Enter keypresses.
+        // Check both GPUI focus and our manually-tracked click state.
+        let url_focused = self.url_input.focus_handle(cx).is_focused(window)
+            || self.url_bar_clicked;
+        crate::shield::set_url_bar_focused(url_focused);
+
         // URL bar enter — navigate the current tab if it's a WebView, else open new.
         if let Some(raw_text) = self.pending_nav.take() {
+            self.url_bar_clicked = false;
             let text = raw_text.trim().to_string();
-            log::info!("[nav] URL bar submit: {:?}", text);
+            // dot:// scheme — resolve to local .prod bundle or DOTNS on-chain.
+            if text.starts_with("dot://") {
+                log::info!("[nav] dot:// URL detected: {text}");
+                self.resolve_dot_url(&text, window, cx);
             // Check file paths first — they contain dots/slashes which looks_like_url matches.
-            if !text.starts_with("http://") && !text.starts_with("https://") && std::path::Path::new(&text).exists() {
+            } else if !text.starts_with("http://") && !text.starts_with("https://") && std::path::Path::new(&text).exists() {
                 self.navigate_or_open(&text, window, cx);
             } else if text.starts_with("http://") || text.starts_with("https://") || looks_like_url(&text) {
                 let url = if text.starts_with("http://") || text.starts_with("https://") {
@@ -605,6 +634,21 @@ impl Workbench {
             }
             cx.notify();
         }
+        // Drain readerable events — whether page has article content
+        let readerable_events = crate::shield::drain_readerable_events();
+        if !readerable_events.is_empty() {
+            for (ev_ptr, is_readerable) in readerable_events {
+                for tab in &mut self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        if entity.read(cx).webview_ptr == ev_ptr {
+                            tab.readerable = is_readerable;
+                            tab.reader_active = false; // reset on new page
+                        }
+                    }
+                }
+            }
+            cx.notify();
+        }
         // Drain favicon URL events (epocaFavicon WKScriptMessageHandler)
         let favicon_events = crate::shield::drain_favicon_events();
         if !favicon_events.is_empty() {
@@ -705,6 +749,8 @@ impl Workbench {
                         favicon_url: None,
                         context_id: ctx,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     cx.notify();
                 }
@@ -725,6 +771,8 @@ impl Workbench {
                         favicon_url: None,
                         context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     cx.notify();
                 }
@@ -764,7 +812,7 @@ impl Workbench {
 
         // Drain SPA host API calls (window.epoca.* → epocaHost WKScriptMessageHandler)
         let spa_events = crate::spa::drain_spa_host_events();
-        for (ev_ptr, id, method, _params_json) in spa_events {
+        for (ev_ptr, id, method, params_json) in spa_events {
             for tab in &self.tabs {
                 if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
                     if entity.read(cx).webview_ptr == ev_ptr {
@@ -801,11 +849,46 @@ impl Workbench {
                                 }
                             }
                             "sign" if wallet_enabled => {
-                                // TODO: parse payload, show confirmation dialog, then sign
-                                format!(
-                                    "window.__epocaResolve({}, 'signing not yet implemented', null)",
-                                    id,
-                                )
+                                let payload = serde_json::from_str::<serde_json::Value>(&params_json)
+                                    .ok()
+                                    .and_then(|v| v.get("payload")?.as_str().map(String::from))
+                                    .unwrap_or_default();
+                                if self.pending_spa_sign.is_some() {
+                                    format!(
+                                        "window.__epocaResolve({}, 'another signing request is pending', null)",
+                                        id,
+                                    )
+                                } else {
+                                    self.pending_spa_sign = Some(PendingSpaSign {
+                                        webview_ptr: ev_ptr,
+                                        id,
+                                        app_id: app_id.clone(),
+                                        payload,
+                                    });
+                                    cx.set_global(OmniboxOpen(true));
+                                    cx.notify();
+                                    continue; // Don't evaluate JS — dialog will resolve it.
+                                }
+                            }
+                            "wsConnect" => {
+                                // Validate URL: must be wss:// and match allowed
+                                // substrate RPC endpoints only.
+                                let url = serde_json::from_str::<serde_json::Value>(&params_json)
+                                    .ok()
+                                    .and_then(|v| v.get("url")?.as_str().map(String::from))
+                                    .unwrap_or_default();
+                                if !url.starts_with("wss://") && !url.starts_with("ws://") {
+                                    format!(
+                                        "window.__epocaResolve({}, 'wsConnect: only ws:// and wss:// URLs allowed', null)",
+                                        id,
+                                    )
+                                } else {
+                                    // TODO: open actual WebSocket proxy connection
+                                    format!(
+                                        "window.__epocaResolve({}, 'wsConnect not yet implemented', null)",
+                                        id,
+                                    )
+                                }
                             }
                             other => {
                                 let msg = format!("method '{}' not yet implemented", other)
@@ -1085,6 +1168,8 @@ impl Workbench {
                 ShortcutAction::FocusUrlBar => {
                     let fh = self.url_input.focus_handle(cx);
                     window.focus(&fh);
+                    self.url_bar_clicked = true;
+                    crate::shield::set_url_bar_focused(true);
                 }
                 ShortcutAction::Reload => self.reload_active_tab(false, window, cx),
                 ShortcutAction::HardReload => self.reload_active_tab(true, window, cx),
@@ -1098,6 +1183,19 @@ impl Workbench {
                         self.close_find(window, cx);
                     }
                     cx.notify();
+                }
+                ShortcutAction::OpenTestSpa => {
+                    self.resolve_dot_url("dot://test-spa.dot", window, cx);
+                }
+                ShortcutAction::UrlBarSubmit => {
+                    let text = self.url_input.read(cx).value().to_string();
+                    log::info!("[nav] UrlBarSubmit (via key monitor): {:?}", text);
+                    self.url_bar_clicked = false;
+                    crate::shield::set_url_bar_focused(false);
+                    if !text.is_empty() {
+                        self.pending_nav = Some(text);
+                        cx.notify();
+                    }
                 }
             }
         }
@@ -1421,6 +1519,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if text.starts_with("dot://") {
+            self.resolve_dot_url(text, window, cx);
+            return;
+        }
         if text.starts_with("http://") || text.starts_with("https://") {
             self.open_webview(text.to_string(), window, cx);
             return;
@@ -1589,6 +1691,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id,
             loading_progress: 0.0,
+            reader_active: false,
+            readerable: false,
         });
         self.active_tab_id = Some(id);
         record_history_visit(&url_clone, "", cx);
@@ -1655,6 +1759,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id,
             loading_progress: 0.0,
+            reader_active: false,
+            readerable: false,
         });
         // Do NOT change active_tab_id — stay on current tab.
         record_history_visit(&url_clone, "", cx);
@@ -1812,6 +1918,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -1843,6 +1951,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -1940,6 +2050,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     entity.update(cx, |tab, cx| {
                         if hard { tab.hard_reload(cx); } else { tab.reload(cx); }
                     });
+                } else if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    entity.update(cx, |tab, cx| tab.reload(cx));
                 }
             }
         }
@@ -1971,6 +2083,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2003,6 +2117,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2034,6 +2150,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2064,11 +2182,143 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(app_id, window, inner_cx));
         cx.notify();
+    }
+
+    /// Resolve a `dot://<name>.dot` URL to a local .prod bundle and open it as an SPA tab.
+    /// Phase 1: local resolution from examples/ directory.
+    /// Phase 2 (future): on-chain DOTNS resolution via Smoldot light client.
+    pub fn resolve_dot_url(
+        &mut self,
+        url: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Parse: dot://testproduct.dot → name = "testproduct"
+        let host = url.strip_prefix("dot://").unwrap_or("");
+        let name = host.strip_suffix(".dot").unwrap_or(host);
+        let name = name.split('/').next().unwrap_or(name);
+
+        if name.is_empty() {
+            log::warn!("[dot] empty dot:// URL: {url}");
+            return;
+        }
+
+        // Phase 1: look for a local .prod bundle at well-known paths.
+        // Use the executable's directory as base for relative lookups.
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let cwd = std::env::current_dir().ok();
+
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        // Relative to CWD
+        if let Some(ref dir) = cwd {
+            candidates.push(dir.join(format!("examples/{name}.prod")));
+            candidates.push(dir.join(format!("{name}.prod")));
+        }
+        // Relative to exe dir (for bundled apps)
+        if let Some(ref dir) = exe_dir {
+            candidates.push(dir.join(format!("examples/{name}.prod")));
+            candidates.push(dir.join(format!("{name}.prod")));
+        }
+        // Relative to the workspace root (compile-time)
+        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent().unwrap().parent().unwrap().to_path_buf();
+        candidates.push(workspace_root.join(format!("examples/{name}.prod")));
+        candidates.push(workspace_root.join(format!("{name}.prod")));
+        // Also check some well-known absolute paths
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            candidates.push(home.join(format!(".epoca/apps/{name}.prod")));
+        }
+
+        for candidate in &candidates {
+            if candidate.exists() {
+                match ProdBundle::from_file(candidate) {
+                    Ok(bundle) => {
+                        if bundle.manifest.app.app_type == "spa" {
+                            log::info!("[dot] loaded SPA: {}", candidate.display());
+                            self.open_spa(bundle, window, cx);
+                            let dot_url = format!("dot://{name}.dot");
+                            self.url_input
+                                .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+                            return;
+                        } else {
+                            log::warn!("[dot] {} is not an SPA bundle (app_type={:?})", candidate.display(), bundle.manifest.app.app_type);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("[dot] failed to load {}: {e}", candidate.display());
+                    }
+                }
+            }
+        }
+
+        // Phase 2: on-chain DOTNS resolution.
+        log::info!("[dot] no local bundle, trying DOTNS for: {name}");
+        let dot_url = format!("dot://{name}.dot");
+        self.url_input
+            .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+
+        let name_owned = name.to_string();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            // Run blocking DOTNS resolution + IPFS fetch on background thread.
+            let name_for_resolve = name_owned.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { epoca_chain::dotns::resolve_and_fetch(&name_for_resolve) })
+                .await;
+
+            match result {
+                Ok(assets) => {
+                    let _ = cx.update(|cx| {
+                        if let Some(entity) = this.upgrade() {
+                            let name_for_bundle = name_owned.clone();
+                            entity.update(cx, |wb, cx| {
+                                let manifest = epoca_sandbox::bundle::ProdManifest {
+                                    app: epoca_sandbox::bundle::AppMeta {
+                                        id: format!("dot.{name_for_bundle}"),
+                                        name: name_for_bundle.clone(),
+                                        version: "0.0.0".into(),
+                                        app_type: "spa".into(),
+                                        icon: None,
+                                    },
+                                    permissions: Some(epoca_sandbox::bundle::PermissionsMeta {
+                                        network: None,
+                                        sign: true,
+                                        statement_store: false,
+                                        media: vec![],
+                                    }),
+                                    sandbox: None,
+                                    webapp: Some(epoca_sandbox::bundle::WebAppMeta {
+                                        entry: "index.html".into(),
+                                        sandbox: "strict".into(),
+                                    }),
+                                };
+                                let bundle = ProdBundle {
+                                    manifest,
+                                    program_bytes: None,
+                                    assets,
+                                };
+                                log::info!("[dotns] opening SPA: {name_for_bundle}");
+                                wb.pending_dotns_bundle = Some(bundle);
+                                cx.notify();
+                            });
+                        }
+                    });
+                }
+                Err(e) => {
+                    log::warn!("[dotns] resolution failed for {name_owned}: {e}");
+                }
+            }
+        }).detach();
     }
 
     pub fn open_editor(
@@ -2096,6 +2346,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             favicon_url: None,
             context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -2260,6 +2512,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         favicon_url: stab.favicon_url.clone(),
                         context_id: ctx,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     restored_count += 1;
                 }
@@ -2289,6 +2543,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         favicon_url: None,
                         context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     restored_count += 1;
                 }
@@ -2313,6 +2569,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         favicon_url: None,
                         context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     restored_count += 1;
                 }
@@ -2334,6 +2592,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         favicon_url: None,
                         context_id: None,
                         loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
                     });
                     restored_count += 1;
                 }
@@ -2423,6 +2683,25 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.find_input
             .update(cx, |s, inner_cx| s.set_value("".to_string(), window, inner_cx));
         cx.notify();
+    }
+
+    pub fn toggle_reader_mode(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.active_tab_id else { return };
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == id) else { return };
+        if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+            if tab.reader_active {
+                // Exit reader mode — reload original page
+                entity.update(cx, |wv, cx| wv.reload(cx));
+                tab.reader_active = false;
+            } else {
+                // Enter reader mode
+                entity.update(cx, |wv, cx| {
+                    wv.evaluate_script(crate::reader::reader_mode_js(), cx);
+                });
+                tab.reader_active = true;
+            }
+            cx.notify();
+        }
     }
 
     /// Forward a clipboard command to the active WebViewTab.
@@ -2849,8 +3128,19 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         // Backdrop is now rendered at the root level (Render::render)
         // so it covers the full window, not just the sidebar.
 
+        let active_readerable = self.active_tab_id
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.readerable || t.reader_active)
+            .unwrap_or(false);
+        let active_reader_on = self.active_tab_id
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+            .map(|t| t.reader_active)
+            .unwrap_or(false);
+
         let url_row = div()
             .id("url-bar")
+            .flex()
+            .items_center()
             .mx(px(8.0))
             .mt(px(4.0))
             .mb(px(10.0))
@@ -2858,18 +3148,47 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .bg(url_bar_bg)
             .border_1()
             .border_color(rgba(0xffffff22))
-            .on_mouse_down(MouseButton::Left, cx.listener(|_this, event: &MouseDownEvent, window, _cx| {
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, window, _cx| {
+                this.url_bar_clicked = true;
+                crate::shield::set_url_bar_focused(true);
                 if event.click_count >= 3 {
                     window.dispatch_action(Box::new(gpui_component::input::SelectAll), _cx);
                 }
             }))
             .child(
-                Input::new(&self.url_input)
-                    .appearance(false)
-                    .small()
-                    .prefix(url_prefix)
-                    .cleanable(true),
-            );
+                div().flex_1().child(
+                    Input::new(&self.url_input)
+                        .appearance(false)
+                        .small()
+                        .prefix(url_prefix)
+                        .cleanable(true),
+                ),
+            )
+            .when(active_readerable, |d| {
+                d.child(
+                    div()
+                        .id("reader-btn")
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .mr(px(4.0))
+                        .rounded(px(4.0))
+                        .hover(|d| d.bg(rgba(0xffffff14)))
+                        .when(active_reader_on, |d| d.bg(rgba(0x8b5cf633)))
+                        .child(
+                            Icon::new(IconName::BookOpen)
+                                .size(px(14.0))
+                                .text_color(if active_reader_on {
+                                    rgba(0x8b5cf6ff)
+                                } else {
+                                    rgba(0xffffffaa)
+                                }),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.toggle_reader_mode(cx);
+                        })),
+                )
+            });
 
         // ── Context color lookup ─────────────────────────────────────────
         let contexts = cx
@@ -3811,6 +4130,67 @@ impl Workbench {
         cx.notify();
     }
 
+    fn approve_spa_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_spa_sign.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+
+        if !cx.has_global::<crate::wallet::WalletGlobal>() {
+            self.resolve_spa_js(req.webview_ptr, req.id, Err("no wallet configured"), cx);
+            cx.notify();
+            return;
+        }
+
+        let result = cx
+            .global_mut::<crate::wallet::WalletGlobal>()
+            .manager
+            .sign(&req.app_id, req.payload.as_bytes());
+
+        match result {
+            Ok(sig_bytes) => {
+                let sig_hex = hex_encode(&sig_bytes);
+                let js = format!(
+                    "window.__epocaResolve({}, null, '0x{}')",
+                    req.id, sig_hex,
+                );
+                self.evaluate_on_spa(req.webview_ptr, &js, cx);
+            }
+            Err(e) => {
+                let msg = e.to_string().replace('\'', "\\'");
+                self.resolve_spa_js(req.webview_ptr, req.id, Err(&msg), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_spa_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_spa_sign.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+        self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected signing request"), cx);
+        cx.notify();
+    }
+
+    fn resolve_spa_js(&self, webview_ptr: usize, id: u64, result: Result<&str, &str>, cx: &Context<Self>) {
+        let js = match result {
+            Ok(val) => format!("window.__epocaResolve({}, null, '{}')", id, val),
+            Err(e) => {
+                let msg = e.replace('\'', "\\'");
+                format!("window.__epocaResolve({}, '{}', null)", id, msg)
+            }
+        };
+        self.evaluate_on_spa(webview_ptr, &js, cx);
+    }
+
+    fn evaluate_on_spa(&self, webview_ptr: usize, js: &str, cx: &Context<Self>) {
+        for tab in &self.tabs {
+            if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                if entity.read(cx).webview_ptr == webview_ptr {
+                    entity.read(cx).evaluate_script(js, cx);
+                    return;
+                }
+            }
+        }
+    }
+
     fn wallet_sign_raw(&mut self, params_json: &str, cx: &mut Context<Self>) -> Result<String, String> {
         // params_json: {"raw":{"address":"...","data":"0x...","type":"bytes"}}
         let parsed: serde_json::Value = serde_json::from_str(params_json)
@@ -4093,11 +4473,122 @@ impl Workbench {
                 ),
         )
     }
+
+    fn render_spa_sign_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_spa_sign.as_ref()?;
+        let app_id = req.app_id.clone();
+        let payload_display = if req.payload.len() > 120 {
+            format!("{}…", &req.payload[..120])
+        } else {
+            req.payload.clone()
+        };
+
+        Some(
+            div()
+                .id("spa-sign-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_spa_sign(cx);
+                }))
+                .child(
+                    div()
+                        .id("spa-sign-dialog")
+                        .w(px(380.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new("Signature Request")
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(app_id)
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .overflow_hidden()
+                                .child(
+                                    gpui_component::label::Label::new(payload_display)
+                                        .text_size(px(12.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("spa-sign-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_spa_sign(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("spa-sign-approve")
+                                        .primary()
+                                        .label("Sign")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_spa_sign(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
 }
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_pending_nav(window, cx);
+
+        // Open SPA from completed DOTNS resolution.
+        if let Some(bundle) = self.pending_dotns_bundle.take() {
+            let name = bundle.manifest.app.name.clone();
+            let dot_url = format!("dot://{name}.dot");
+            self.open_spa(bundle, window, cx);
+            self.url_input
+                .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+        }
 
         let chrome_bg = rgb(0x2b2b2b);
         // Chrome border thickness around the rounded content viewport.
@@ -4152,6 +4643,8 @@ impl Render for Workbench {
                     .map(|d| d.into_any_element());
                 let btc_sign_dialog = self.render_btc_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
+                let spa_sign_dialog = self.render_spa_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
 
                 // Backdrop to dismiss wallet popover when clicking outside
                 let wallet_backdrop = if self.wallet_popover_open {
@@ -4202,6 +4695,7 @@ impl Render for Workbench {
                     .children(omnibox)
                     .children(wallet_dialog)
                     .children(btc_sign_dialog)
+                    .children(spa_sign_dialog)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -4218,6 +4712,7 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleReaderMode, _, cx| this.toggle_reader_mode(cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;
                         if this.find_open {
@@ -4331,6 +4826,8 @@ impl Render for Workbench {
                     .map(|d| d.into_any_element());
                 let btc_sign_dialog_overlay = self.render_btc_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
+                let spa_sign_dialog_overlay = self.render_spa_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
 
                 let wallet_backdrop_overlay = if self.wallet_popover_open {
                     Some(
@@ -4370,7 +4867,10 @@ impl Render for Workbench {
                 // In fullscreen overlay mode with sidebar hidden, show a small toolbar
                 // at the top-left so the user can access the sidebar pin button next to
                 // the traffic lights (which macOS manages in the fullscreen hover zone).
-                let fullscreen_bar = if is_window_fullscreen() && anim < 0.005 {
+                let active_is_framebuffer = self.active_tab().map_or(false, |t| {
+                    matches!(t.kind, TabKind::FramebufferApp { .. })
+                });
+                let fullscreen_bar = if is_window_fullscreen() && anim < 0.005 && !active_is_framebuffer {
                     Some(
                         div()
                             .absolute()
@@ -4407,6 +4907,7 @@ impl Render for Workbench {
                     .children(omnibox)
                     .children(wallet_dialog_overlay)
                     .children(btc_sign_dialog_overlay)
+                    .children(spa_sign_dialog_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -4423,6 +4924,7 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
+                    .on_action(cx.listener(|this, _: &ToggleReaderMode, _, cx| this.toggle_reader_mode(cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;
                         if this.find_open {

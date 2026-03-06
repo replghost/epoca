@@ -1,79 +1,124 @@
-# Epoca
+<p align="center">
+  <img src="resources/icon_128.png" width="96" alt="Epoca icon" />
+</p>
 
-A programmable, privacy-first browser built on [GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) and [PolkaVM](https://github.com/paritytech/polkavm).
+<h1 align="center">Epoca</h1>
 
-> **Early development.** Expect rough edges.
+<p align="center">
+  A programmable, privacy-first browser built on
+  <a href="https://gpui.rs">GPUI</a> and
+  <a href=" ">PolkaVM</a>.
+  <br />
+  Native on macOS. No Electron.
+</p>
 
-## What is Epoca?
+<p align="center">
+  <a href="#install">Install</a> &middot;
+  <a href="#features">Features</a> &middot;
+  <a href="#building-from-source">Build</a> &middot;
+  <a href="#architecture">Architecture</a> &middot;
+  <a href="#license">License</a>
+</p>
 
-Epoca is a browser workbench for power users who want to own their browsing experience:
+---
 
-- **Programmable tabs** — write small, auditable tab-replacement apps in ZML (a declarative UI language) that run in a PolkaVM sandbox. A custom Reddit reader, a stripped-down Gmail, a focused Notion view — all as first-class browser tabs with no extension marketplace to trust.
-- **Privacy by default** — content blocking runs before the network stack via WKContentRuleList, not in a JavaScript extension that pages can detect and disable.
-- **Native performance** — GPUI on macOS/Linux/Windows, wgpu on Android. No Electron.
+<p align="center">
+  <img src="resources/screenshot.png" width="800" alt="Epoca screenshot" />
+</p>
 
-## Building from source
+## Install
+
+```bash
+brew tap replghost/epoca
+brew install --cask epoca
+```
+
+Or download the latest `.app` from [Releases](https://github.com/replghost/epoca/releases).
+
+> First launch: macOS may warn about an unidentified developer.
+> Right-click the app > Open, then click Open in the dialog.
+
+## Features
+
+**Browsing**
+- WebView tabs powered by WKWebView (WebKit)
+- Cmd-click to open links in background tabs
+- Find in page (Cmd+F)
+- Session restore across launches
+- Browsing history with configurable retention (session only, 8h, 24h, 7d, 30d)
+- Favicon and live page titles in the tab sidebar
+
+**Privacy**
+- Content blocking via WKContentRuleList — blocks before the network request, not after
+- EasyList, AdGuard, uBlock Origin, Fanboy, and Peter Lowe filter lists (440k+ rules)
+- Per-site shield toggle
+- Tab isolation mode — each tab gets its own cookie/storage sandbox
+- Session contexts — named browsing sessions with separate data stores
+- Cosmetic filtering with element count badge
+
+**Sandboxed Apps**
+- Run apps as browser tabs in a PolkaVM sandbox
+- Declarative UI apps via ZML (a markup language for GPUI)
+- Framebuffer apps (games, emulators) with full pixel-level rendering
+- SPA bundles — sandboxed single-page web apps in `.prod` format
+- Capability broker controls what each app can access
+
+**Wallet (experimental)**
+- BIP-39 mnemonic key management with encrypted keystore
+- Ethereum: EIP-191 signing, Helios light client (trustless verification)
+- Bitcoin: BIP-137 signing, Kyoto light client (compact block filters)
+- Polkadot: Smoldot light client, `window.polkadot` injection
+- `window.bitcoin` (Unisat-compatible) and `window.ethereum` bridges
+
+## Building from Source
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs) (stable, latest)
-- macOS 13+ (Ventura or later) for the macOS build
+- [Rust](https://rustup.rs) (stable)
+- macOS 13+ (Ventura or later)
 - Xcode Command Line Tools: `xcode-select --install`
 
 ### Build
 
 ```bash
+# Clone with the PolkaVM dependency
 git clone https://github.com/replghost/epoca.git
+git clone https://github.com/replghost/polkavm.git
 cd epoca
+
 cargo build -p epoca --release
+./target/release/Epoca.app/Contents/MacOS/epoca
 ```
 
-The binary is at `target/release/epoca`. Run it directly:
+### Run a guest app
 
 ```bash
-./target/release/epoca
-```
+# Open a .prod bundle (sandboxed app)
+./target/release/epoca path/to/app.prod
 
-### Running the sample ZML apps
-
-The `examples/` directory contains pre-built guest app binaries:
-
-```bash
-# The browser will load ZML apps from the sidebar
-ls examples/
-```
-
-### Building a guest app
-
-Guest apps are written in Rust and compiled to PolkaVM:
-
-```bash
-cd guest/counter
-cargo build --release
+# Open a URL
+./target/release/epoca https://example.com
 ```
 
 ## Architecture
 
 ```
 crates/
-  epoca/           — binary entry point
-  epoca-core/      — workbench shell, tab types, GPUI views
-  epoca-sandbox/   — PolkaVM runtime (guest app execution)
-  epoca-protocol/  — ViewTree serialization (host ↔ guest)
-  epoca-broker/    — capability/permission broker
-  epoca-dsl/       — ZML parser and evaluator
-  epoca-shield/    — content blocking (in progress)
-  epoca-android/   — Android renderer (wgpu + Vulkan/GL ES)
-guest/
-  counter/         — sample PolkaVM guest app
-examples/          — pre-built .polkavm binaries + sample manifests
+  epoca/            binary entry point
+  epoca-core/       workbench shell, tabs, sidebar, session management
+  epoca-sandbox/    PolkaVM runtime (guest app execution)
+  epoca-shield/     content blocking (WKContentRuleList compiler)
+  epoca-protocol/   ViewTree serialization (host <> guest)
+  epoca-broker/     capability/permission broker
+  epoca-dsl/        ZML parser and evaluator
+  epoca-chain/      light clients (Polkadot, Ethereum, Bitcoin)
+  epoca-wallet/     key management and signing
+  epoca-android/    Android renderer (wgpu + cosmic-text)
 ```
 
 ## Status
 
-Epoca is pre-alpha. The core browsing shell works on macOS. Many features listed in [`docs/backlog.md`](docs/backlog.md) are in progress.
-
-Pre-built binaries are not distributed yet — please build from source. macOS code signing and notarization are planned before any binary releases.
+Early release. The core browsing shell works on macOS with content blocking, session restore, and sandboxed app support. Expect rough edges.
 
 ## License
 

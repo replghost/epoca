@@ -322,9 +322,9 @@ impl SandboxInstance {
     }
 
     /// Call the guest's `init` function.
-    /// Uses 10x the per-update gas budget (init may load assets, build tables, etc.).
+    /// Uses 1000x the per-update gas budget (init may load assets, build tables, etc.).
     pub fn call_init(&mut self) -> Result<()> {
-        let init_gas = self.max_gas_per_update.saturating_mul(10).min(i64::MAX as u64) as i64;
+        let init_gas = self.max_gas_per_update.saturating_mul(1000).min(i64::MAX as u64) as i64;
         self.instance.set_gas(init_gas);
         let mut state = self.state.lock().unwrap();
         self.instance
