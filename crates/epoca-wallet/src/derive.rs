@@ -58,10 +58,16 @@ fn hard_derive(parent: &SecretKey, junction: &[u8]) -> SecretKey {
 /// Format: `base58check(prefix || pubkey || checksum[0..2])`
 /// where checksum = `BLAKE2b-512(b"SS58PRE" || prefix || pubkey)`.
 pub fn ss58_address(pubkey: &PublicKey) -> String {
-    let pubkey_bytes = pubkey.to_bytes();
+    ss58_address_with_prefix(&pubkey.to_bytes(), SS58_PREFIX)
+}
+
+/// Encode a 32-byte public key as an SS58 address with a specific network prefix.
+///
+/// Common prefixes: 0 = Polkadot, 2 = Kusama, 42 = generic Substrate.
+pub fn ss58_address_with_prefix(pubkey_bytes: &[u8; 32], prefix: u8) -> String {
     let mut payload = Vec::with_capacity(35);
-    payload.push(SS58_PREFIX);
-    payload.extend_from_slice(&pubkey_bytes);
+    payload.push(prefix);
+    payload.extend_from_slice(pubkey_bytes);
 
     // Compute checksum
     let mut hasher = blake2::Blake2b::<blake2::digest::consts::U64>::new();
@@ -207,6 +213,21 @@ mod tests {
         assert!(addr.starts_with('5'), "got: {addr}");
         // Should be 47-48 chars
         assert!(addr.len() >= 46 && addr.len() <= 50, "len: {}", addr.len());
+    }
+
+    #[test]
+    fn ss58_polkadot_prefix() {
+        let m = bip39::Mnemonic::parse(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+        ).unwrap();
+        let root = root_keypair_from_mnemonic(&m);
+        let addr = ss58_address_with_prefix(&root.public.to_bytes(), 0);
+        // Polkadot addresses start with '1'
+        assert!(addr.starts_with('1'), "Polkadot prefix 0 should start with '1', got: {addr}");
+        // Decode and verify prefix byte
+        let decoded = bs58::decode(&addr).into_vec().unwrap();
+        assert_eq!(decoded[0], 0); // Polkadot prefix
+        assert_eq!(&decoded[1..33], &root.public.to_bytes());
     }
 
     #[test]

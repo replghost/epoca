@@ -45,9 +45,15 @@ pub struct Permissions {
     /// Whether the app can request transaction signing.
     #[serde(default)]
     pub sign: bool,
-    /// Whether the app can use Statement Store.
+    /// Whether the app can use statements pub/sub.
+    #[serde(default, alias = "statement_store")]
+    pub statements: bool,
+    /// Whether the app can use chain query/submit APIs.
     #[serde(default)]
-    pub statement_store: bool,
+    pub chain: bool,
+    /// Whether the app can open P2P data connections.
+    #[serde(default)]
+    pub data: bool,
     /// Media permissions for SPA tabs (e.g. ["camera", "audio"]).
     #[serde(default)]
     pub media: Vec<String>,
@@ -72,9 +78,15 @@ pub struct GrantedPermissions {
     /// Whether the user has granted transaction signing.
     #[serde(default)]
     pub sign: bool,
-    /// Whether the user has granted Statement Store access.
+    /// Whether the user has granted statements access.
+    #[serde(default, alias = "statement_store")]
+    pub statements: bool,
+    /// Whether the user has granted chain API access.
     #[serde(default)]
-    pub statement_store: bool,
+    pub chain: bool,
+    /// Whether the user has granted data connection access.
+    #[serde(default)]
+    pub data: bool,
     /// Granted media types (e.g. "camera", "audio").
     #[serde(default)]
     pub media: Vec<String>,

@@ -3,7 +3,7 @@ use gpui::*;
 use crate::shield::init_shield;
 
 // ── Workbench-scoped actions ────────────────────────────────────────────────
-actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, OpenAppLibrary, OpenApp, FindInPage, FindPrev, CloseFindBar, ToggleReaderMode]);
+actions!(workbench, [NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload, ToggleSiteShield, OpenSettings, OpenAppLibrary, OpenApp, FindInPage, FindPrev, CloseFindBar, ToggleReaderMode, OpenBookmarks, AddBookmark]);
 use gpui_component::PixelsExt as _;
 use crate::{OmniboxOpen, OverlayLeftInset};
 use gpui_component::button::{Button, ButtonVariants};
@@ -11,6 +11,7 @@ use gpui_component::Sizable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Icon, IconName};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use epoca_broker::CapabilityBroker;
@@ -70,8 +71,9 @@ fn is_window_fullscreen() -> bool {
 }
 
 use crate::tabs::{
-    AppLibraryTab, CodeEditorTab, DeclarativeAppTab, FramebufferAppTab, SandboxAppTab,
-    SettingsTab, SpaTab, TabEntry, TabKind, WebViewTab,
+    AppLibraryTab, BookmarksTab, CodeEditorTab, DeclarativeAppTab, DotLoadingEvent, DotLoadingTab,
+    DotStatus, DotVerification, FramebufferAppTab, SandboxAppTab, SettingsTab, SpaTab, TabEntry,
+    TabKind, WebViewTab,
 };
 use epoca_sandbox::ProdBundle;
 
@@ -94,6 +96,15 @@ pub enum SidebarMode {
 /// Used by the Quit handler to trigger a synchronous session save.
 pub struct WorkbenchRef(pub WeakEntity<Workbench>);
 impl Global for WorkbenchRef {}
+
+/// State for an in-progress .dot app loading tab, held until the user
+/// approves or denies permissions.
+struct PendingDotLoad {
+    tab_id: u64,
+    bundle: Option<ProdBundle>,
+    verification: Option<DotVerification>,
+    _subscription: Subscription,
+}
 
 /// Which wallet bridge initiated a connect request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +147,39 @@ pub(crate) struct PendingSpaSign {
     pub app_id: String,
     /// Raw payload string from the SPA.
     pub payload: String,
+}
+
+/// A pending chain.submit request awaiting user confirmation.
+pub(crate) struct PendingChainSubmit {
+    pub webview_ptr: usize,
+    pub id: u64,
+    pub app_id: String,
+    pub chain: epoca_chain::ChainId,
+    /// JSON call data from the app (pallet, call, args).
+    pub call_data: String,
+}
+
+/// A pending data.connect request awaiting user confirmation.
+pub(crate) struct PendingDataConnect {
+    pub webview_ptr: usize,
+    pub id: u64,
+    pub app_id: String,
+    pub peer_address: String,
+    pub conn_id: u64,
+}
+
+/// A pending Polkadot app host-api sign request awaiting user confirmation.
+pub(crate) struct PendingHostApiSign {
+    /// Which SPA WebView originated this request.
+    pub webview_ptr: usize,
+    /// SCALE request_id to include in the response.
+    pub request_id: String,
+    /// Original request tag (TAG_SIGN_PAYLOAD_REQ or TAG_SIGN_RAW_REQ).
+    pub request_tag: u8,
+    /// The app_id of the SPA.
+    pub app_id: String,
+    /// The raw payload bytes to sign.
+    pub payload: Vec<u8>,
 }
 
 /// A pending BTC wallet sign request awaiting user confirmation.
@@ -206,6 +250,10 @@ pub struct Workbench {
     // Session restore
     _session_save_task: Option<Task<()>>,
 
+    /// Periodic poll — ensures host-api channel events are drained even when
+    /// no user interaction triggers a re-render.
+    _event_poll_task: Option<Task<()>>,
+
     // Find-in-page
     pub(crate) find_open: bool,
     pub(crate) find_input: Entity<InputState>,
@@ -220,9 +268,44 @@ pub struct Workbench {
     pending_wallet_connect: Option<PendingWalletConnect>,
     pending_btc_wallet_sign: Option<PendingBtcWalletSign>,
     pending_spa_sign: Option<PendingSpaSign>,
-    pending_dotns_bundle: Option<ProdBundle>,
+    pending_chain_submit: Option<PendingChainSubmit>,
+    pending_data_connect: Option<PendingDataConnect>,
+    pending_hostapi_sign: Option<PendingHostApiSign>,
+    /// Active dot-loading tab state — holds bundle waiting for user approval.
+    pending_dot_load: Option<PendingDotLoad>,
+    /// Monotonically increasing counter for dot-load requests; detached DOTNS
+    /// tasks check this to avoid writing stale state after a second navigation.
+    dot_load_generation: u64,
+    /// Apps the user has already approved (app name → CID). Skips re-approval
+    /// on subsequent loads of the same version.
+    approved_dot_apps: std::collections::HashMap<String, String>,
+    /// Bundle + verification approved by user, waiting for render to open SPA.
+    pending_dot_approve: Option<(ProdBundle, Option<DotVerification>)>,
+    /// Tab ID to close after user denied permissions.
+    pending_dot_deny_tab: Option<u64>,
+    /// Active DOTNS validation — shown in URL bar while resolving on-chain.
+    pending_dotns_validation: Option<DotVerification>,
+    /// Pending hostapi JSON-RPC queries: js_id → (webview_ptr, scale_request_id).
+    /// When chain_api::drain_responses returns a result with a matching js_id,
+    /// we encode it as a SCALE TAG_JSONRPC_SEND_RESP and send it back via hostapi.
+    pending_hostapi_rpc: std::collections::HashMap<u64, (usize, String)>,
     connected_sites: std::collections::HashSet<String>,
     wallet_popover_open: bool,
+    dot_popover_open: bool,
+    dot_permissions_expanded: bool,
+
+    // Tab drag-to-reorder
+    /// Tab being dragged (by tab id), start y, current y in sidebar coordinates.
+    dragging_tab: Option<DragState>,
+}
+
+/// State for an in-progress tab drag-to-reorder operation.
+struct DragState {
+    tab_id: u64,
+    /// Whether we've moved enough to consider it a real drag (not just a click).
+    active: bool,
+    start_y: f32,
+    current_y: f32,
 }
 
 /// Extract the hostname from a URL string without pulling in the `url` crate.
@@ -266,8 +349,18 @@ impl Workbench {
         });
         let _find_subscription = cx.subscribe(&find_input, Self::on_find_input_event);
 
-        let broker =
-            CapabilityBroker::new().with_storage("epoca_permissions.json".to_string());
+        let permissions_path = {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_default();
+            #[cfg(target_os = "macos")]
+            let dir = std::path::PathBuf::from(&home).join("Library/Application Support/Epoca");
+            #[cfg(not(target_os = "macos"))]
+            let dir = std::path::PathBuf::from(&home).join(".epoca");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("permissions.json").to_string_lossy().to_string()
+        };
+        let broker = CapabilityBroker::new().with_storage(permissions_path);
 
         // Periodic session save every 30 seconds.
         let session_save_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
@@ -314,6 +407,30 @@ impl Workbench {
             }
         });
 
+        // Periodic poll to drain host-api / SPA channel events.
+        // Without this, messages from WKScriptMessageHandler sit in the channel
+        // until a user interaction triggers a re-render.
+        let event_poll_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                let ok = cx
+                    .update(|cx| {
+                        if let Some(entity) = this.upgrade() {
+                            entity.update(cx, |_, cx| cx.notify());
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !ok {
+                    break;
+                }
+            }
+        });
+
         Self {
             sidebar_mode: SidebarMode::Pinned,
             sidebar_anim: 1.0,
@@ -339,6 +456,7 @@ impl Workbench {
             active_context: None,
             context_picker_open: false,
             _session_save_task: Some(session_save_task),
+            _event_poll_task: Some(event_poll_task),
             find_open: false,
             find_input,
             _find_subscription,
@@ -348,9 +466,21 @@ impl Workbench {
             pending_wallet_connect: None,
             pending_btc_wallet_sign: None,
             pending_spa_sign: None,
-            pending_dotns_bundle: None,
+            pending_chain_submit: None,
+            pending_data_connect: None,
+            pending_hostapi_sign: None,
+            pending_dot_load: None,
+            dot_load_generation: 0,
+            approved_dot_apps: crate::session::load_approved_apps(),
+            pending_dot_approve: None,
+            pending_dot_deny_tab: None,
+            pending_dotns_validation: None,
+            pending_hostapi_rpc: std::collections::HashMap::new(),
             connected_sites: std::collections::HashSet::new(),
             wallet_popover_open: false,
+            dot_popover_open: false,
+            dot_permissions_expanded: false,
+            dragging_tab: None,
         }
     }
 
@@ -490,10 +620,15 @@ impl Workbench {
         if let Some(raw_text) = self.pending_nav.take() {
             self.url_bar_clicked = false;
             let text = raw_text.trim().to_string();
-            // dot:// scheme — resolve to local .prod bundle or DOTNS on-chain.
+            // dot:// scheme or bare .dot TLD — resolve to local .prod bundle or DOTNS on-chain.
             if text.starts_with("dot://") {
                 log::info!("[nav] dot:// URL detected: {text}");
                 self.resolve_dot_url(&text, window, cx);
+            } else if text.ends_with(".dot") && !text.contains('/') && !text.contains(' ') {
+                // Bare ".dot" TLD (e.g. "hackme3.dot") — wrap in dot:// scheme.
+                let dot_url = format!("dot://{text}");
+                log::info!("[nav] bare .dot name detected, resolving: {dot_url}");
+                self.resolve_dot_url(&dot_url, window, cx);
             // Check file paths first — they contain dots/slashes which looks_like_url matches.
             } else if !text.starts_with("http://") && !text.starts_with("https://") && std::path::Path::new(&text).exists() {
                 self.navigate_or_open(&text, window, cx);
@@ -560,16 +695,34 @@ impl Workbench {
             self.navigate_or_open(&text, window, cx);
         }
         // Drain cmd-click / new-tab events from JS
-        let new_tabs = crate::shield::drain_nav_events();
+        let nav_events = crate::shield::drain_nav_events();
         let bg_links = cx
             .try_global::<crate::settings::SettingsGlobal>()
             .map(|g| g.settings.open_links_in_background)
             .unwrap_or(true);
-        for (url, focus) in new_tabs {
-            if focus || !bg_links {
-                self.open_webview(url, window, cx);
-            } else {
-                self.open_webview_background(url, window, cx);
+        for ev in nav_events {
+            match ev {
+                crate::shield::NavEvent::OpenUrl { url, focus } => {
+                    if focus || !bg_links {
+                        self.open_webview(url, window, cx);
+                    } else {
+                        self.open_webview_background(url, window, cx);
+                    }
+                }
+                crate::shield::NavEvent::GoBack => {
+                    if let Some(tab) = self.active_tab_id.and_then(|id| self.tabs.iter().find(|t| t.id == id)) {
+                        if let Some(nav) = &tab.nav {
+                            nav.navigate_back(cx);
+                        }
+                    }
+                }
+                crate::shield::NavEvent::GoForward => {
+                    if let Some(tab) = self.active_tab_id.and_then(|id| self.tabs.iter().find(|t| t.id == id)) {
+                        if let Some(nav) = &tab.nav {
+                            nav.navigate_forward(cx);
+                        }
+                    }
+                }
             }
         }
         // Drain page title events from JS (epocaMeta WKScriptMessageHandler)
@@ -609,6 +762,34 @@ impl Workbench {
                 }
                 cx.notify();
             }
+        }
+        // Drain URL change events — update tab kind + URL bar for active tab
+        let url_events = crate::shield::drain_url_events();
+        if !url_events.is_empty() {
+            let active_id = self.active_tab_id;
+            let mut active_url_changed: Option<String> = None;
+            for (ev_ptr, url) in url_events {
+                for tab in &mut self.tabs {
+                    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+                        if entity.read(cx).webview_ptr == ev_ptr {
+                            tab.kind = TabKind::WebView { url: url.clone() };
+                            if active_id == Some(tab.id) {
+                                active_url_changed = Some(url.clone());
+                            }
+                            record_history_visit(&url, &tab.title, cx);
+                        }
+                    }
+                }
+            }
+            if let Some(url) = active_url_changed {
+                let url_focused = self.url_input.focus_handle(cx).is_focused(window)
+                    || self.url_bar_clicked;
+                if !url_focused {
+                    self.url_input
+                        .update(cx, |s, inner_cx| s.set_value(url, window, inner_cx));
+                }
+            }
+            cx.notify();
         }
         // Drain loading progress events from LOADING_PROGRESS_SCRIPT
         let loading_events = crate::shield::drain_loading_events();
@@ -697,6 +878,16 @@ impl Workbench {
                         });
                     }
                 }
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == ev_ptr {
+                        entity.update(cx, |spa, ecx| {
+                            if spa.cursor_pointer != is_pointer {
+                                spa.cursor_pointer = is_pointer;
+                                ecx.notify();
+                            }
+                        });
+                    }
+                }
             }
         }
         // Drain right-click context menu events from JS.
@@ -751,6 +942,7 @@ impl Workbench {
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
                     });
                     cx.notify();
                 }
@@ -773,6 +965,7 @@ impl Workbench {
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
                     });
                     cx.notify();
                 }
@@ -812,53 +1005,76 @@ impl Workbench {
 
         // Drain SPA host API calls (window.epoca.* → epocaHost WKScriptMessageHandler)
         let spa_events = crate::spa::drain_spa_host_events();
+        if !spa_events.is_empty() {
+            log::info!("[sign-debug] drained {} spa_events", spa_events.len());
+        }
         for (ev_ptr, id, method, params_json) in spa_events {
+            log::info!("[sign-debug] spa event: method={method} id={id} from webview {ev_ptr:#x}");
             for tab in &self.tabs {
                 if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
                     if entity.read(cx).webview_ptr == ev_ptr {
                         let app_id = entity.read(cx).app_id().to_string();
+                        let chain_str = entity.read(cx).chain().to_string();
                         let wallet_enabled = cx
                             .try_global::<crate::settings::SettingsGlobal>()
                             .map(|g| g.settings.experimental_wallet)
                             .unwrap_or(false);
-                        let js = match method.as_str() {
-                            "getAddress" if wallet_enabled => {
-                                if !cx.has_global::<crate::wallet::WalletGlobal>() {
-                                    format!(
-                                        "window.__epocaResolve({}, 'no wallet configured', null)",
-                                        id,
-                                    )
-                                } else {
-                                    let result = cx
-                                        .global_mut::<crate::wallet::WalletGlobal>()
-                                        .manager
-                                        .app_address(&app_id);
-                                    match result {
-                                        Ok(addr) => format!(
-                                            "window.__epocaResolve({}, null, '{}')",
-                                            id, addr,
-                                        ),
-                                        Err(e) => {
-                                            let msg = e.to_string().replace('\'', "\\'");
-                                            format!(
-                                                "window.__epocaResolve({}, '{}', null)",
-                                                id, msg,
-                                            )
-                                        }
-                                    }
-                                }
+
+                        let perms = crate::js_bridge::BridgePermissions {
+                            wallet_enabled,
+                            chain: entity.read(cx).has_permission_chain(),
+                            statements: entity.read(cx).has_permission_statements(),
+                            data: entity.read(cx).has_permission_data(),
+                        };
+
+                        let wallet_address: Result<String, String> =
+                            if wallet_enabled && cx.has_global::<crate::wallet::WalletGlobal>() {
+                                cx.global_mut::<crate::wallet::WalletGlobal>()
+                                    .manager
+                                    .app_address(&app_id)
+                                    .map_err(|e| e.to_string())
+                            } else {
+                                Err("no wallet configured".into())
+                            };
+
+                        let author: String = match &wallet_address {
+                            Ok(addr) => addr.clone(),
+                            Err(_) => "unknown".into(),
+                        };
+
+                        let req = match crate::js_bridge::parse_request(&method, &params_json) {
+                            Ok(r) => r,
+                            Err(unknown) => {
+                                let msg = format!("method '{unknown}' not yet implemented")
+                                    .replace('\'', "\\'");
+                                let js = format!(
+                                    "window.__epocaResolve({id}, '{msg}', null)"
+                                );
+                                entity.read(cx).evaluate_script(&js, cx);
+                                break;
                             }
-                            "sign" if wallet_enabled => {
-                                let payload = serde_json::from_str::<serde_json::Value>(&params_json)
-                                    .ok()
-                                    .and_then(|v| v.get("payload")?.as_str().map(String::from))
-                                    .unwrap_or_default();
-                                if self.pending_spa_sign.is_some() {
-                                    format!(
-                                        "window.__epocaResolve({}, 'another signing request is pending', null)",
-                                        id,
-                                    )
-                                } else {
+                        };
+
+                        let result = crate::js_bridge::dispatch(
+                            &req,
+                            &app_id,
+                            id,
+                            ev_ptr,
+                            &chain_str,
+                            &perms,
+                            wallet_address,
+                            &author,
+                            self.pending_spa_sign.is_some(),
+                            self.pending_chain_submit.is_some(),
+                            self.pending_data_connect.is_some(),
+                        );
+
+                        match result {
+                            crate::js_bridge::BridgeResult::Js(js) => {
+                                entity.read(cx).evaluate_script(&js, cx);
+                            }
+                            crate::js_bridge::BridgeResult::Async(action) => match action {
+                                crate::js_bridge::BridgeAsyncAction::Sign { payload } => {
                                     self.pending_spa_sign = Some(PendingSpaSign {
                                         webview_ptr: ev_ptr,
                                         id,
@@ -867,41 +1083,277 @@ impl Workbench {
                                     });
                                     cx.set_global(OmniboxOpen(true));
                                     cx.notify();
-                                    continue; // Don't evaluate JS — dialog will resolve it.
                                 }
-                            }
-                            "wsConnect" => {
-                                // Validate URL: must be wss:// and match allowed
-                                // substrate RPC endpoints only.
-                                let url = serde_json::from_str::<serde_json::Value>(&params_json)
-                                    .ok()
-                                    .and_then(|v| v.get("url")?.as_str().map(String::from))
-                                    .unwrap_or_default();
-                                if !url.starts_with("wss://") && !url.starts_with("ws://") {
-                                    format!(
-                                        "window.__epocaResolve({}, 'wsConnect: only ws:// and wss:// URLs allowed', null)",
-                                        id,
-                                    )
-                                } else {
-                                    // TODO: open actual WebSocket proxy connection
-                                    format!(
-                                        "window.__epocaResolve({}, 'wsConnect not yet implemented', null)",
-                                        id,
-                                    )
+                                crate::js_bridge::BridgeAsyncAction::ChainQuery { .. } => {
+                                    // Response arrives async via chain_api::drain_responses
                                 }
-                            }
-                            other => {
-                                let msg = format!("method '{}' not yet implemented", other)
+                                crate::js_bridge::BridgeAsyncAction::ChainSubmit {
+                                    call_data,
+                                    chain,
+                                } => {
+                                    let chain_id = crate::chain_api::parse_chain_id(&chain)
+                                        .unwrap_or(epoca_chain::ChainId::PaseoAssetHub);
+                                    self.pending_chain_submit = Some(PendingChainSubmit {
+                                        webview_ptr: ev_ptr,
+                                        id,
+                                        app_id: app_id.clone(),
+                                        chain: chain_id,
+                                        call_data,
+                                    });
+                                    cx.set_global(OmniboxOpen(true));
+                                    cx.notify();
+                                }
+                                crate::js_bridge::BridgeAsyncAction::DataConnect {
+                                    peer_address,
+                                    conn_id,
+                                } => {
+                                    self.pending_data_connect = Some(PendingDataConnect {
+                                        webview_ptr: ev_ptr,
+                                        id,
+                                        app_id: app_id.clone(),
+                                        peer_address,
+                                        conn_id,
+                                    });
+                                    cx.set_global(OmniboxOpen(true));
+                                    cx.notify();
+                                }
+                            },
+                            crate::js_bridge::BridgeResult::UnknownMethod(m) => {
+                                let msg = format!("method '{m}' not yet implemented")
                                     .replace('\'', "\\'");
-                                format!(
-                                    "window.__epocaResolve({}, '{}', null)",
-                                    id, msg,
-                                )
+                                let js = format!(
+                                    "window.__epocaResolve({id}, '{msg}', null)"
+                                );
+                                entity.read(cx).evaluate_script(&js, cx);
                             }
-                        };
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Drain chain API responses (smoldot → SPA apps).
+        for (webview_ptr, js_id, result) in crate::chain_api::drain_responses() {
+            // Check if this response belongs to a hostapi JSON-RPC request.
+            if let Some((wv_ptr, request_id)) = self.pending_hostapi_rpc.remove(&js_id) {
+                let resp = match result {
+                    Ok(val) => {
+                        let json_result = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": js_id,
+                            "result": val,
+                        }).to_string();
+                        epoca_hostapi::protocol::encode_jsonrpc_send_response(&request_id, &json_result)
+                    }
+                    Err(e) => {
+                        let json_error = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": js_id,
+                            "error": { "code": -32603, "message": e },
+                        }).to_string();
+                        epoca_hostapi::protocol::encode_jsonrpc_send_response(&request_id, &json_error)
+                    }
+                };
+                crate::host::send_response(wv_ptr, &resp);
+                continue;
+            }
+
+            // Standard JSON-path response (window.epoca.chain.query).
+            let js = match result {
+                Ok(val) => {
+                    let json = serde_json::to_string(&val).unwrap_or_else(|_| "null".into());
+                    format!("window.__epocaResolve({js_id}, null, {json})")
+                }
+                Err(e) => {
+                    let msg = e.replace('\'', "\\'");
+                    format!("window.__epocaResolve({js_id}, '{msg}', null)")
+                }
+            };
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == webview_ptr {
                         entity.read(cx).evaluate_script(&js, cx);
                         break;
                     }
+                }
+            }
+        }
+
+        // Drain statement events (push to subscribed webviews).
+        for ev in crate::statements_api::drain_events() {
+            let json = serde_json::json!({
+                "author": ev.statement.author,
+                "channel": ev.statement.channel,
+                "data": ev.statement.data,
+                "timestamp": ev.statement.timestamp_ms,
+            });
+            let json_str = serde_json::to_string(&json).unwrap_or_else(|_| "{}".into());
+            let js = format!("window.__epocaPush('statement', {json_str})");
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == ev.webview_ptr {
+                        entity.read(cx).evaluate_script(&js, cx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Drain data connection events (push to webviews).
+        for ev in crate::data_api::drain_events() {
+            let js = match ev.event_type {
+                crate::data_api::DataEventType::Connected { conn_id, ref peer_address } => {
+                    let json = serde_json::json!({ "connId": conn_id, "peer": peer_address });
+                    format!("window.__epocaPush('dataConnected', {})", serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
+                }
+                crate::data_api::DataEventType::Data { conn_id, ref data } => {
+                    let json = serde_json::json!({ "connId": conn_id, "data": data });
+                    format!("window.__epocaPush('dataMessage', {})", serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
+                }
+                crate::data_api::DataEventType::Closed { conn_id, ref reason } => {
+                    let json = serde_json::json!({ "connId": conn_id, "reason": reason });
+                    format!("window.__epocaPush('dataClosed', {})", serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
+                }
+                crate::data_api::DataEventType::Error { conn_id, ref error } => {
+                    let json = serde_json::json!({ "connId": conn_id, "error": error });
+                    format!("window.__epocaPush('dataError', {})", serde_json::to_string(&json).unwrap_or_else(|_| "{}".into()))
+                }
+            };
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == ev.webview_ptr {
+                        entity.read(cx).evaluate_script(&js, cx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Drain Polkadot app host-api events (epocaHostApi WKScriptMessageHandler → SCALE binary)
+        {
+            let hostapi_events = crate::host::drain_hostapi_events();
+            if !hostapi_events.is_empty() {
+                log::info!("[sign-debug] drained {} hostapi events", hostapi_events.len());
+                // Sync accounts from wallet before processing events.
+                if cx.has_global::<crate::wallet::WalletGlobal>() {
+                    let wallet = cx.global::<crate::wallet::WalletGlobal>();
+                    let mut api = cx.global::<crate::host::HostApiGlobal>().api.lock().unwrap();
+                    crate::host::sync_accounts_from_wallet(&mut api, wallet);
+                }
+            }
+
+            for (ev_ptr, b64) in hostapi_events {
+                log::info!("[sign-debug] processing hostapi event from webview {ev_ptr:#x}, b64 len={}", b64.len());
+                // Match event to a live SpaTab — skip stale messages from closed tabs.
+                let app_id = self.tabs.iter().find_map(|tab| {
+                    let entity = tab.entity.clone().downcast::<SpaTab>().ok()?;
+                    if entity.read(cx).webview_ptr == ev_ptr {
+                        Some(entity.read(cx).app_id().to_string())
+                    } else {
+                        None
+                    }
+                });
+                let app_id = match app_id {
+                    Some(id) => id,
+                    None => {
+                        log::warn!("[sign-debug] no matching SpaTab for webview {ev_ptr:#x} — dropping");
+                        continue;
+                    }
+                };
+
+                // Decode base64 → binary
+                let raw = match crate::host::base64_decode(&b64) {
+                    Some(bytes) => bytes,
+                    None => {
+                        log::warn!("[sign-debug] invalid base64 from webview {ev_ptr:#x}");
+                        continue;
+                    }
+                };
+
+                log::info!("[sign-debug] decoded {} bytes for app={}, first bytes: {:?}", raw.len(), app_id, &raw[..raw.len().min(20)]);
+
+                // Process through HostApi (scoped to app_id)
+                let outcome = cx
+                    .global::<crate::host::HostApiGlobal>()
+                    .api
+                    .lock()
+                    .unwrap()
+                    .handle_message(&raw, &app_id);
+
+                match outcome {
+                    epoca_hostapi::HostApiOutcome::Response(ref response) => {
+                        log::info!("[sign-debug] outcome=Response ({} bytes)", response.len());
+                        crate::host::send_response(ev_ptr, response);
+                    }
+                    epoca_hostapi::HostApiOutcome::NeedsSign {
+                        request_id,
+                        request_tag,
+                        public_key: _,
+                        payload,
+                    } => {
+                        log::info!("[sign-debug] outcome=NeedsSign request_id={} tag={} payload_len={}", request_id, request_tag, payload.len());
+                        if self.pending_hostapi_sign.is_some() {
+                            // Already have a pending sign — reject this one.
+                            let is_raw = request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+                            let response = epoca_hostapi::protocol::encode_sign_error(&request_id, is_raw);
+                            crate::host::send_response(ev_ptr, &response);
+                        } else {
+                            self.pending_hostapi_sign = Some(PendingHostApiSign {
+                                webview_ptr: ev_ptr,
+                                request_id,
+                                request_tag,
+                                app_id: app_id.clone(),
+                                payload,
+                            });
+                            // Hide the WebView so the sign dialog is visible above it.
+                            cx.set_global(OmniboxOpen(true));
+                            cx.notify();
+                        }
+                    }
+                    epoca_hostapi::HostApiOutcome::NeedsChainQuery {
+                        request_id,
+                        method,
+                        params,
+                    } => {
+                        log::info!("[hostapi] NeedsChainQuery method={method} request_id={request_id}");
+                        // Resolve chain from the SPA tab's manifest.
+                        let chain_str = self.tabs.iter().find_map(|tab| {
+                            let entity = tab.entity.clone().downcast::<SpaTab>().ok()?;
+                            if entity.read(cx).webview_ptr == ev_ptr {
+                                Some(entity.read(cx).chain().to_string())
+                            } else {
+                                None
+                            }
+                        }).unwrap_or_else(|| "paseo-asset-hub".into());
+
+                        let chain_id = crate::chain_api::parse_chain_id(&chain_str);
+                        match chain_id {
+                            Some(chain) => {
+                                // Use a unique js_id to correlate the response.
+                                use std::sync::atomic::{AtomicU64, Ordering};
+                                static HOSTAPI_RPC_ID: AtomicU64 = AtomicU64::new(1_000_000_000);
+                                let js_id = HOSTAPI_RPC_ID.fetch_add(1, Ordering::Relaxed);
+
+                                match crate::chain_api::submit_query(chain, ev_ptr, js_id, &method, &params) {
+                                    Ok(()) => {
+                                        self.pending_hostapi_rpc.insert(js_id, (ev_ptr, request_id));
+                                    }
+                                    Err(e) => {
+                                        log::warn!("[hostapi] chain query rejected: {e}");
+                                        let resp = epoca_hostapi::protocol::encode_jsonrpc_send_error(&request_id);
+                                        crate::host::send_response(ev_ptr, &resp);
+                                    }
+                                }
+                            }
+                            None => {
+                                log::warn!("[hostapi] unknown chain: {chain_str}");
+                                let resp = epoca_hostapi::protocol::encode_jsonrpc_send_error(&request_id);
+                                crate::host::send_response(ev_ptr, &resp);
+                            }
+                        }
+                    }
+                    epoca_hostapi::HostApiOutcome::Silent => {}
                 }
             }
         }
@@ -1523,6 +1975,11 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             self.resolve_dot_url(text, window, cx);
             return;
         }
+        if text.ends_with(".dot") && !text.contains('/') && !text.contains(' ') {
+            let dot_url = format!("dot://{text}");
+            self.resolve_dot_url(&dot_url, window, cx);
+            return;
+        }
         if text.starts_with("http://") || text.starts_with("https://") {
             self.open_webview(text.to_string(), window, cx);
             return;
@@ -1602,6 +2059,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     }
 
     fn switch_tab(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.dot_popover_open = false;
         self.active_tab_id = Some(tab_id);
         let tab = self.tabs.iter().find(|t| t.id == tab_id);
         let value = tab
@@ -1610,9 +2068,17 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::DeclarativeApp { path } => path.clone(),
                 TabKind::SandboxApp { app_id } => app_id.clone(),
                 TabKind::FramebufferApp { app_id } => app_id.clone(),
-                TabKind::Spa { app_id } => app_id.clone(),
+                TabKind::Spa { .. } => {
+                    // Show dot:// URL for .dot apps instead of the raw app_id
+                    if let Some(ref dv) = tab.dot_verification {
+                        format!("dot://{}.dot", dv.name)
+                    } else {
+                        tab.title.clone()
+                    }
+                }
                 TabKind::CodeEditor { path } => path.clone().unwrap_or_default(),
-                TabKind::Welcome | TabKind::Settings | TabKind::AppLibrary => String::new(),
+                TabKind::DotLoading { ref name } => format!("dot://{name}.dot"),
+                TabKind::Welcome | TabKind::Settings | TabKind::AppLibrary | TabKind::Bookmarks => String::new(),
             })
             .unwrap_or_default();
         // Sync the context indicator to reflect this tab's context.
@@ -1651,6 +2117,15 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             }
         }
         cx.notify();
+    }
+
+    /// Move a tab from one index to another within the same pinned/regular group.
+    fn reorder_tab(&mut self, tab_id: u64, target_idx: usize) {
+        let Some(src_idx) = self.tabs.iter().position(|t| t.id == tab_id) else { return };
+        if src_idx == target_idx { return; }
+        let tab = self.tabs.remove(src_idx);
+        let clamped = target_idx.min(self.tabs.len());
+        self.tabs.insert(clamped, tab);
     }
 
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1693,6 +2168,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             loading_progress: 0.0,
             reader_active: false,
             readerable: false,
+            dot_verification: None,
         });
         self.active_tab_id = Some(id);
         record_history_visit(&url_clone, "", cx);
@@ -1761,6 +2237,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             loading_progress: 0.0,
             reader_active: false,
             readerable: false,
+            dot_verification: None,
         });
         // Do NOT change active_tab_id — stay on current tab.
         record_history_visit(&url_clone, "", cx);
@@ -1920,6 +2397,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -1953,8 +2431,62 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
+        cx.notify();
+    }
+
+    /// Open the Bookmarks tab, or switch to it if already open.
+    /// Also handles "open bookmark URL" when triggered from within the bookmarks panel.
+    pub fn open_bookmarks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // If triggered from a bookmark click, open the URL instead.
+        if let Some(url) = crate::tabs::take_pending_bookmark_open() {
+            self.open_webview(url, window, cx);
+            return;
+        }
+
+        if let Some(tab) = self.tabs.iter().find(|t| t.kind == TabKind::Bookmarks) {
+            let id = tab.id;
+            if let Ok(entity) = tab.entity.clone().downcast::<BookmarksTab>() {
+                entity.update(cx, |tab, _cx| tab.refresh());
+            }
+            self.active_tab_id = Some(id);
+            cx.notify();
+            return;
+        }
+        let id = self.alloc_id();
+        let entity = cx.new(|cx| BookmarksTab::new(cx));
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::Bookmarks,
+            title: "Bookmarks".to_string(),
+            icon: IconName::Star,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+            loading_progress: 0.0,
+            reader_active: false,
+            readerable: false,
+            dot_verification: None,
+        });
+        self.active_tab_id = Some(id);
+        cx.notify();
+    }
+
+    /// Toggle bookmark for the active tab's URL.
+    pub fn toggle_bookmark(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(active_id) = self.active_tab_id else { return };
+        let Some(tab) = self.tabs.iter().find(|t| t.id == active_id) else { return };
+
+        // Only WebView tabs have bookmarkable URLs.
+        let TabKind::WebView { ref url } = tab.kind else { return };
+        let url = url.clone();
+        let title = tab.title.clone();
+
+        crate::bookmarks::toggle(&url, &title);
         cx.notify();
     }
 
@@ -2085,6 +2617,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2119,6 +2652,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2152,6 +2686,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
         self.url_input
@@ -2165,16 +2700,32 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.open_spa_with_verification(bundle, None, window, cx);
+    }
+
+    pub fn open_spa_with_verification(
+        &mut self,
+        bundle: ProdBundle,
+        verification: Option<DotVerification>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let id = self.alloc_id();
         let app_id = bundle.manifest.app.id.clone();
-        let title = bundle.manifest.app.name.clone();
+        let app_name = bundle.manifest.app.name.clone();
         let entity = cx.new(|cx| {
             SpaTab::new(bundle, window, cx)
         });
+        // Show dot://name.dot if we have verification, otherwise derive from app name.
+        let url_display = if let Some(ref dv) = verification {
+            format!("dot://{}.dot", dv.name)
+        } else {
+            format!("dot://{}.dot", app_name)
+        };
         self.tabs.push(TabEntry {
             id,
             kind: TabKind::Spa { app_id: app_id.clone() },
-            title,
+            title: app_name,
             icon: IconName::Globe,
             entity: entity.into(),
             pinned: false,
@@ -2184,16 +2735,17 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: verification,
         });
         self.active_tab_id = Some(id);
         self.url_input
-            .update(cx, |s, inner_cx| s.set_value(app_id, window, inner_cx));
+            .update(cx, |s, inner_cx| s.set_value(url_display, window, inner_cx));
         cx.notify();
     }
 
-    /// Resolve a `dot://<name>.dot` URL to a local .prod bundle and open it as an SPA tab.
-    /// Phase 1: local resolution from examples/ directory.
-    /// Phase 2 (future): on-chain DOTNS resolution via Smoldot light client.
+    /// Resolve a `dot://<name>.dot` URL: immediately opens a loading tab,
+    /// resolves the bundle (local or on-chain), then shows permissions for
+    /// user approval before opening the actual SPA.
     pub fn resolve_dot_url(
         &mut self,
         url: &str,
@@ -2210,45 +2762,111 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             return;
         }
 
-        // Phase 1: look for a local .prod bundle at well-known paths.
-        // Use the executable's directory as base for relative lookups.
+        // Validate name: only alphanumeric, hyphens, underscores.
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+            log::warn!("[dot] invalid dot name (illegal chars): {name}");
+            return;
+        }
+
+        // Close any previous loading tab and clear pending state.
+        if let Some(prev) = self.pending_dot_load.take() {
+            self.tabs.retain(|t| t.id != prev.tab_id);
+        }
+        self.pending_dotns_validation = None;
+        self.dot_load_generation += 1;
+        let generation = self.dot_load_generation;
+
+        // ── Create loading tab immediately ──
+        let tab_id = self.alloc_id();
+        let name_owned = name.to_string();
+        let loading_entity = cx.new(|cx| DotLoadingTab::new(name_owned.clone(), cx));
+
+        // Subscribe to approve/deny events from the loading tab.
+        let sub = cx.subscribe(&loading_entity, Self::on_dot_loading_event);
+
+        let dot_url = format!("dot://{name}.dot");
+        self.tabs.push(TabEntry {
+            id: tab_id,
+            kind: TabKind::DotLoading { name: name_owned.clone() },
+            title: format!("{name}.dot"),
+            icon: IconName::Globe,
+            entity: loading_entity.clone().into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+            loading_progress: 0.5, // triggers violet border glow during load
+            reader_active: false,
+            readerable: false,
+            dot_verification: None,
+        });
+        self.active_tab_id = Some(tab_id);
+        self.url_input
+            .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+
+        self.pending_dot_load = Some(PendingDotLoad {
+            tab_id,
+            bundle: None,
+            verification: None,
+            _subscription: sub,
+        });
+        cx.notify();
+
+        // ── Phase 1: look for a local .prod bundle ──
         let exe_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let cwd = std::env::current_dir().ok();
 
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-        // Relative to CWD
         if let Some(ref dir) = cwd {
             candidates.push(dir.join(format!("examples/{name}.prod")));
             candidates.push(dir.join(format!("{name}.prod")));
         }
-        // Relative to exe dir (for bundled apps)
         if let Some(ref dir) = exe_dir {
             candidates.push(dir.join(format!("examples/{name}.prod")));
             candidates.push(dir.join(format!("{name}.prod")));
         }
-        // Relative to the workspace root (compile-time)
-        let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent().unwrap().parent().unwrap().to_path_buf();
-        candidates.push(workspace_root.join(format!("examples/{name}.prod")));
-        candidates.push(workspace_root.join(format!("{name}.prod")));
-        // Also check some well-known absolute paths
+        #[cfg(debug_assertions)]
+        {
+            let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent().unwrap().parent().unwrap().to_path_buf();
+            candidates.push(workspace_root.join(format!("examples/{name}.prod")));
+            candidates.push(workspace_root.join(format!("{name}.prod")));
+        }
         if let Some(home) = std::env::var_os("HOME") {
             let home = std::path::PathBuf::from(home);
             candidates.push(home.join(format!(".epoca/apps/{name}.prod")));
         }
 
+        log::info!("[dot] checking {} local candidates for: {name}", candidates.len());
         for candidate in &candidates {
+            log::debug!("[dot] candidate: {} (exists={})", candidate.display(), candidate.exists());
             if candidate.exists() {
                 match ProdBundle::from_file(candidate) {
                     Ok(bundle) => {
                         if bundle.manifest.app.app_type == "spa" {
-                            log::info!("[dot] loaded SPA: {}", candidate.display());
-                            self.open_spa(bundle, window, cx);
-                            let dot_url = format!("dot://{name}.dot");
-                            self.url_input
-                                .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+                            log::info!("[dot] loaded local SPA: {}", candidate.display());
+                            let verification = DotVerification {
+                                name: name_owned.clone(),
+                                status: DotStatus::Local,
+                                cid: None,
+                                owner: None,
+                            };
+                            // Extract permissions before moving bundle.
+                            let perms = bundle.manifest.permissions.clone();
+                            // Store bundle first so it's available if the user
+                            // clicks Allow immediately after permission review.
+                            if let Some(ref mut load) = self.pending_dot_load {
+                                load.bundle = Some(bundle);
+                                load.verification = Some(verification);
+                            }
+                            // Fast-transition: resolved → fetched → permission review.
+                            loading_entity.update(cx, |tab, cx| {
+                                tab.set_fetching("local".into());
+                                tab.set_permission_review(perms, true);
+                                cx.notify();
+                            });
                             return;
                         } else {
                             log::warn!("[dot] {} is not an SPA bundle (app_type={:?})", candidate.display(), bundle.manifest.app.app_type);
@@ -2261,54 +2879,139 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             }
         }
 
-        // Phase 2: on-chain DOTNS resolution.
+        // ── Phase 2: on-chain DOTNS resolution ──
         log::info!("[dot] no local bundle, trying DOTNS for: {name}");
-        let dot_url = format!("dot://{name}.dot");
-        self.url_input
-            .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+        self.pending_dotns_validation = Some(DotVerification {
+            name: name_owned.clone(),
+            status: DotStatus::Pending,
+            cid: None,
+            owner: None,
+        });
 
-        let name_owned = name.to_string();
+        let loading_entity_weak = loading_entity.downgrade();
         cx.spawn(async move |this: WeakEntity<Self>, cx| {
-            // Run blocking DOTNS resolution + IPFS fetch on background thread.
             let name_for_resolve = name_owned.clone();
+            // Lazy resolution: fetch only CID + manifest.toml (not all assets).
             let result = cx
                 .background_executor()
-                .spawn(async move { epoca_chain::dotns::resolve_and_fetch(&name_for_resolve) })
+                .spawn(async move { epoca_chain::dotns::resolve_lazy(&name_for_resolve) })
                 .await;
 
             match result {
-                Ok(assets) => {
+                Ok(resolution) => {
                     let _ = cx.update(|cx| {
-                        if let Some(entity) = this.upgrade() {
+                        if let Some(wb_entity) = this.upgrade() {
+                            // Check generation to discard stale results.
+                            let is_current = wb_entity.read(cx).dot_load_generation == generation;
+                            if !is_current {
+                                log::info!("[dotns] discarding stale result for {name_owned} (generation mismatch)");
+                                return;
+                            }
+                        }
+                        // Update loading tab (manifest already fetched).
+                        if let Some(le) = loading_entity_weak.upgrade() {
+                            le.update(cx, |tab, cx| {
+                                tab.set_fetching(resolution.cid.clone());
+                                cx.notify();
+                            });
+                        }
+                        if let Some(wb_entity) = this.upgrade() {
                             let name_for_bundle = name_owned.clone();
-                            entity.update(cx, |wb, cx| {
-                                let manifest = epoca_sandbox::bundle::ProdManifest {
-                                    app: epoca_sandbox::bundle::AppMeta {
-                                        id: format!("dot.{name_for_bundle}"),
-                                        name: name_for_bundle.clone(),
-                                        version: "0.0.0".into(),
-                                        app_type: "spa".into(),
-                                        icon: None,
-                                    },
-                                    permissions: Some(epoca_sandbox::bundle::PermissionsMeta {
-                                        network: None,
-                                        sign: true,
-                                        statement_store: false,
-                                        media: vec![],
-                                    }),
-                                    sandbox: None,
-                                    webapp: Some(epoca_sandbox::bundle::WebAppMeta {
-                                        entry: "index.html".into(),
-                                        sandbox: "strict".into(),
-                                    }),
+                            wb_entity.update(cx, |wb, cx| {
+                                // Parse manifest from fetched bytes, or synthesise
+                                // a default for raw web apps (no manifest.toml).
+                                let has_manifest = resolution.manifest_bytes.is_some();
+                                let manifest: epoca_sandbox::bundle::ProdManifest = if let Some(raw) = resolution.manifest_bytes {
+                                    let manifest_str = match String::from_utf8(raw) {
+                                        Ok(s) => s,
+                                        Err(_) => {
+                                            log::warn!("[dotns] manifest.toml is not valid UTF-8");
+                                            return;
+                                        }
+                                    };
+                                    match toml::from_str(&manifest_str) {
+                                        Ok(m) => m,
+                                        Err(e) => {
+                                            log::warn!("[dotns] failed to parse manifest.toml: {e}");
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    // Raw web app (e.g. Product SDK app deployed
+                                    // directly to IPFS without a .prod bundle).
+                                    log::info!("[dotns] no manifest — using default SPA manifest for {name_for_bundle}");
+                                    epoca_sandbox::bundle::ProdManifest {
+                                        app: epoca_sandbox::bundle::AppMeta {
+                                            id: name_for_bundle.clone(),
+                                            name: name_for_bundle.clone(),
+                                            version: "0.0.0".into(),
+                                            app_type: "spa".into(),
+                                            icon: None,
+                                        },
+                                        permissions: Some(epoca_sandbox::bundle::PermissionsMeta {
+                                            network: None,
+                                            sign: false,
+                                            statements: false,
+                                            chain: false,
+                                            data: false,
+                                            media: vec![],
+                                        }),
+                                        sandbox: None,
+                                        webapp: Some(epoca_sandbox::bundle::WebAppMeta {
+                                            entry: "index.html".into(),
+                                            sandbox: "strict".into(),
+                                            chain: "paseo-asset-hub".into(),
+                                        }),
+                                    }
+                                };
+
+                                let verification = DotVerification {
+                                    name: name_for_bundle.clone(),
+                                    status: DotStatus::Verified,
+                                    cid: Some(resolution.cid.clone()),
+                                    owner: resolution.owner,
                                 };
                                 let bundle = ProdBundle {
                                     manifest,
                                     program_bytes: None,
-                                    assets,
+                                    assets: HashMap::new(),
+                                    ipfs_cid: Some(resolution.cid.clone()),
                                 };
-                                log::info!("[dotns] opening SPA: {name_for_bundle}");
-                                wb.pending_dotns_bundle = Some(bundle);
+
+                                // Check if this CID was already approved — auto-open.
+                                let already_approved = wb.approved_dot_apps
+                                    .get(&name_for_bundle)
+                                    .map(|approved_cid| approved_cid == &resolution.cid)
+                                    .unwrap_or(false);
+
+                                if already_approved {
+                                    log::info!("[dotns] auto-approved (same CID): {name_for_bundle}");
+                                    if let Some(load) = wb.pending_dot_load.take() {
+                                        wb.tabs.retain(|t| t.id != load.tab_id);
+                                    }
+                                    wb.pending_dot_approve = Some((bundle, Some(verification)));
+                                } else {
+                                    let perms = bundle.manifest.permissions.clone();
+                                    // Store bundle before showing permission review,
+                                    // so it's available if the user clicks Allow.
+                                    if let Some(ref mut load) = wb.pending_dot_load {
+                                        load.bundle = Some(bundle);
+                                        load.verification = Some(verification);
+                                    }
+                                    if let Some(le) = loading_entity_weak.upgrade() {
+                                        le.update(cx, |tab, cx| {
+                                            tab.set_permission_review(perms, has_manifest);
+                                            cx.notify();
+                                        });
+                                    }
+                                    // Stop the border glow — loading is done.
+                                    if let Some(ref load) = wb.pending_dot_load {
+                                        if let Some(te) = wb.tabs.iter_mut().find(|t| t.id == load.tab_id) {
+                                            te.loading_progress = 0.0;
+                                        }
+                                    }
+                                }
+                                wb.pending_dotns_validation = None;
                                 cx.notify();
                             });
                         }
@@ -2316,9 +3019,80 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 }
                 Err(e) => {
                     log::warn!("[dotns] resolution failed for {name_owned}: {e}");
+                    let _ = cx.update(|cx| {
+                        // Check generation — discard stale errors.
+                        if let Some(wb_entity) = this.upgrade() {
+                            if wb_entity.read(cx).dot_load_generation != generation {
+                                return;
+                            }
+                        }
+                        if let Some(le) = loading_entity_weak.upgrade() {
+                            le.update(cx, |tab, cx| {
+                                tab.set_error(e.clone());
+                                cx.notify();
+                            });
+                        }
+                        if let Some(wb_entity) = this.upgrade() {
+                            wb_entity.update(cx, |wb, cx| {
+                                // Stop the border glow on error.
+                                if let Some(ref load) = wb.pending_dot_load {
+                                    if let Some(te) = wb.tabs.iter_mut().find(|t| t.id == load.tab_id) {
+                                        te.loading_progress = 0.0;
+                                    }
+                                }
+                                wb.pending_dotns_validation = Some(DotVerification {
+                                    name: name_owned.clone(),
+                                    status: DotStatus::Failed(e),
+                                    cid: None,
+                                    owner: None,
+                                });
+                                cx.notify();
+                            });
+                        }
+                    });
                 }
             }
         }).detach();
+    }
+
+    /// Handle Approved / Denied events from a DotLoadingTab.
+    fn on_dot_loading_event(
+        &mut self,
+        _entity: Entity<DotLoadingTab>,
+        event: &DotLoadingEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let load = match self.pending_dot_load.take() {
+            Some(l) => l,
+            None => return,
+        };
+
+        match event {
+            DotLoadingEvent::Approved => {
+                if let Some(bundle) = load.bundle {
+                    let verification = load.verification;
+                    // Record approval for this CID so subsequent loads skip the prompt.
+                    if let Some(ref v) = verification {
+                        if let Some(ref cid) = v.cid {
+                            self.approved_dot_apps.insert(v.name.clone(), cid.clone());
+                            crate::session::save_approved_apps(&self.approved_dot_apps);
+                        }
+                    }
+                    // Replace the loading tab with the real SPA tab.
+                    let tab_id = load.tab_id;
+                    self.tabs.retain(|t| t.id != tab_id);
+                    // Need a window ref — defer to pending field picked up in render.
+                    self.pending_dot_approve = Some((bundle, verification));
+                } else {
+                    log::warn!("[dot] approved but no bundle available");
+                }
+            }
+            DotLoadingEvent::Denied => {
+                // Defer close to render where we have window access.
+                self.pending_dot_deny_tab = Some(load.tab_id);
+            }
+        }
+        cx.notify();
     }
 
     pub fn open_editor(
@@ -2348,6 +3122,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
         });
         self.active_tab_id = Some(id);
         cx.notify();
@@ -2514,6 +3289,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
                     });
                     restored_count += 1;
                 }
@@ -2545,6 +3321,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
                     });
                     restored_count += 1;
                 }
@@ -2571,6 +3348,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
                     });
                     restored_count += 1;
                 }
@@ -2594,6 +3372,31 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
+                        dot_verification: None,
+                    });
+                    restored_count += 1;
+                }
+                TabKind::Bookmarks => {
+                    // Deduplicate — only one bookmarks tab allowed.
+                    if self.tabs.iter().any(|t| t.kind == TabKind::Bookmarks) {
+                        continue;
+                    }
+                    let id = self.alloc_id();
+                    let entity = cx.new(|cx| BookmarksTab::new(cx));
+                    self.tabs.push(TabEntry {
+                        id,
+                        kind: TabKind::Bookmarks,
+                        title: "Bookmarks".to_string(),
+                        icon: IconName::Star,
+                        entity: entity.into(),
+                        pinned: stab.pinned,
+                        nav: None,
+                        favicon_url: None,
+                        context_id: None,
+                        loading_progress: 0.0,
+                        reader_active: false,
+                        readerable: false,
+                        dot_verification: None,
                     });
                     restored_count += 1;
                 }
@@ -2895,6 +3698,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         // traffic light center (y=12 + radius 6 = 18). Nav buttons pushed right
         // in overlay mode so pin icon sits beside traffic lights, nav at far right.
         let is_overlay = self.sidebar_mode == SidebarMode::Overlay;
+        let fs = is_window_fullscreen();
         let top_row = div()
             .flex()
             .items_center()
@@ -2902,7 +3706,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .px(px(8.0))
             .h(px(if is_overlay { 28.0 } else { 38.0 }))
             .flex_shrink_0()
-            .child(div().w(px(68.0)).flex_shrink_0()) // traffic-light reserve
+            .when(!fs, |d| d.child(div().w(px(68.0)).flex_shrink_0())) // traffic-light reserve (not in fullscreen)
             .child(
                 Button::new("sidebar-mode")
                     .ghost()
@@ -2947,10 +3751,34 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .unwrap_or_default();
         let active_ctx = self.active_context.clone();
 
-        // Context indicator dot — sits inside the URL bar prefix, left of the globe.
-        // Colored dot = named context, EyeOff icon = private. Click opens dropdown.
-        //
-        let url_prefix: AnyElement = if experimental_contexts_on {
+        // ── .dot verification badge ───────────────────────────────────────
+        // When active tab is a .dot SPA, show a shield icon in the URL prefix.
+        // Falls back to pending DOTNS validation (shown during on-chain resolution).
+        let active_dot_verification = self.active_tab_id
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+            .and_then(|t| t.dot_verification.clone())
+            .or_else(|| self.pending_dotns_validation.clone());
+
+        let url_prefix: AnyElement = if let Some(ref dv) = active_dot_verification {
+            let (dot_icon, dot_color): (IconName, Rgba) = match &dv.status {
+                DotStatus::Verified => (IconName::CircleCheck, rgba(0x22c55eff)),
+                DotStatus::Pending => (IconName::LoaderCircle, rgba(0xf59e0bff)),
+                DotStatus::Failed(_) => (IconName::CircleX, rgba(0xef4444ff)),
+                DotStatus::Local => (IconName::Info, rgba(0x8b8b8bff)),
+            };
+            div()
+                .id("dot-shield")
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.dot_popover_open = !this.dot_popover_open;
+                    cx.notify();
+                }))
+                .child(Icon::new(dot_icon).size(px(13.0)).text_color(dot_color))
+                .into_any_element()
+        } else if experimental_contexts_on {
             let dot_color = match &active_ctx {
                 None => None,
                 Some(id) => all_contexts
@@ -3125,6 +3953,212 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             None
         };
 
+        // ── .dot verification inline panel ──────────────────────────────────
+        // Rendered inline between URL bar and tabs (not absolute/popover).
+        let dot_panel: Option<Div> = if self.dot_popover_open {
+            if let Some(ref dv) = active_dot_verification {
+                let (header_icon, header_color): (IconName, Rgba) = match &dv.status {
+                    DotStatus::Verified => (IconName::CircleCheck, rgba(0x22c55eff)),
+                    DotStatus::Pending => (IconName::LoaderCircle, rgba(0xf59e0bff)),
+                    DotStatus::Failed(_) => (IconName::CircleX, rgba(0xef4444ff)),
+                    DotStatus::Local => (IconName::Info, rgba(0x8b8b8bff)),
+                };
+                let status_text = match &dv.status {
+                    DotStatus::Verified => "Verified on-chain",
+                    DotStatus::Pending => "Validating",
+                    DotStatus::Failed(_) => "Resolution failed",
+                    DotStatus::Local => "Loaded locally",
+                };
+                let status_color: Rgba = match &dv.status {
+                    DotStatus::Verified => rgba(0x22c55eff),
+                    DotStatus::Pending => rgba(0xf59e0bff),
+                    DotStatus::Failed(_) => rgba(0xef4444ff),
+                    DotStatus::Local => rgba(0x8b8b8bff),
+                };
+                let is_pending = matches!(dv.status, DotStatus::Pending);
+                let cid_display = dv.cid.as_deref().map(|c| {
+                    if c.len() > 20 {
+                        format!("{}...{}", &c[..10], &c[c.len()-6..])
+                    } else {
+                        c.to_string()
+                    }
+                });
+                let owner_display = dv.owner.as_deref().map(|o| {
+                    if o.len() > 20 {
+                        format!("{}...{}", &o[..8], &o[o.len()-6..])
+                    } else {
+                        o.to_string()
+                    }
+                });
+                let name_str = dv.name.clone();
+
+                let label_style = |label: &str| -> AnyElement {
+                    div()
+                        .w(px(52.0))
+                        .text_xs()
+                        .text_color(text_muted)
+                        .flex_shrink_0()
+                        .child(label.to_string())
+                        .into_any_element()
+                };
+
+                let info_row = |label: &str, value: String, color: Rgba| -> AnyElement {
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(10.0))
+                        .py(px(3.0))
+                        .child(label_style(label))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(color)
+                                .truncate()
+                                .child(value),
+                        )
+                        .into_any_element()
+                };
+
+                Some(
+                    div()
+                        .mx(px(8.0))
+                        .mb(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(rgba(0xffffff0a))
+                        .border_1()
+                        .border_color(rgba(0xffffff14))
+                        .flex()
+                        .flex_col()
+                        // Header: shield + name.dot + status
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .pt(px(8.0))
+                                .pb(px(4.0))
+                                .child(Icon::new(header_icon).size(px(13.0)).text_color(header_color))
+                                .child(
+                                    div().flex().child(
+                                        div().text_sm().text_color(rgba(0xffffffee)).child(name_str),
+                                    ).child(
+                                        div().text_sm().text_color(text_muted).child(".dot"),
+                                    ),
+                                )
+                        )
+                        // Status line
+                        .child(
+                            div()
+                                .px(px(10.0))
+                                .pb(px(4.0))
+                                .text_xs()
+                                .text_color(status_color)
+                                .child(status_text)
+                        )
+                        // Separator
+                        .child(div().h(px(1.0)).mx(px(6.0)).my(px(2.0)).bg(rgba(0xffffff14)))
+                        // CID
+                        .child(info_row("CID", cid_display.unwrap_or_else(|| if is_pending { "Resolving...".to_string() } else { "—".to_string() }), rgba(0xffffffcc)))
+                        // Owner
+                        .child(info_row("OWNER", owner_display.unwrap_or_else(|| if is_pending { "Resolving...".to_string() } else { "Unavailable".to_string() }), rgba(0xffffffcc)))
+                        // Honor
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(10.0))
+                                .py(px(3.0))
+                                .pb(px(6.0))
+                                .child(label_style("HONOR"))
+                                .child(
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgba(0xffffff14))
+                                        .text_xs()
+                                        .text_color(text_muted)
+                                        .child("Unknown"),
+                                )
+                        )
+                        // Separator
+                        .child(div().h(px(1.0)).mx(px(6.0)).my(px(2.0)).bg(rgba(0xffffff14)))
+                        // Permissions header (collapsible)
+                        .child(
+                            div()
+                                .id("dot-permissions-toggle")
+                                .flex()
+                                .items_center()
+                                .gap(px(4.0))
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .cursor_pointer()
+                                .rounded(px(4.0))
+                                .hover(|d| d.bg(rgba(0xffffff0a)))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.dot_permissions_expanded = !this.dot_permissions_expanded;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    Icon::new(if self.dot_permissions_expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                                        .size(px(10.0))
+                                        .text_color(text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(text_muted)
+                                        .child("Sandbox"),
+                                )
+                        )
+                        // Permissions rows (when expanded)
+                        .when(self.dot_permissions_expanded, |d| {
+                            let perm_row = |icon: IconName, color: Rgba, label: &str, value: &str, value_color: Rgba| -> AnyElement {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
+                                    .px(px(10.0))
+                                    .pl(px(24.0))
+                                    .py(px(2.0))
+                                    .child(Icon::new(icon).size(px(10.0)).text_color(color))
+                                    .child(
+                                        div()
+                                            .w(px(72.0))
+                                            .text_xs()
+                                            .text_color(rgba(0xffffffaa))
+                                            .flex_shrink_0()
+                                            .child(label.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(value_color)
+                                            .child(value.to_string()),
+                                    )
+                                    .into_any_element()
+                            };
+                            let green = rgba(0x22c55eff);
+                            let red = rgba(0xef4444ff);
+                            let amber = rgba(0xf59e0bff);
+                            d.child(perm_row(IconName::Check, green, "Chain (WSS)", "Allowed", green))
+                             .child(perm_row(IconName::CircleX, red, "HTTP / Fetch", "Blocked", red))
+                             .child(perm_row(IconName::Check, amber, "Wallet signing", "With approval", amber))
+                             .child(perm_row(IconName::CircleX, red, "iFrames", "Blocked", red))
+                             .child(div().h(px(4.0))) // bottom padding
+                        }),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Backdrop is now rendered at the root level (Render::render)
         // so it covers the full window, not just the sidebar.
 
@@ -3136,6 +4170,13 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .and_then(|id| self.tabs.iter().find(|t| t.id == id))
             .map(|t| t.reader_active)
             .unwrap_or(false);
+        let (active_is_webview, active_is_bookmarked) = self.active_tab_id
+            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
+            .map(|t| match &t.kind {
+                TabKind::WebView { url } => (true, crate::bookmarks::is_bookmarked(url)),
+                _ => (false, false),
+            })
+            .unwrap_or((false, false));
 
         let url_row = div()
             .id("url-bar")
@@ -3188,6 +4229,34 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             this.toggle_reader_mode(cx);
                         })),
                 )
+            })
+            .when(active_is_webview, |d| {
+                d.child(
+                    div()
+                        .id("bookmark-btn")
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .mr(px(4.0))
+                        .rounded(px(4.0))
+                        .hover(|d| d.bg(rgba(0xffffff14)))
+                        .child(
+                            Icon::new(if active_is_bookmarked {
+                                IconName::Star
+                            } else {
+                                IconName::StarOff
+                            })
+                                .size(px(14.0))
+                                .text_color(if active_is_bookmarked {
+                                    rgba(0xf59e0bff) // amber for bookmarked
+                                } else {
+                                    rgba(0xffffffaa)
+                                }),
+                        )
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_bookmark(window, cx);
+                        })),
+                )
             });
 
         // ── Context color lookup ─────────────────────────────────────────
@@ -3205,6 +4274,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         // ── Helper: build one tab row ─────────────────────────────────────
         // Returns AnyElement so we can collect pinned and regular tabs
         // into Vecs without naming the concrete type.
+        let dragging_id = self.dragging_tab.as_ref().filter(|d| d.active).map(|d| d.tab_id);
+        let drag_accent = rgba(0x8a5cff66_u32); // electric violet, 40% opacity
         let make_tab_row = |tab_id: u64,
                             icon: IconName,
                             favicon_url: Option<String>,
@@ -3229,6 +4300,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             // reqwest + gpui::Image::from_bytes (backlogged). Show the fallback
             // icon for now.
             let _ = favicon_url;
+            let is_dragging = dragging_id == Some(tab_id);
             div()
                 .id(ElementId::Integer(tab_id))
                 .flex()
@@ -3240,8 +4312,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .w_full()
                 .rounded(px(5.0))
                 .cursor_pointer()
-                .when(is_active, |d| d.bg(item_active_bg))
-                .when(!is_active, |d| d.hover(|d| d.bg(item_hover_bg)))
+                .when(is_dragging, |d| d.opacity(0.5).bg(item_active_bg))
+                .when(is_active && !is_dragging, |d| d.bg(item_active_bg))
+                .when(!is_active && !is_dragging, |d| d.hover(|d| d.bg(item_hover_bg)))
                 // Context dot — colored circle left of icon when tab has a context
                 .when_some(context_color, |d, color| {
                     d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color).flex_shrink_0())
@@ -3279,57 +4352,81 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     )
                 })
                 .child(close_btn)
+                .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |this, ev: &gpui::MouseDownEvent, _window, cx| {
+                    // Start potential drag on mouse-down (actual drag activates after threshold).
+                    this.dragging_tab = Some(DragState {
+                        tab_id,
+                        active: false,
+                        start_y: ev.position.y.as_f32(),
+                        current_y: ev.position.y.as_f32(),
+                    });
+                    cx.notify();
+                }))
                 .on_click(cx.listener(move |this, _ev, window, cx| {
-                    this.switch_tab(tab_id, window, cx);
+                    // Only switch tab if we weren't actively dragging.
+                    if this.dragging_tab.as_ref().map_or(true, |d| !d.active) {
+                        this.switch_tab(tab_id, window, cx);
+                    }
+                    this.dragging_tab = None;
                 }))
                 .into_any_element()
         };
 
+        // ── Helper: build tab list with drop indicator ───────────────────
+        // When dragging, a 2px accent line is shown above the dragged tab
+        // to indicate the drop position.
+        let drop_indicator = || -> AnyElement {
+            div()
+                .h(px(2.0))
+                .mx(px(6.0))
+                .rounded(px(1.0))
+                .bg(drag_accent)
+                .into_any_element()
+        };
+
         // ── Pinned tabs ───────────────────────────────────────────────────
-        let pinned_items: Vec<AnyElement> = self
-            .tabs
-            .iter()
-            .filter(|t| t.pinned)
-            .map(|t| {
-                let cc = context_color_for(&t.context_id);
-                let wc = t.entity.clone().downcast::<WebViewTab>()
-                    .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
-                make_tab_row(
-                    t.id,
-                    t.icon.clone(),
-                    t.favicon_url.clone(),
-                    SharedString::from(t.title.clone()),
-                    Some(t.id) == self.active_tab_id,
-                    true,
-                    cc,
-                    wc,
-                    cx,
-                )
-            })
-            .collect();
+        let mut pinned_items: Vec<AnyElement> = Vec::new();
+        for t in self.tabs.iter().filter(|t| t.pinned) {
+            if dragging_id == Some(t.id) {
+                pinned_items.push(drop_indicator());
+            }
+            let cc = context_color_for(&t.context_id);
+            let wc = t.entity.clone().downcast::<WebViewTab>()
+                .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
+            pinned_items.push(make_tab_row(
+                t.id,
+                t.icon.clone(),
+                t.favicon_url.clone(),
+                SharedString::from(t.title.clone()),
+                Some(t.id) == self.active_tab_id,
+                true,
+                cc,
+                wc,
+                cx,
+            ));
+        }
 
         // ── Regular (non-pinned) tabs ─────────────────────────────────────
-        let regular_items: Vec<AnyElement> = self
-            .tabs
-            .iter()
-            .filter(|t| !t.pinned)
-            .map(|t| {
-                let cc = context_color_for(&t.context_id);
-                let wc = t.entity.clone().downcast::<WebViewTab>()
-                    .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
-                make_tab_row(
-                    t.id,
-                    t.icon.clone(),
-                    t.favicon_url.clone(),
-                    SharedString::from(t.title.clone()),
-                    Some(t.id) == self.active_tab_id,
-                    false,
-                    cc,
-                    wc,
-                    cx,
-                )
-            })
-            .collect();
+        let mut regular_items: Vec<AnyElement> = Vec::new();
+        for t in self.tabs.iter().filter(|t| !t.pinned) {
+            if dragging_id == Some(t.id) {
+                regular_items.push(drop_indicator());
+            }
+            let cc = context_color_for(&t.context_id);
+            let wc = t.entity.clone().downcast::<WebViewTab>()
+                .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
+            regular_items.push(make_tab_row(
+                t.id,
+                t.icon.clone(),
+                t.favicon_url.clone(),
+                SharedString::from(t.title.clone()),
+                Some(t.id) == self.active_tab_id,
+                false,
+                cc,
+                wc,
+                cx,
+            ));
+        }
 
         // ── New-tab button ────────────────────────────────────────────────
         let new_tab_btn = div()
@@ -3372,6 +4469,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
 
         // ── Assemble ──────────────────────────────────────────────────────
         let tabs_area = div()
+            .id("tabs-area")
             .flex_1()
             .overflow_y_hidden()
             .flex()
@@ -3379,6 +4477,61 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .gap(px(2.0))
             .px(px(4.0))
             .pt(px(4.0))
+            // Drag tracking: mouse move updates drag position + reorders.
+            .on_mouse_move(cx.listener(move |this, ev: &gpui::MouseMoveEvent, _window, cx| {
+                let Some(ref mut drag) = this.dragging_tab else { return; };
+                let y = ev.position.y.as_f32();
+                let delta = (y - drag.start_y).abs();
+                // Activate drag after 4px threshold to avoid accidental drags.
+                if !drag.active && delta > 4.0 {
+                    drag.active = true;
+                }
+                if !drag.active { return; }
+                drag.current_y = y;
+
+                // Determine target index based on Y position within the tab list.
+                // Each tab row is 28px + 2px gap = 30px. Find which slot we're over.
+                let tab_id = drag.tab_id;
+                let is_pinned = this.tabs.iter().find(|t| t.id == tab_id).map_or(false, |t| t.pinned);
+
+                // Get indices of tabs in the same group.
+                let group_indices: Vec<usize> = this.tabs.iter().enumerate()
+                    .filter(|(_, t)| t.pinned == is_pinned)
+                    .map(|(i, _)| i)
+                    .collect();
+
+                if group_indices.is_empty() { return; }
+
+                let src_idx = match this.tabs.iter().position(|t| t.id == tab_id) {
+                    Some(i) => i,
+                    None => return,
+                };
+
+                // Relative Y from drag start determines direction + distance.
+                let row_h: f32 = 30.0; // 28px row + 2px gap
+                let offset_rows = ((y - drag.start_y) / row_h).round() as i32;
+                if offset_rows == 0 { return; }
+
+                let target_idx = (src_idx as i32 + offset_rows).max(0) as usize;
+                // Clamp within the same pinned/regular group.
+                let group_min = *group_indices.first().unwrap();
+                let group_max = *group_indices.last().unwrap();
+                let clamped = target_idx.clamp(group_min, group_max);
+
+                if clamped != src_idx {
+                    this.reorder_tab(tab_id, clamped);
+                    // Update start_y so further moves are relative to new position.
+                    if let Some(ref mut d) = this.dragging_tab {
+                        d.start_y = y;
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if this.dragging_tab.take().is_some() {
+                    cx.notify();
+                }
+            }))
             // Pinned section
             .when(!pinned_items.is_empty(), |d| {
                 d.child(
@@ -3411,6 +4564,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .text_color(gpui::white())
             .child(top_row)
             .child(url_row)
+            // .dot verification panel — inline between URL bar and tabs
+            .children(dot_panel)
             // Wallet connection consent banner — between URL bar and tab list
             .children(self.render_wallet_connect_banner(_window, cx).map(|b| b.into_any_element()))
             .child(tabs_area)
@@ -4169,6 +5324,57 @@ impl Workbench {
         cx.notify();
     }
 
+    fn approve_chain_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_chain_submit.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+
+        match crate::chain_api::submit_extrinsic(
+            req.chain,
+            req.webview_ptr,
+            req.id,
+            &req.call_data,
+        ) {
+            Ok(()) => {} // Response comes async
+            Err(e) => {
+                self.resolve_spa_js(req.webview_ptr, req.id, Err(&e), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_chain_submit(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_chain_submit.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+        self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected transaction"), cx);
+        cx.notify();
+    }
+
+    fn approve_data_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_data_connect.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+
+        match crate::data_api::approve_connection(req.conn_id) {
+            Ok(()) => {
+                // Connection approved — resolve with conn_id.
+                // The actual WebRTC handshake will push events asynchronously.
+                let js = format!("window.__epocaResolve({}, null, {})", req.id, req.conn_id);
+                self.evaluate_on_spa(req.webview_ptr, &js, cx);
+            }
+            Err(e) => {
+                self.resolve_spa_js(req.webview_ptr, req.id, Err(&e), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_data_connect(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_data_connect.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+        let _ = crate::data_api::deny_connection(req.conn_id);
+        self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected connection"), cx);
+        cx.notify();
+    }
+
     fn resolve_spa_js(&self, webview_ptr: usize, id: u64, result: Result<&str, &str>, cx: &Context<Self>) {
         let js = match result {
             Ok(val) => format!("window.__epocaResolve({}, null, '{}')", id, val),
@@ -4178,6 +5384,42 @@ impl Workbench {
             }
         };
         self.evaluate_on_spa(webview_ptr, &js, cx);
+    }
+
+    fn approve_hostapi_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_hostapi_sign.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+        let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+
+        let response = if cx.has_global::<crate::wallet::WalletGlobal>() {
+            match cx
+                .global_mut::<crate::wallet::WalletGlobal>()
+                .manager
+                .sign_root(&req.payload)
+            {
+                Ok(sig) => {
+                    log::info!("hostapi: signed {} bytes for app {}", sig.len(), req.app_id);
+                    epoca_hostapi::protocol::encode_sign_response(&req.request_id, is_raw, &sig)
+                }
+                Err(e) => {
+                    log::warn!("hostapi: sign failed: {e}");
+                    epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
+                }
+            }
+        } else {
+            epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
+        };
+        crate::host::send_response(req.webview_ptr, &response);
+        cx.notify();
+    }
+
+    fn deny_hostapi_sign(&mut self, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_hostapi_sign.take() else { return };
+        cx.set_global(OmniboxOpen(false));
+        let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+        let response = epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw);
+        crate::host::send_response(req.webview_ptr, &response);
+        cx.notify();
     }
 
     fn evaluate_on_spa(&self, webview_ptr: usize, js: &str, cx: &Context<Self>) {
@@ -4575,19 +5817,331 @@ impl Workbench {
                 ),
         )
     }
+
+    fn render_chain_submit_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_chain_submit.as_ref()?;
+        let app_id = req.app_id.clone();
+        let chain_name = req.chain.display_name().to_string();
+        let call_display = if req.call_data.len() > 200 {
+            format!("{}…", &req.call_data[..200])
+        } else {
+            req.call_data.clone()
+        };
+
+        Some(
+            div()
+                .id("chain-submit-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_chain_submit(cx);
+                }))
+                .child(
+                    div()
+                        .id("chain-submit-dialog")
+                        .w(px(400.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new("Transaction Request")
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(format!("{app_id} → {chain_name}"))
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .overflow_hidden()
+                                .max_h(px(120.0))
+                                .child(
+                                    gpui_component::label::Label::new(call_display)
+                                        .text_size(px(11.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("chain-submit-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_chain_submit(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("chain-submit-approve")
+                                        .primary()
+                                        .label("Submit")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_chain_submit(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    fn render_data_connect_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_data_connect.as_ref()?;
+        let app_id = req.app_id.clone();
+        let peer_display = if req.peer_address.len() > 20 {
+            format!("{}…{}", &req.peer_address[..8], &req.peer_address[req.peer_address.len()-8..])
+        } else {
+            req.peer_address.clone()
+        };
+
+        Some(
+            div()
+                .id("data-connect-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_data_connect(cx);
+                }))
+                .child(
+                    div()
+                        .id("data-connect-dialog")
+                        .w(px(380.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .on_click(|_, _, _| {})
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new("Connection Request")
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(format!("{app_id}"))
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(format!("Connect to peer: {peer_display}"))
+                                        .text_size(px(12.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("data-connect-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_data_connect(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("data-connect-approve")
+                                        .primary()
+                                        .label("Allow")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_data_connect(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    fn render_hostapi_sign_dialog(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let req = self.pending_hostapi_sign.as_ref()?;
+        let app_id = req.app_id.clone();
+        let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+        let kind = if is_raw { "Sign Raw Data" } else { "Sign Transaction" };
+        let payload_hex = if req.payload.len() > 60 {
+            format!("{}…", hex_encode(&req.payload[..60]))
+        } else {
+            hex_encode(&req.payload)
+        };
+
+        Some(
+            div()
+                .id("hostapi-sign-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .bg(rgba(0x00000088u32))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.deny_hostapi_sign(cx);
+                }))
+                .child(
+                    div()
+                        .id("hostapi-sign-dialog")
+                        .w(px(380.0))
+                        .p(px(20.0))
+                        .rounded(px(12.0))
+                        .bg(cx.theme().background)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .flex()
+                        .flex_col()
+                        .gap(px(12.0))
+                        .on_click(|_, _, _| {})
+                        // Title
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.0))
+                                .child(
+                                    Icon::new(IconName::TriangleAlert)
+                                        .size(px(20.0))
+                                        .text_color(cx.theme().warning),
+                                )
+                                .child(
+                                    gpui_component::label::Label::new(kind)
+                                        .text_size(px(15.0)),
+                                ),
+                        )
+                        // App ID
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    gpui_component::label::Label::new(app_id)
+                                        .text_size(px(13.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        // Payload preview
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(6.0))
+                                .bg(cx.theme().secondary)
+                                .overflow_hidden()
+                                .child(
+                                    gpui_component::label::Label::new(payload_hex)
+                                        .text_size(px(11.0))
+                                        .text_color(cx.theme().muted_foreground),
+                                ),
+                        )
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(8.0))
+                                .justify_end()
+                                .child(
+                                    Button::new("hostapi-sign-deny")
+                                        .ghost()
+                                        .label("Reject")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.deny_hostapi_sign(cx);
+                                        })),
+                                )
+                                .child(
+                                    Button::new("hostapi-sign-approve")
+                                        .primary()
+                                        .label("Sign")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.approve_hostapi_sign(cx);
+                                        })),
+                                ),
+                        ),
+                ),
+        )
+    }
 }
 
 impl Render for Workbench {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.process_pending_nav(window, cx);
 
-        // Open SPA from completed DOTNS resolution.
-        if let Some(bundle) = self.pending_dotns_bundle.take() {
-            let name = bundle.manifest.app.name.clone();
-            let dot_url = format!("dot://{name}.dot");
-            self.open_spa(bundle, window, cx);
-            self.url_input
-                .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+        // Handle deferred dot-loading approve/deny (subscribe callbacks lack window).
+        if let Some((bundle, verification)) = self.pending_dot_approve.take() {
+            self.open_spa_with_verification(bundle, verification, window, cx);
+        }
+        if let Some(tab_id) = self.pending_dot_deny_tab.take() {
+            self.close_tab(tab_id, window, cx);
         }
 
         let chrome_bg = rgb(0x2b2b2b);
@@ -4645,6 +6199,12 @@ impl Render for Workbench {
                     .map(|d| d.into_any_element());
                 let spa_sign_dialog = self.render_spa_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
+                let chain_submit_dialog = self.render_chain_submit_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let data_connect_dialog = self.render_data_connect_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let hostapi_sign_dialog = self.render_hostapi_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
 
                 // Backdrop to dismiss wallet popover when clicking outside
                 let wallet_backdrop = if self.wallet_popover_open {
@@ -4696,6 +6256,9 @@ impl Render for Workbench {
                     .children(wallet_dialog)
                     .children(btc_sign_dialog)
                     .children(spa_sign_dialog)
+                    .children(chain_submit_dialog)
+                    .children(data_connect_dialog)
+                    .children(hostapi_sign_dialog)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -4712,6 +6275,8 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| this.open_bookmarks(window, cx)))
+                    .on_action(cx.listener(|this, _: &AddBookmark, window, cx| this.toggle_bookmark(window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleReaderMode, _, cx| this.toggle_reader_mode(cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;
@@ -4828,6 +6393,12 @@ impl Render for Workbench {
                     .map(|d| d.into_any_element());
                 let spa_sign_dialog_overlay = self.render_spa_sign_dialog(window, cx)
                     .map(|d| d.into_any_element());
+                let chain_submit_dialog_overlay = self.render_chain_submit_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let data_connect_dialog_overlay = self.render_data_connect_dialog(window, cx)
+                    .map(|d| d.into_any_element());
+                let hostapi_sign_dialog_overlay = self.render_hostapi_sign_dialog(window, cx)
+                    .map(|d| d.into_any_element());
 
                 let wallet_backdrop_overlay = if self.wallet_popover_open {
                     Some(
@@ -4864,37 +6435,6 @@ impl Render for Workbench {
                     None
                 };
 
-                // In fullscreen overlay mode with sidebar hidden, show a small toolbar
-                // at the top-left so the user can access the sidebar pin button next to
-                // the traffic lights (which macOS manages in the fullscreen hover zone).
-                let active_is_framebuffer = self.active_tab().map_or(false, |t| {
-                    matches!(t.kind, TabKind::FramebufferApp { .. })
-                });
-                let fullscreen_bar = if is_window_fullscreen() && anim < 0.005 && !active_is_framebuffer {
-                    Some(
-                        div()
-                            .absolute()
-                            .top(px(SIDEBAR_TOP))
-                            .left(px(0.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .px(px(8.0))
-                            .h(px(28.0))
-                            .child(div().w(px(68.0)).flex_shrink_0()) // traffic-light zone
-                            .child(
-                                Button::new("sidebar-mode-fs")
-                                    .ghost()
-                                    .compact()
-                                    .icon(IconName::PanelLeft)
-                                    .on_click(cx.listener(Self::toggle_sidebar_mode)),
-                            )
-                            .into_any_element(),
-                    )
-                } else {
-                    None
-                };
-
                 div()
                     .relative()
                     .size_full()
@@ -4903,11 +6443,13 @@ impl Render for Workbench {
                     .children(wallet_backdrop_overlay)
                     .children(ctx_backdrop_overlay)
                     .children(sidebar)
-                    .children(fullscreen_bar)
                     .children(omnibox)
                     .children(wallet_dialog_overlay)
                     .children(btc_sign_dialog_overlay)
                     .children(spa_sign_dialog_overlay)
+                    .children(chain_submit_dialog_overlay)
+                    .children(data_connect_dialog_overlay)
+                    .children(hostapi_sign_dialog_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -4924,6 +6466,8 @@ impl Render for Workbench {
                     .on_action(cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenAppLibrary, window, cx| this.open_app_library(window, cx)))
                     .on_action(cx.listener(|this, _: &OpenApp, window, cx| this.handle_open_app(window, cx)))
+                    .on_action(cx.listener(|this, _: &OpenBookmarks, window, cx| this.open_bookmarks(window, cx)))
+                    .on_action(cx.listener(|this, _: &AddBookmark, window, cx| this.toggle_bookmark(window, cx)))
                     .on_action(cx.listener(|this, _: &ToggleReaderMode, _, cx| this.toggle_reader_mode(cx)))
                     .on_action(cx.listener(|this, _: &FindInPage, window, cx| {
                         this.find_open = !this.find_open;

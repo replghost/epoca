@@ -169,6 +169,38 @@ fn parse_network_rule(line: &str) -> Option<FilterRule> {
     })
 }
 
+/// Validate that a regex pattern is compatible with WebKit's content blocker
+/// regex engine, which supports a restricted subset of regular expressions.
+/// Returns `Ok(())` if valid, or `Err(reason)` describing the problem.
+pub fn validate_webkit_pattern(pattern: &str) -> Result<(), String> {
+    // WebKit content blockers don't support these constructs:
+    let unsupported: &[(&str, &str)] = &[
+        ("(?<=", "lookbehind assertions"),
+        ("(?<!", "negative lookbehind assertions"),
+        ("(?=", "lookahead assertions"),
+        ("(?!", "negative lookahead assertions"),
+        ("\\b", "word boundary anchors"),
+        ("\\B", "non-word boundary anchors"),
+    ];
+    for (token, desc) in unsupported {
+        if pattern.contains(token) {
+            return Err(format!("unsupported: {desc}"));
+        }
+    }
+    // Backreferences: \1 through \9
+    for i in 1..=9 {
+        let backref = format!("\\{i}");
+        if pattern.contains(&backref) {
+            return Err("unsupported: backreferences".to_string());
+        }
+    }
+    // Check that the pattern compiles as a valid regex at all
+    if regex::Regex::new(pattern).is_err() {
+        return Err("invalid regex syntax".to_string());
+    }
+    Ok(())
+}
+
 /// Convert an ABP-style URL pattern to a regex string.
 fn abp_pattern_to_regex(pattern: &str) -> String {
     if pattern.is_empty() || pattern == "*" {

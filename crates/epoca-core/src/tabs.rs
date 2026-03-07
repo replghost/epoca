@@ -54,6 +54,34 @@ pub struct TabEntry {
     pub reader_active: bool,
     /// Whether the page has article content suitable for reader mode.
     pub readerable: bool,
+    /// Verification info for .dot SPA tabs (None for non-dot tabs).
+    pub dot_verification: Option<DotVerification>,
+}
+
+/// Verification status for a .dot SPA loaded via DOTNS.
+#[derive(Debug, Clone)]
+pub enum DotStatus {
+    /// Currently resolving on-chain.
+    Pending,
+    /// Successfully resolved and loaded from chain.
+    Verified,
+    /// Resolution or loading failed.
+    Failed(String),
+    /// Loaded from local bundle (not verified on-chain).
+    Local,
+}
+
+/// On-chain verification info for a .dot app.
+#[derive(Debug, Clone)]
+pub struct DotVerification {
+    /// The .dot domain name (e.g. "mytestapp").
+    pub name: String,
+    /// Resolution status.
+    pub status: DotStatus,
+    /// IPFS CID (if resolved).
+    pub cid: Option<String>,
+    /// On-chain owner address (future).
+    pub owner: Option<String>,
 }
 
 /// The kind of tab that can be opened in the workbench.
@@ -68,6 +96,8 @@ pub enum TabKind {
     DeclarativeApp { path: String },
     WebView { url: String },
     Spa { app_id: String },
+    DotLoading { name: String },
+    Bookmarks,
 }
 
 
@@ -393,7 +423,7 @@ impl DeclarativeAppTab {
             .with_extension("manifest.toml");
 
         if manifest_path.exists() {
-            if let Ok(mut b) = self.broker.lock() {
+            if let Ok(mut b) = self.broker.lock().or_else(|e| { log::error!("broker lock poisoned, recovering: {e}"); Ok::<_, ()>(e.into_inner()) }) {
                 if let Err(e) = b.load_manifest_file(&app_id, &manifest_path) {
                     log::warn!("Failed to load manifest override for {app_id}: {e}");
                 } else {
@@ -413,7 +443,7 @@ impl DeclarativeAppTab {
                 perms.gpu,
                 perms.storage.as_deref().unwrap_or("0"),
             );
-            if let Ok(mut b) = self.broker.lock() {
+            if let Ok(mut b) = self.broker.lock().or_else(|e| { log::error!("broker lock poisoned, recovering: {e}"); Ok::<_, ()>(e.into_inner()) }) {
                 if let Err(e) = b.load_manifest(&app_id, &manifest_toml) {
                     log::warn!("Failed to load inline permissions for {app_id}: {e}");
                 }
@@ -639,7 +669,7 @@ impl SandboxAppTab {
         {
             let manifest_path = polkavm_path.with_extension("manifest.toml");
             if manifest_path.exists() {
-                if let Ok(mut b) = broker.lock() {
+                if let Ok(mut b) = broker.lock().or_else(|e| { log::error!("broker lock poisoned, recovering: {e}"); Ok::<_, ()>(e.into_inner()) }) {
                     if let Err(e) = b.load_manifest_file(&app_id, &manifest_path) {
                         log::warn!("Failed to load manifest for {}: {e}", app_id);
                     } else {
@@ -723,7 +753,7 @@ impl SandboxAppTab {
         // Check pending network fetches against the broker
         let fetches = sandbox.take_pending_fetches();
         if !fetches.is_empty() {
-            if let Ok(broker) = self.broker.lock() {
+            if let Ok(broker) = self.broker.lock().or_else(|e| { log::error!("broker lock poisoned, recovering: {e}"); Ok::<_, ()>(e.into_inner()) }) {
                 for (url, callback_id) in fetches {
                     match broker.check_network(&self.app_id, &url) {
                         PermissionResult::Allowed => {
@@ -762,7 +792,7 @@ impl SandboxAppTab {
 
     fn grant_pending_permission(&mut self, cx: &mut Context<Self>) {
         if let Some(perm) = self.pending_permission.take() {
-            if let Ok(mut broker) = self.broker.lock() {
+            if let Ok(mut broker) = self.broker.lock().or_else(|e| { log::error!("broker lock poisoned, recovering: {e}"); Ok::<_, ()>(e.into_inner()) }) {
                 broker.grant_network(&self.app_id, &perm.domain);
                 log::info!("User granted network access to {} for {}", perm.domain, self.app_id);
             }
@@ -1595,8 +1625,10 @@ impl Render for AppLibraryTab {
                                         // We use the GPUI event system via a custom channel.
                                         log::info!("[app-library] Launching {}", app_id);
                                         // Store bundle in a static for the workbench to pick up.
-                                        *PENDING_LAUNCH.lock().unwrap() = Some(bundle);
-                                        cx.dispatch_action(&OpenApp);
+                                        if let Ok(mut guard) = PENDING_LAUNCH.lock() {
+                                            *guard = Some(bundle);
+                                            cx.dispatch_action(&OpenApp);
+                                        }
                                     }
                                     Err(e) => {
                                         log::error!("[app-library] Failed to load {}: {e}", app_id);
@@ -1627,6 +1659,178 @@ pub fn take_pending_launch() -> Option<ProdBundle> {
 }
 
 // ---------------------------------------------------------------------------
+// Bookmarks Panel
+// ---------------------------------------------------------------------------
+
+use crate::bookmarks::{self, Bookmark};
+use crate::workbench::OpenBookmarks;
+
+pub struct BookmarksTab {
+    focus_handle: FocusHandle,
+    bookmarks: Vec<Bookmark>,
+}
+
+impl BookmarksTab {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            bookmarks: bookmarks::list(),
+        }
+    }
+
+    pub fn refresh(&mut self) {
+        self.bookmarks = bookmarks::list();
+    }
+}
+
+impl EventEmitter<PanelEvent> for BookmarksTab {}
+
+impl Focusable for BookmarksTab {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for BookmarksTab {
+    fn panel_name(&self) -> &'static str {
+        "BookmarksTab"
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Bookmarks"
+    }
+
+    fn dump(&self, _cx: &App) -> PanelState {
+        PanelState::new(self)
+    }
+}
+
+/// Channel for BookmarksTab to signal "open this URL" to the Workbench.
+static PENDING_BOOKMARK_OPEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Take a pending bookmark open URL (called by workbench).
+pub fn take_pending_bookmark_open() -> Option<String> {
+    PENDING_BOOKMARK_OPEN.lock().ok()?.take()
+}
+
+impl Render for BookmarksTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let bg = theme.background;
+        let fg = theme.foreground;
+        let muted = theme.muted_foreground;
+        let header = div()
+            .px_6()
+            .py_4()
+            .flex()
+            .items_center()
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(fg)
+                    .child("Bookmarks"),
+            );
+
+        let items = if self.bookmarks.is_empty() {
+            div()
+                .px_6()
+                .py_12()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .child(Label::new("No bookmarks yet").text_color(muted))
+                .child(Label::new("Use the star icon in the URL bar to bookmark pages").text_color(muted))
+                .into_any_element()
+        } else {
+            div()
+                .px_6()
+                .py_2()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(self.bookmarks.iter().enumerate().map(|(idx, bm)| {
+                    let url = bm.url.clone();
+                    let title = if bm.title.is_empty() { url.clone() } else { bm.title.clone() };
+
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(gpui::rgba(0xffffff0fu32)))
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(
+                            gpui_component::Icon::new(IconName::Globe)
+                                .size_4()
+                                .text_color(muted),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .flex()
+                                .flex_col()
+                                .gap(px(1.0))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(fg)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(title),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(muted)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(url.clone()),
+                                ),
+                        )
+                        .child(
+                            Button::new(("remove", idx))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .on_click({
+                                    let url_r = url.clone();
+                                    cx.listener(move |this, _ev, _window, cx| {
+                                        this.bookmarks = bookmarks::remove(&url_r);
+                                        cx.notify();
+                                    })
+                                }),
+                        )
+                        .on_mouse_down(gpui::MouseButton::Left, {
+                            let u = url.clone();
+                            cx.listener(move |_this, _ev, _window, cx| {
+                                if let Ok(mut guard) = PENDING_BOOKMARK_OPEN.lock() {
+                                    *guard = Some(u.clone());
+                                    cx.dispatch_action(&OpenBookmarks);
+                                }
+                            })
+                        })
+                }))
+                .into_any_element()
+        };
+
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .overflow_hidden()
+            .bg(bg)
+            .child(header)
+            .child(items)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WebView Panel
 // ---------------------------------------------------------------------------
 
@@ -1644,7 +1848,14 @@ function _send(t){
   if(!t||!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaMeta)return;
   window.webkit.messageHandlers.epocaMeta.postMessage({type:'titleChanged',title:t});
 }
-function _check(){var t=document.title;if(t)_send(t);}
+var _lastUrl='';
+function _sendUrl(){
+  var u=location.href;
+  if(!u||u===_lastUrl||!window.webkit||!window.webkit.messageHandlers||!window.webkit.messageHandlers.epocaMeta)return;
+  _lastUrl=u;
+  window.webkit.messageHandlers.epocaMeta.postMessage({type:'urlChanged',url:u});
+}
+function _check(){var t=document.title;if(t)_send(t);_sendUrl();}
 // Fire on initial load states
 if(document.readyState==='loading'){
   document.addEventListener('DOMContentLoaded',_check);
@@ -1866,6 +2077,103 @@ document.addEventListener('mouseout',function(e){
       window.webkit.messageHandlers.epocaCursor.postMessage({pointer:false});
   }
 },true);
+})();"#;
+
+/// Custom swipe-to-navigate — "the slit".
+///
+/// Tracks horizontal `wheel` events (trackpad two-finger swipe) when the page
+/// is at its scroll boundary. A razor-thin line of electric violet light appears
+/// at the viewport edge — like light leaking through a crack being forced open.
+/// Rubber-band resistance on width. Soft radial bloom behind. Pulses near
+/// threshold. Flashes on trigger. Fades on cancel. Page content never moves.
+const SWIPE_NAV_SCRIPT: &str = r#"(function(){
+if(window.__epocaSwipeNav)return;
+window.__epocaSwipeNav=true;
+var accum=0,dir=0,active=false,resetTmr=null,slit=null,bloom=null;
+var THRESH=150;
+function ease(x,m){return m*(1-Math.exp(-x*2.5/m));}
+function mk(side){
+  if(slit)rm(false);
+  slit=document.createElement('div');
+  var s=slit.style;
+  s.position='fixed';s.top='0';s[side]='0';s.width='0px';s.height='100%';
+  s.pointerEvents='none';s.zIndex='999999';s.opacity='0';
+  s.background='rgba(138,92,255,0.92)';
+  s.boxShadow='0 0 8px 2px rgba(138,92,255,0.4),0 0 2px 0 rgba(138,92,255,0.7)';
+  document.documentElement.appendChild(slit);
+  bloom=document.createElement('div');
+  var b=bloom.style;
+  b.position='fixed';b.top='0';b[side]='0';b.width='0px';b.height='100%';
+  b.pointerEvents='none';b.zIndex='999998';b.opacity='0';
+  b.background='radial-gradient(ellipse at '+side+' center,rgba(138,92,255,0.1) 0%,rgba(138,92,255,0) 100%)';
+  document.documentElement.appendChild(bloom);
+}
+function upd(progress){
+  if(!slit)return;
+  var t=Math.min(progress/THRESH,1);
+  var w=1+ease(progress,2.5);
+  var bw=ease(progress,45);
+  var a=0.5+t*0.5;
+  if(t>0.85){a=Math.min(a+Math.sin(Date.now()*0.012)*0.1,1);}
+  slit.style.width=w+'px';
+  slit.style.opacity=String(a);
+  slit.style.boxShadow='0 0 '+(8+t*12)+'px '+(2+t*4)+'px rgba(138,92,255,'+(0.25+t*0.3)+'),0 0 2px 0 rgba(138,92,255,'+(0.5+t*0.3)+')';
+  if(bloom){bloom.style.width=bw+'px';bloom.style.opacity=String(a*0.65);}
+}
+function rm(snap){
+  if(snap){
+    if(slit){
+      slit.style.transition='width 0.06s ease-out,opacity 0.12s ease-out,box-shadow 0.06s ease-out';
+      slit.style.width='6px';slit.style.opacity='1';
+      slit.style.boxShadow='0 0 30px 8px rgba(138,92,255,0.5),0 0 4px 1px rgba(138,92,255,0.9)';
+    }
+    if(bloom){
+      bloom.style.transition='width 0.06s ease-out,opacity 0.15s ease-out';
+      bloom.style.width='70px';bloom.style.opacity='0.85';
+    }
+    setTimeout(function(){
+      if(slit){slit.style.transition='opacity 0.12s ease-out';slit.style.opacity='0';}
+      if(bloom){bloom.style.transition='opacity 0.15s ease-out';bloom.style.opacity='0';}
+    },60);
+  }else{
+    if(slit){slit.style.transition='width 0.22s ease-out,opacity 0.22s ease-out';slit.style.width='0px';slit.style.opacity='0';}
+    if(bloom){bloom.style.transition='width 0.25s ease-out,opacity 0.25s ease-out';bloom.style.width='0px';bloom.style.opacity='0';}
+  }
+  var s=slit,b=bloom;
+  setTimeout(function(){if(s)s.remove();if(b)b.remove();},snap?250:280);
+  slit=null;bloom=null;
+}
+document.addEventListener('wheel',function(e){
+  if(Math.abs(e.deltaX)<Math.abs(e.deltaY)*0.5)return;
+  if(Math.abs(e.deltaX)<2)return;
+  var dEl=document.documentElement,dB=document.body;
+  var sL=Math.max(dEl.scrollLeft,dB.scrollLeft);
+  var sW=Math.max(dEl.scrollWidth,dB.scrollWidth);
+  var atL=sL<=0;
+  var atR=sL+window.innerWidth>=sW-1;
+  var goL=e.deltaX<0,goR=e.deltaX>0;
+  if(goL&&atL){
+    if(dir!==-1){accum=0;dir=-1;mk('left');}
+    accum+=Math.abs(e.deltaX);active=true;
+  }else if(goR&&atR){
+    if(dir!==1){accum=0;dir=1;mk('right');}
+    accum+=Math.abs(e.deltaX);active=true;
+  }else{
+    if(active){rm(false);accum=0;dir=0;active=false;}
+    return;
+  }
+  upd(accum);
+  if(resetTmr){clearTimeout(resetTmr);resetTmr=null;}
+  if(accum>=THRESH){
+    var d=dir;
+    rm(true);
+    var nav=window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaNav;
+    if(nav)nav.postMessage({type:d===-1?'goBack':'goForward'});
+    accum=0;dir=0;active=false;
+  }else{
+    resetTmr=setTimeout(function(){rm(false);accum=0;dir=0;active=false;},250);
+  }
+},{passive:true});
 })();"#;
 
 /// Intercepts right-click (contextmenu) on links and posts to epocaContextMenu.
@@ -2240,6 +2548,9 @@ fn install_shield_message_handler(wv: &gpui_component::wry::WebView, btc_wallet_
         // Only effective on macOS 13.3+ (WKWebView.isInspectable).
         let _: () = msg_send![obj, setInspectable: true];
 
+        // Custom swipe-to-navigate with resistance is handled by
+        // SWIPE_NAV_SCRIPT (JS) — no native gesture needed.
+
         crate::shield::register_nav_handler(uc);
         crate::shield::register_meta_handler(uc, webview_ptr);
         crate::shield::register_shield_handler(uc, webview_ptr);
@@ -2495,6 +2806,7 @@ impl WebViewTab {
             .with_initialization_script(LINK_STATUS_SCRIPT)
             .with_initialization_script(CMD_CLICK_SCRIPT)
             .with_initialization_script(RIPPLE_SCRIPT)
+            .with_initialization_script(SWIPE_NAV_SCRIPT)
             .with_initialization_script(FAVICON_SCRIPT)
             .with_initialization_script(CONTEXT_MENU_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
@@ -2744,12 +3056,16 @@ pub struct SpaTab {
     app_id: String,
     app_name: String,
     _entry: String,
+    chain: String,
+    permissions: Option<epoca_sandbox::bundle::PermissionsMeta>,
     webview: Option<Entity<webview::WebView>>,
     error: Option<String>,
     _inset_subscription: gpui::Subscription,
     _omnibox_subscription: gpui::Subscription,
     sidebar_blocker_ptr: u64,
     pub webview_ptr: usize,
+    /// Drives cursor hand/arrow via GPUI's window-level cursor override.
+    pub cursor_pointer: bool,
 }
 
 impl SpaTab {
@@ -2766,9 +3082,26 @@ impl SpaTab {
             .as_ref()
             .map(|w| w.entry.clone())
             .unwrap_or_else(|| "index.html".into());
+        let permissions = bundle.manifest.permissions.clone();
+        let chain = bundle
+            .manifest
+            .webapp
+            .as_ref()
+            .map(|w| w.chain.clone())
+            .unwrap_or_else(|| "paseo-asset-hub".into());
 
         // Register assets so the custom protocol handler can serve them.
-        crate::spa::register_spa_assets(&app_id, bundle.assets);
+        // IPFS-loaded bundles use lazy fetching; local bundles are eager.
+        if let Some(ref cid) = bundle.ipfs_cid {
+            crate::spa::register_spa_assets_lazy(
+                &app_id,
+                cid,
+                epoca_chain::dotns::ipfs_gateway(),
+                bundle.assets,
+            );
+        } else {
+            crate::spa::register_spa_assets(&app_id, bundle.assets);
+        }
 
         let _inset_subscription =
             cx.observe_global::<crate::OverlayLeftInset>(|this: &mut Self, cx| {
@@ -2814,15 +3147,27 @@ impl SpaTab {
         let mut sidebar_blocker_ptr: u64 = 0;
         let mut webview_ptr: usize = 0;
 
+        log::info!("[spa] entry_url={entry_url} app_id={app_id}");
         // Build the SPA WebView with custom protocol + host API injection.
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&entry_url)
             .with_incognito(true) // non-persistent data store — fully isolated
+            .with_initialization_script(r#"
+                window.onerror = function(msg, url, line, col, err) {
+                    console.log('[EPOCA-ERR] ' + msg + ' at ' + url + ':' + line + ':' + col);
+                };
+                window.addEventListener('unhandledrejection', function(e) {
+                    console.log('[EPOCA-ERR] unhandled rejection: ' + e.reason);
+                });
+            "#)
             .with_initialization_script(crate::spa::HOST_API_SCRIPT)
+            .with_initialization_script(epoca_hostapi::HOST_API_BRIDGE_SCRIPT)
+            .with_initialization_script(CURSOR_TRACKER_SCRIPT)
             .with_custom_protocol("epocaapp".to_string(), {
                 let app_id_inner = app_id.clone();
                 move |_wv, request| {
                     let uri = request.uri().to_string();
+                    log::info!("[spa-proto] request URI: {uri}");
                     let rest = uri.strip_prefix("epocaapp://").unwrap_or(&uri);
                     let (_aid, path) = match rest.find('/') {
                         Some(i) => (&rest[..i], &rest[i + 1..]),
@@ -2832,23 +3177,42 @@ impl SpaTab {
                     let path = path.split('#').next().unwrap_or(path);
                     let path = if path.is_empty() { "index.html" } else { path };
 
-                    let csp = "default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; frame-src 'none'";
+                    log::info!("[spa-proto] app_id={app_id_inner} path={path}");
+                    let csp = "default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' epocaapp: data: blob:; font-src 'self' epocaapp: data:; connect-src 'self' epocaapp:; object-src 'none'; frame-src 'none'";
                     match crate::spa::lookup_spa_asset(&app_id_inner, path) {
                         Some(data) => {
                             let mime = crate::spa::mime_for_path(path);
+                            // Strip `crossorigin` from HTML — WKURLSchemeHandler
+                            // doesn't support CORS mode for custom schemes.
+                            let data = if mime == "text/html" {
+                                if let Ok(html) = std::str::from_utf8(&data) {
+                                    let cleaned = html.replace(" crossorigin", "");
+                                    cleaned.into_bytes()
+                                } else {
+                                    data
+                                }
+                            } else {
+                                data
+                            };
+                            log::info!("[spa-proto] 200 {path} ({} bytes, {mime})", data.len());
                             gpui_component::wry::http::Response::builder()
                                 .status(200)
                                 .header("Content-Type", mime)
                                 .header("Content-Security-Policy", csp)
+                                .header("Access-Control-Allow-Origin", "*")
                                 .body(std::borrow::Cow::Owned(data))
                                 .unwrap()
                         }
-                        None => gpui_component::wry::http::Response::builder()
-                            .status(404)
-                            .header("Content-Type", "text/plain")
-                            .header("Content-Security-Policy", csp)
-                            .body(std::borrow::Cow::Borrowed(b"404 Not Found" as &[u8]))
-                            .unwrap(),
+                        None => {
+                            log::warn!("[spa-proto] 404 {path} (app_id={app_id_inner})");
+                            gpui_component::wry::http::Response::builder()
+                                .status(404)
+                                .header("Content-Type", "text/plain")
+                                .header("Content-Security-Policy", csp)
+                                .header("Access-Control-Allow-Origin", "*")
+                                .body(std::borrow::Cow::Borrowed(b"404 Not Found" as &[u8]))
+                                .unwrap()
+                        },
                     }
                 }
             })
@@ -2879,6 +3243,8 @@ impl SpaTab {
                                 // CSP headers (default-src 'self' epocaapp:) already
                                 // block HTTP requests from SPA pages.
                                 crate::spa::register_host_handler(uc, webview_ptr);
+                                crate::host::register_hostapi_handler(uc, webview_ptr);
+                                crate::shield::register_cursor_handler(uc, webview_ptr);
                             }
                         }
                     }
@@ -2902,12 +3268,15 @@ impl SpaTab {
             app_id,
             app_name,
             _entry: entry,
+            chain,
+            permissions,
             webview: wv_entity,
             error,
             _inset_subscription,
             _omnibox_subscription,
             sidebar_blocker_ptr,
             webview_ptr,
+            cursor_pointer: false,
         }
     }
 
@@ -2917,6 +3286,22 @@ impl SpaTab {
 
     pub fn app_name(&self) -> &str {
         &self.app_name
+    }
+
+    pub fn chain(&self) -> &str {
+        &self.chain
+    }
+
+    pub fn has_permission_statements(&self) -> bool {
+        self.permissions.as_ref().map(|p| p.statements).unwrap_or(false)
+    }
+
+    pub fn has_permission_chain(&self) -> bool {
+        self.permissions.as_ref().map(|p| p.chain).unwrap_or(false)
+    }
+
+    pub fn has_permission_data(&self) -> bool {
+        self.permissions.as_ref().map(|p| p.data).unwrap_or(false)
     }
 
     pub fn reload(&self, cx: &App) {
@@ -2936,6 +3321,10 @@ impl Drop for SpaTab {
     fn drop(&mut self) {
         crate::spa::unregister_spa_assets(&self.app_id);
         crate::spa::unregister_host_handler(self.webview_ptr);
+        crate::host::unregister_hostapi_handler(self.webview_ptr);
+        crate::chain_api::cleanup_for_webview(self.webview_ptr);
+        crate::statements_api::cleanup_for_webview(self.webview_ptr);
+        crate::data_api::cleanup_for_webview(self.webview_ptr);
     }
 }
 
@@ -2972,9 +3361,22 @@ impl Render for SpaTab {
         }
 
         if let Some(wv_entity) = &self.webview {
+            let is_pointer = self.cursor_pointer;
             div()
                 .track_focus(&self.focus_handle)
                 .size_full()
+                .child(
+                    canvas(
+                        |_bounds, _window, _cx| {},
+                        move |_bounds, _, window, _cx| {
+                            if is_pointer {
+                                window.set_window_cursor_style(CursorStyle::PointingHand);
+                            }
+                        },
+                    )
+                    .absolute()
+                    .size_0(),
+                )
                 .child(wv_entity.clone())
                 .into_any_element()
         } else {
@@ -2987,6 +3389,478 @@ impl Render for SpaTab {
                 .child(Label::new("Loading..."))
                 .into_any_element()
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dot Loading Tab — loading + permission approval for .dot apps
+// ---------------------------------------------------------------------------
+
+/// Loading phases for a .dot app resolution.
+#[derive(Debug, Clone)]
+pub enum DotLoadingPhase {
+    /// Resolving on-chain name → CID.
+    Resolving,
+    /// Fetching IPFS bundle.
+    Fetching { cid: String },
+    /// Bundle loaded, showing permissions for user approval.
+    PermissionReview,
+    /// Resolution or fetch failed.
+    Error(String),
+}
+
+/// Events emitted by a DotLoadingTab to the workbench.
+pub enum DotLoadingEvent {
+    /// User approved the permissions — workbench should open the SPA.
+    Approved,
+    /// User denied — workbench should close the tab.
+    Denied,
+}
+
+/// A tab that shows the loading / permission-approval flow for .dot apps.
+/// Created immediately when a user navigates to a .dot URL, giving instant
+/// feedback while the on-chain resolution and IPFS fetch happen in the background.
+pub struct DotLoadingTab {
+    focus_handle: FocusHandle,
+    pub name: String,
+    pub phase: DotLoadingPhase,
+    start_time: std::time::Instant,
+    completed_phases: Vec<(String, std::time::Instant)>,
+    /// Actual permissions from the bundle manifest, set when entering PermissionReview.
+    permissions: Option<epoca_sandbox::bundle::PermissionsMeta>,
+    /// Whether the app shipped a manifest.toml (true) or we synthesised defaults (false).
+    has_manifest: bool,
+    _animation_task: Task<()>,
+}
+
+impl DotLoadingTab {
+    pub fn new(name: String, cx: &mut Context<Self>) -> Self {
+        let animation_task = cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(33))
+                    .await;
+                let ok = cx
+                    .update(|cx| {
+                        if let Some(entity) = this.upgrade() {
+                            entity.update(cx, |_, cx| cx.notify());
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if !ok {
+                    break;
+                }
+            }
+        });
+
+        Self {
+            focus_handle: cx.focus_handle(),
+            name,
+            phase: DotLoadingPhase::Resolving,
+            start_time: std::time::Instant::now(),
+            completed_phases: vec![],
+            permissions: None,
+            has_manifest: true,
+            _animation_task: animation_task,
+        }
+    }
+
+    pub fn set_fetching(&mut self, cid: String) {
+        self.completed_phases
+            .push(("Resolved on-chain".into(), std::time::Instant::now()));
+        self.phase = DotLoadingPhase::Fetching { cid };
+    }
+
+    pub fn set_permission_review(&mut self, permissions: Option<epoca_sandbox::bundle::PermissionsMeta>, has_manifest: bool) {
+        self.completed_phases
+            .push(("Bundle loaded".into(), std::time::Instant::now()));
+        self.permissions = permissions;
+        self.has_manifest = has_manifest;
+        self.phase = DotLoadingPhase::PermissionReview;
+    }
+
+    pub fn set_error(&mut self, msg: String) {
+        self.phase = DotLoadingPhase::Error(msg);
+    }
+}
+
+impl EventEmitter<DotLoadingEvent> for DotLoadingTab {}
+impl EventEmitter<PanelEvent> for DotLoadingTab {}
+
+impl Focusable for DotLoadingTab {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Panel for DotLoadingTab {
+    fn panel_name(&self) -> &'static str {
+        "DotLoadingTab"
+    }
+}
+
+impl Render for DotLoadingTab {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let elapsed = self.start_time.elapsed().as_secs_f64();
+        // Breathing pulse: 0.0 → 1.0 → 0.0 over 1.5s
+        let pulse = ((elapsed * std::f64::consts::PI * 2.0 / 1.5).sin() * 0.5 + 0.5) as f32;
+
+        let accent = rgba(0x00d4aaff);
+        let surface = rgb(0x1c1c1e);
+        let text_primary = rgba(0xffffffe0);
+        let text_secondary = rgba(0xffffff66);
+        let text_muted = rgba(0xffffff40);
+        let denied_color = rgba(0xe5534bff);
+        let amber_color = rgba(0xf5a623ff);
+
+        // Pulsing dot alpha
+        let dot_alpha = (0.35 + pulse * 0.65).min(1.0);
+        let dot_color = rgba(
+            (0x00d4aa00u32) | ((dot_alpha * 255.0) as u32),
+        );
+
+        let name_display = format!("{}.dot", self.name);
+
+        // ── Completed phase lines ──
+        let completed_lines: Vec<AnyElement> = self
+            .completed_phases
+            .iter()
+            .map(|(label, _)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(gpui_component::Icon::new(IconName::Check).size(px(12.0)).text_color(accent))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_secondary)
+                            .child(label.clone()),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        // ── Active phase line ──
+        let active_line: Option<AnyElement> = match &self.phase {
+            DotLoadingPhase::Resolving => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .ml(px(2.0))
+                            .rounded_full()
+                            .bg(dot_color),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_primary)
+                            .child(format!("Resolving {name_display}")),
+                    )
+                    .into_any_element(),
+            ),
+            DotLoadingPhase::Fetching { cid } => {
+                let cid_short = if cid.len() > 16 {
+                    format!("{}...{}", &cid[..8], &cid[cid.len() - 4..])
+                } else {
+                    cid.clone()
+                };
+                Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .w(px(8.0))
+                                .h(px(8.0))
+                                .ml(px(2.0))
+                                .rounded_full()
+                                .bg(dot_color),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(text_primary)
+                                .child(format!("Fetching {cid_short}")),
+                        )
+                        .into_any_element(),
+                )
+            }
+            DotLoadingPhase::PermissionReview => None,
+            DotLoadingPhase::Error(msg) => Some(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        gpui_component::Icon::new(IconName::CircleX)
+                            .size(px(12.0))
+                            .text_color(denied_color),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(denied_color)
+                            .child(msg.clone()),
+                    )
+                    .into_any_element(),
+            ),
+        };
+
+        // ── Permission card (only in PermissionReview phase) ──
+        let permission_card: Option<Div> =
+            if matches!(self.phase, DotLoadingPhase::PermissionReview) {
+                let is_default = !self.has_manifest;
+                let perm_row =
+                    move |label: &str, value: &str, color: Rgba| -> AnyElement {
+                        let mut row = div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .py(px(4.0))
+                            .child(
+                                div()
+                                    .w(px(6.0))
+                                    .h(px(6.0))
+                                    .rounded_full()
+                                    .bg(color),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(text_secondary)
+                                    .child(label.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(color)
+                                    .child(value.to_string()),
+                            );
+                        if is_default {
+                            row = row.child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(text_muted)
+                                    .ml(px(4.0))
+                                    .child("default"),
+                            );
+                        }
+                        row.into_any_element()
+                    };
+
+                Some(
+                    div()
+                        .mt(px(24.0))
+                        .w(px(340.0))
+                        .rounded(px(12.0))
+                        .bg(rgba(0xffffff08))
+                        .border_1()
+                        .border_color(rgba(0xffffff12))
+                        .p(px(24.0))
+                        .flex()
+                        .flex_col()
+                        // Header
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .text_base()
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(text_primary)
+                                                .child(name_display.clone()),
+                                        )
+                                        .when(!self.has_manifest, |d| {
+                                            d.child(
+                                                div()
+                                                    .text_size(px(9.0))
+                                                    .px(px(6.0))
+                                                    .py(px(2.0))
+                                                    .rounded(px(4.0))
+                                                    .bg(rgba(0xf5a62320))
+                                                    .text_color(amber_color)
+                                                    .child("Unverified"),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(text_secondary)
+                                        .child(if self.has_manifest {
+                                            "This app declares the following permissions:"
+                                        } else {
+                                            "No manifest found. Sandbox defaults applied:"
+                                        }),
+                                ),
+                        )
+                        // Separator
+                        .child(
+                            div()
+                                .h(px(1.0))
+                                .my(px(14.0))
+                                .bg(rgba(0xffffff14)),
+                        )
+                        // Permission rows — derived from actual bundle permissions
+                        .children({
+                            let perms = self.permissions.as_ref();
+                            let mut rows: Vec<AnyElement> = Vec::new();
+
+                            // Network: check if network list includes "wss:" or similar
+                            let has_network = perms
+                                .and_then(|p| p.network.as_ref())
+                                .map(|n| !n.is_empty())
+                                .unwrap_or(false);
+                            if has_network {
+                                rows.push(perm_row("Chain RPC (WSS)", "Allowed", accent));
+                            } else {
+                                rows.push(perm_row("Chain RPC (WSS)", "Blocked", denied_color));
+                            }
+
+                            // HTTP: always blocked in strict sandbox
+                            rows.push(perm_row("HTTP / Fetch", "Blocked", denied_color));
+
+                            // Wallet signing
+                            let wants_sign = perms.map(|p| p.sign).unwrap_or(false);
+                            if wants_sign {
+                                rows.push(perm_row("Wallet signing", "With approval", amber_color));
+                            } else {
+                                rows.push(perm_row("Wallet signing", "Blocked", denied_color));
+                            }
+
+                            // iFrames: always blocked in strict sandbox
+                            rows.push(perm_row("iFrames", "Blocked", denied_color));
+
+                            // Statements
+                            if perms.map(|p| p.statements).unwrap_or(false) {
+                                rows.push(perm_row("Statements", "Allowed", accent));
+                            }
+
+                            // Chain
+                            if perms.map(|p| p.chain).unwrap_or(false) {
+                                rows.push(perm_row("Chain API", "Allowed", accent));
+                            }
+
+                            // Data connections
+                            if perms.map(|p| p.data).unwrap_or(false) {
+                                rows.push(perm_row("Data (P2P)", "Allowed", accent));
+                            }
+
+                            // Media (camera, audio, etc.)
+                            let media = perms.map(|p| &p.media);
+                            if let Some(m) = media {
+                                if !m.is_empty() {
+                                    let media_str = m.join(", ");
+                                    rows.push(perm_row("Media", &media_str, amber_color));
+                                }
+                            }
+
+                            // Local storage always app-scoped
+                            rows.push(perm_row("Local storage", "App-scoped", accent));
+
+                            rows
+                        })
+                        // Buttons
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(10.0))
+                                .mt(px(18.0))
+                                .child(
+                                    div()
+                                        .id("dot-deny-btn")
+                                        .flex_1()
+                                        .h(px(36.0))
+                                        .rounded(px(8.0))
+                                        .bg(rgba(0xffffff0f))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(rgba(0xffffff1a)))
+                                        .text_sm()
+                                        .text_color(rgba(0xffffff80))
+                                        .on_click(cx.listener(|_this, _, _, cx| {
+                                            cx.emit(DotLoadingEvent::Denied);
+                                        }))
+                                        .child("Deny"),
+                                )
+                                .child(
+                                    div()
+                                        .id("dot-allow-btn")
+                                        .flex_1()
+                                        .h(px(36.0))
+                                        .rounded(px(8.0))
+                                        .bg(accent)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|d| d.bg(rgba(0x00e8bbff)))
+                                        .text_sm()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .text_color(rgb(0x1c1c1e))
+                                        .on_click(cx.listener(|_this, _, _, cx| {
+                                            cx.emit(DotLoadingEvent::Approved);
+                                        }))
+                                        .child("Allow"),
+                                ),
+                        )
+                        // Footer
+                        .child(
+                            div()
+                                .mt(px(14.0))
+                                .text_color(text_muted)
+                                .child(
+                                    div().text_size(px(10.0)).child(
+                                        "Enforced by the browser sandbox. The app cannot bypass these restrictions.",
+                                    ),
+                                ),
+                        ),
+                )
+            } else {
+                None
+            };
+
+        // ── Main layout ──
+        div()
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(surface)
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(120.0))
+            // Status lines
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.0))
+                    .w(px(340.0))
+                    .children(completed_lines)
+                    .children(active_line),
+            )
+            // Permission card
+            .children(permission_card)
     }
 }
 
@@ -3145,6 +4019,9 @@ impl Render for SettingsTab {
         // Chain statuses snapshot (read once for this render)
         let chain_statuses: Option<Vec<epoca_chain::ChainStatus>> =
             cx.try_global::<ChainGlobal>().map(|g| g.client.all_statuses());
+
+        // Statement store status snapshot
+        let ss_status = epoca_chain::statement_store::status();
 
         let text_primary = rgba(0xffffffff);
         let text_secondary = rgba(0xffffffaa);
@@ -4075,6 +4952,16 @@ impl Render for SettingsTab {
                             }),
                     ),
             )
+            // ── Host Infrastructure Status ──────────────────────────────────────
+            .child(render_host_status_section(
+                &ss_status,
+                chain_statuses.as_deref(),
+                section_bg,
+                border_color,
+                text_primary,
+                text_secondary,
+                text_muted,
+            ))
     }
 }
 
@@ -4243,6 +5130,123 @@ fn render_history_retention_row(
                         .child(variant.display_name())
                 })),
         )
+}
+
+/// Render the HOST INFRASTRUCTURE status section for the settings page.
+fn render_host_status_section(
+    ss_status: &epoca_chain::statement_store::StoreStatus,
+    chain_statuses: Option<&[epoca_chain::ChainStatus]>,
+    section_bg: Rgba,
+    border_color: Rgba,
+    text_primary: Rgba,
+    text_secondary: Rgba,
+    text_muted: Rgba,
+) -> impl IntoElement {
+    let section_header = div()
+        .text_xs()
+        .text_color(text_muted)
+        .mb(px(4.0))
+        .child("HOST INFRASTRUCTURE");
+
+    // Statement store status row
+    let (ss_dot, ss_label) = match ss_status {
+        epoca_chain::statement_store::StoreStatus::Offline => {
+            (rgba(0x6b7280ff), "Offline".to_string())
+        }
+        epoca_chain::statement_store::StoreStatus::Running { pubkey_short } => {
+            (rgba(0x22c55eff), format!("Running ({pubkey_short}…)"))
+        }
+    };
+
+    let ss_row = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .px(px(16.0))
+        .py(px(10.0))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.0))
+                .child(div().text_sm().text_color(text_primary).child("Statement Store"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_secondary)
+                        .child("P2P gossip for cross-host pub/sub (ephemeral keypair)"),
+                ),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(4.0))
+                .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(ss_dot))
+                .child(div().text_xs().text_color(ss_dot).child(ss_label)),
+        );
+
+    // Active light client rows
+    let mut chain_rows: Vec<Div> = Vec::new();
+    if let Some(statuses) = chain_statuses {
+        for cs in statuses {
+            let (dot_color, label) = match &cs.state {
+                ChainState::Disconnected => continue, // don't show disconnected
+                ChainState::Connecting => (rgba(0xfbbf24ff), "Connecting…".to_string()),
+                ChainState::Syncing { best_block, peers } => {
+                    (rgba(0xfbbf24ff), format!("Syncing #{best_block} | {peers} peers"))
+                }
+                ChainState::Live { best_block, peers } => {
+                    (rgba(0x22c55eff), format!("Live #{best_block} | {peers} peers"))
+                }
+                ChainState::Error(msg) => (rgba(0xef4444ff), format!("Error: {msg}")),
+            };
+            let chain_label = format!("{:?}", cs.id);
+            chain_rows.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .px(px(16.0))
+                    .py(px(8.0))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(text_primary)
+                            .child(chain_label),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color))
+                            .child(div().text_xs().text_color(dot_color).child(label)),
+                    ),
+            );
+        }
+    }
+
+    let mut card = div()
+        .rounded(px(8.0))
+        .bg(section_bg)
+        .border_1()
+        .border_color(border_color)
+        .overflow_hidden()
+        .child(ss_row);
+
+    for row in chain_rows {
+        card = card
+            .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+            .child(row);
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(section_header)
+        .child(card)
 }
 
 /// Parse a "#rrggbb" hex color string to an Rgba value.

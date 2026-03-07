@@ -163,6 +163,7 @@ pub fn load_installed(app_id: &str) -> Result<epoca_sandbox::ProdBundle, String>
         manifest,
         program_bytes,
         assets,
+        ipfs_cid: None,
     })
 }
 

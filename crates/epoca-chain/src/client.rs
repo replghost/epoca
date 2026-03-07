@@ -401,11 +401,23 @@ async fn run_smoldot_async(
             break;
         }
 
-        // Race: next response vs 10-second health timer
+        // Check for SPA app RPC requests and forward to smoldot.
+        for req in crate::rpc_bridge::take_requests_for_chain(chain) {
+            log::debug!("[smoldot] forwarding app RPC corr={}", req.corr_id);
+            if let Err(e) = client.json_rpc_request(req.json_rpc, para_id) {
+                log::warn!("[smoldot] json_rpc_request failed: {e:?}");
+                crate::rpc_bridge::push_response(
+                    req.corr_id,
+                    serde_json::json!({"jsonrpc":"2.0","id":req.corr_id,"error":{"code":-32000,"message":"request failed"}}).to_string(),
+                );
+            }
+        }
+
+        // Race: next response vs 2-second timer (faster polling for app requests)
         let response = smol::future::or(
             async { responses.next().await },
             async {
-                smol::Timer::after(Duration::from_secs(10)).await;
+                smol::Timer::after(Duration::from_secs(2)).await;
                 None
             },
         )
@@ -417,6 +429,13 @@ async fn run_smoldot_async(
 
         match response {
             Some(text) => {
+                // Check if this is an app RPC response (route back to SPA).
+                if let Some(id) = extract_json_rpc_id(&text) {
+                    if crate::rpc_bridge::is_app_request(id) {
+                        crate::rpc_bridge::push_response(id, text);
+                        continue;
+                    }
+                }
                 handle_smoldot_response(chain, &text, statuses);
             }
             None => {
@@ -654,6 +673,12 @@ fn run_rpc_connection(
     if !stop.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_secs(5));
     }
+}
+
+/// Extract the "id" field from a JSON-RPC response (for correlation routing).
+fn extract_json_rpc_id(text: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(text).ok()?;
+    v.get("id")?.as_u64()
 }
 
 /// Parse a Substrate JSON-RPC new head notification and extract the block number.

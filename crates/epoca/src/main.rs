@@ -3,7 +3,7 @@ use gpui_component::Root;
 use std::path::PathBuf;
 use epoca_core::workbench::{
     Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
-    OpenSettings, OpenAppLibrary, OpenApp, FindInPage, ToggleReaderMode,
+    OpenSettings, OpenAppLibrary, OpenApp, FindInPage, ToggleReaderMode, OpenBookmarks, AddBookmark,
 };
 use epoca_core::settings::SettingsGlobal;
 use epoca_core::chain::ChainGlobal;
@@ -102,6 +102,8 @@ fn main() {
             KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-f", FindInPage, None),
             KeyBinding::new("cmd-shift-m", ToggleReaderMode, None),
+            KeyBinding::new("cmd-d", AddBookmark, None),
+            KeyBinding::new("cmd-shift-b", OpenBookmarks, None),
             KeyBinding::new("cmd-shift-d", OpenTestSpa, None),
             // Global clipboard bindings — allows Edit menu to show shortcuts
             // and enables clipboard forwarding to WKWebView via Workbench handlers.
@@ -133,6 +135,8 @@ fn main() {
                     MenuItem::separator(),
                     MenuItem::action("Open App...", OpenApp),
                     MenuItem::action("App Library", OpenAppLibrary),
+                    MenuItem::action("Bookmarks", OpenBookmarks),
+                    MenuItem::action("Add Bookmark", AddBookmark),
                     MenuItem::action("Open Test SPA (dot://)", OpenTestSpa),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseActiveTab),
@@ -237,6 +241,12 @@ fn main() {
             manager: epoca_wallet::WalletManager::new(),
         });
         epoca_wallet::register_sleep_observer();
+        epoca_core::host::init_hostapi(cx);
+
+        // Statement store — ephemeral keypair, always-on gossip.
+        // Register callback before starting poll thread to avoid race.
+        epoca_core::statements_api::init_network_bridge();
+        epoca_chain::statement_store::init();
 
         cx.spawn(async move |cx| {
             cx.open_window(new_window_opts(), |window, cx| {

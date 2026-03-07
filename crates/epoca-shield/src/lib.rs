@@ -6,6 +6,7 @@ pub mod runtime;
 pub use compiler::compile_all;
 pub use lists::builtin_lists;
 pub use lists::fetcher::ListFetcher;
+pub use lists::parser::validate_webkit_pattern;
 pub use runtime::{BlockedCounts, CompiledRuleSet, ShieldConfig, ShieldManager, SiteException};
 
 use std::path::PathBuf;

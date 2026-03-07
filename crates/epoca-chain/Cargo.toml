@@ -12,6 +12,9 @@ serde_json = { workspace = true }
 log = { workspace = true }
 tiny-keccak = { version = "2", features = ["keccak"] }
 ureq = "3"
+blake2 = "0.10"
+schnorrkel = "0.11"
+epoca-sandbox = { path = "../epoca-sandbox" }
 
 # Bitcoin Kyoto light client (BIP-157/158 compact block filters)
 bip157 = "0.3"
@@ -19,3 +22,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 
 # Ethereum Helios light client (consensus + execution verification)
 helios-ethereum = { git = "https://github.com/a16z/helios", rev = "204c998a" }
+
+[dev-dependencies]
+env_logger = "0.11"

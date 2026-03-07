@@ -216,13 +216,18 @@ impl WalletManager {
         log::info!("Wallet locked");
     }
 
-    /// Return the root SS58 address (for display in Settings).
+    /// Return the raw 32-byte sr25519 public key, or None if locked.
+    pub fn root_public_key(&self) -> Option<[u8; 32]> {
+        self.root_keypair.as_ref().map(|kp| kp.public.to_bytes())
+    }
+
+    /// Return the root SS58 address (Polkadot format, prefix 0).
     pub fn root_address(&self) -> Result<String> {
         let kp = self
             .root_keypair
             .as_ref()
             .ok_or_else(|| anyhow!("Wallet is locked"))?;
-        Ok(derive::ss58_address(&kp.public))
+        Ok(derive::ss58_address_with_prefix(&kp.public.to_bytes(), 0))
     }
 
     /// Return the checksummed EIP-55 Ethereum address.
@@ -338,11 +343,11 @@ impl WalletManager {
         Ok(STANDARD.encode(&out))
     }
 
-    /// Return the SS58 address for a given app_id (derived account).
+    /// Return the SS58 address for a given app_id (Polkadot format, prefix 0).
     pub fn app_address(&mut self, app_id: &str) -> Result<String> {
         self.touch();
         let kp = self.app_keypair(app_id)?;
-        Ok(derive::ss58_address(&kp.public))
+        Ok(derive::ss58_address_with_prefix(&kp.public.to_bytes(), 0))
     }
 
     /// Sign arbitrary bytes with the root keypair (for dapp wallet use).
@@ -528,10 +533,11 @@ mod tests {
         wm.root_keypair = Some(kp);
 
         let root_addr = wm.root_address().unwrap();
-        assert!(root_addr.starts_with('5'));
+        // Polkadot addresses start with '1' (prefix 0)
+        assert!(root_addr.starts_with('1'), "expected Polkadot prefix, got: {root_addr}");
 
         let app_addr = wm.app_address("com.test.app").unwrap();
-        assert!(app_addr.starts_with('5'));
+        assert!(app_addr.starts_with('1'), "expected Polkadot prefix, got: {app_addr}");
         assert_ne!(root_addr, app_addr);
     }
 

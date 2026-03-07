@@ -43,7 +43,14 @@ and must not be changed without explicit user approval.
 crates/
   epoca/            binary entry point (main.rs)
   epoca-core/       workbench shell, tabs, view_bridge, declarative parser
-  epoca-sandbox/    PolkaVM runtime
+    js_bridge.rs    — typed dispatch for window.epoca.* JSON host API calls
+    spa.rs          — WKWebView transport: scheme handler, JS injection, block-all rules
+    host.rs         — WKWebView transport: SCALE binary path (base64 encoding, ObjC bridge)
+    chain_api.rs    — chain query/submit routing to smoldot
+    statements_api.rs — local in-memory pub/sub
+    data_api.rs     — P2P data connection management
+  epoca-hostapi/    host API engine for SCALE binary protocol (dormant — no consumers today)
+  epoca-sandbox/    PolkaVM runtime (framebuffer, input, asset host imports)
   epoca-protocol/   ViewTree + diffing + MessagePack
   epoca-broker/     capability/permission broker
   epoca-dsl/        ZML parser + evaluator (no GPUI dep)
@@ -52,6 +59,40 @@ examples/           .toml and .zml sample apps
 docs/design.md      LOCKED design system — read before any UI change
 docs/backlog.md     Product backlog + strategy — update when completing features
 ```
+
+## Host API Architecture
+
+Epoca exposes one host API to sandboxed apps — the capability surface mediated by the host.
+Two app types, two transports, same conceptual API:
+
+**App types:**
+- **PolkaVM apps** (games/native) — `.polkavm` binaries in PolkaVM interpreter
+- **.dot SPAs** — HTML/JS/CSS from IPFS in sandboxed WKWebView
+
+**Capability groups:**
+
+| Capability | PolkaVM transport | WebView transport |
+|---|---|---|
+| Screen (framebuffer) | Direct host imports (sync) | Canvas/WebGL (native) |
+| Input (keyboard/mouse) | Direct host imports (sync) | DOM events (native) |
+| Assets (bundled files) | Direct host imports (sync) | `epocaapp://` scheme |
+| Wallet (accounts, signing) | Message-based (async) | `window.epoca.*` |
+| Chain (RPC, submit) | Message-based (async) | `window.epoca.chain.*` |
+| Storage (local KV) | Message-based (async) | `window.epoca.storage.*` |
+| Statements (pub/sub) | Message-based (async) | `window.epoca.statements.*` |
+| Data (P2P) | Message-based (async) | `window.epoca.data.*` |
+
+Screen/Input/Assets are direct host imports for PolkaVM (performance-critical).
+Wallet/Chain/Storage/Statements/Data are async message-based on both transports.
+
+**Current state:**
+- `.dot` SPAs use `js_bridge.rs` → active, all capabilities wired
+- PolkaVM apps use sandbox host imports → active, screen/input/assets only
+- `epoca-hostapi` SCALE engine → dormant, built for future PolkaVM wallet/chain access
+- When PolkaVM apps need wallet/chain/storage, they get the same API via message protocol
+
+**Key principle:** new host API features should be designed transport-agnostic, then bound
+to both JS (`window.epoca`) and PolkaVM (host imports or message protocol) as needed.
 
 ## Key Architecture Note — WKWebView Positioning
 `WebViewTab` observes `OverlayLeftInset` via `cx.observe_global` so GPUI marks it dirty
@@ -74,6 +115,8 @@ If unsure, ask rather than assume.
 - **Hard Reload** (⌘⇧R / View > Hard Reload): calls `reloadFromOrigin` (macOS ObjC) — bypasses cache
 - **Quit** (⌘Q / Epoca > Quit Epoca): calls `cx.quit()`
 - **Tab switching**: clicking a tab in the sidebar activates it and shows its content
+- **Back/forward swipe**: Two-finger trackpad swipe navigates back/forward in WebView tabs. Custom JS `SWIPE_NAV_SCRIPT` with rubber-band resistance (150px threshold). Edge shadow + frosted chevron arrow indicator. `NavEvent` enum in `shield.rs` handles `goBack`/`goForward` messages via existing `epocaNav` handler.
+- **Tab drag-to-reorder**: Tabs can be dragged within the sidebar to reorder. 4px movement threshold to distinguish from click. Dragged tab rendered at 50% opacity. Reordering respects pinned/regular group boundaries. `DragState` + `reorder_tab()` in workbench.rs. Manual mouse event tracking (GPUI has no built-in drag API).
 
 ### Cmd-Click — Open Link in New Tab
 - **⌘-click any link** → opens in a **background tab** (current tab stays active)
@@ -213,6 +256,23 @@ If unsure, ask rather than assume.
 - Broker `Permissions` extended with `sign: bool`, `statement_store: bool`, `media: Vec<String>`
 - **Pending**: `WKURLSchemeHandler` for `epocaapp://` scheme, `window.epoca` host API injection, signing relay, Statement Store relay, WebSocket proxy, block-all content rules
 
+### .prod Bundle Format (CARv1 + ZIP)
+- `ProdBundle::from_file()` and `from_bytes()` auto-detect ZIP (magic `PK\x03\x04`) or CARv1 format
+- `epoca-sandbox/src/car.rs`: shared CARv1/UnixFS parser — walks dag-pb directory trees, reassembles multi-chunk files, raw leaves. Public API: `is_car_file()`, `parse_car_to_assets()`, `parse_dagpb_links()`, `read_uvarint()`
+- `epoca-chain/src/dotns.rs` uses the shared parser (deduplicated ~370 lines)
+- `tools/prod-pack`: CLI tool converts bundle directory → CARv1 `.prod` file. Raw leaf blocks (CIDv1 0x55), dag-pb directory blocks (CIDv1 0x70), SHA-256 multihash. Round-trip tested.
+- CID integrity verification: CAR parser recomputes SHA-256 per block, rejects tampered content
+- Lazy IPFS asset loading: DOTNS-resolved SPA tabs fetch assets on-demand from gateway. `AssetSource::Lazy` in `spa.rs` with per-app cache. `dotns::resolve_lazy()` fetches only manifest. `ProdBundle.ipfs_cid` field triggers lazy registration in `SpaTab::new()`
+
+### Dot App Loading & Permission Approval
+- `DotLoadingTab` in `tabs.rs`: animated loading screen for `dot://name.dot` navigation
+- Phases: Resolving (on-chain name → CID), Fetching (IPFS bundle), PermissionReview (approval card)
+- Permission card renders actual `PermissionsMeta` from bundle manifest (network, signing, statement store, media)
+- Allow/Deny buttons emit `DotLoadingEvent::Approved` / `DotLoadingEvent::Denied`
+- `PendingDotLoad` in `workbench.rs` with `dot_load_generation` counter for async safety
+- Deferred action pattern: `pending_dot_approve` / `pending_dot_deny_tab` consumed in render (GPUI subscribe has no `&mut Window`)
+- `approved_dot_apps` persisted to `approved_apps.json` (loaded on startup, saved on each approval) — skips permission prompt for same CID
+
 ### Ethereum Helios Light Client
 - `ConnectionBackend::Helios` dispatches to `eth::run_helios_connection()` in `epoca-chain`
 - Helios verifies beacon chain consensus + execution state locally — trustless ETH verification
@@ -238,6 +298,26 @@ If unsure, ask rather than assume.
 - `window.bitcoin` and `__epocaBtcResolve` are `Object.defineProperty(..., writable: false, configurable: false)`
 - `render_btc_sign_dialog` shows origin + message preview (truncated 200 chars) with Reject/Sign buttons
 - Private keys never cross the JS boundary — only addresses and Base64 signatures
+
+### Bookmarks
+- Local bookmark storage backed by `~/.epoca/bookmarks.json` (JSON array, atomic writes)
+- Platform-aware path: macOS `~/Library/Application Support/Epoca/bookmarks.json`, others `~/.epoca/bookmarks.json`
+- In-memory cache: `static STORE: Mutex<Option<Vec<Bookmark>>>` loaded once from disk; `list()` reads from memory, mutations flush to disk
+- URL normalization: `normalize_url()` strips fragments, lowercases scheme+host, handles trailing slashes — prevents duplicate bookmarks
+- `bookmarks.rs`: `list()`, `toggle()`, `is_bookmarked()`, `add()`, `remove()`, `normalize_url()` — 11 unit tests
+- `BookmarksTab` in `tabs.rs`: panel showing all bookmarks as two-line rows (title + URL), click to open, X to remove
+- Star icon in URL bar (next to reader mode button): `StarOff` when not bookmarked, `Star` (amber `0xf59e0bff`) when bookmarked
+- `AddBookmark` action (⌘D) toggles bookmark for active WebView tab; `OpenBookmarks` (⌘⇧B) opens/switches to the panel
+- Menu: File > Bookmarks, File > Add Bookmark
+- Session-restorable (`TabKind::Bookmarks` in `is_restorable`); dedup guard prevents duplicate Bookmarks tabs on restore
+- `PENDING_BOOKMARK_OPEN` static mutex channel passes clicked URL from panel to workbench (poison-safe `if let Ok`)
+
+### Bundle Signature Verification
+- `.prod` bundles can include optional `signature.toml` (hex ed25519 pubkey + signature)
+- Signed message: `sha256(manifest.toml) || sha256(app.polkavm)` (zeros for SPA without program)
+- `verify_bundle_signature()` in `bundle.rs` using `ed25519-zebra` crate
+- Both ZIP and CAR parsers extract `signature.toml` and pass to `finish_with_sig()`
+- Optional: bundles without `signature.toml` are accepted; bundles with invalid signatures are rejected
 
 ### Embedded Test Server (feature-gated)
 - `#[cfg(feature = "test-server")]` + `EPOCA_TEST=1` env var

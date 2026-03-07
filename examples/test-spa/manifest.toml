@@ -7,7 +7,9 @@ app_type = "spa"
 [webapp]
 entry = "index.html"
 sandbox = "strict"
+chain = "paseo-asset-hub"
 
 [permissions]
 sign = true
-statement_store = true
+statements = true
+chain = true

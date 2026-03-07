@@ -8,6 +8,54 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Bundle signature verification** — `.prod` bundles can now include an optional `signature.toml`
+  with an ed25519 public key and signature over `sha256(manifest.toml) || sha256(app.polkavm)`.
+  SPA bundles use `sha256("")` for program hash. Self-signed model (integrity, not authenticity).
+  ZIP and CAR parsers extract and verify the signature when present. Deps: `ed25519-zebra`,
+  `hex`. `bundle.rs`, `SignatureFile`, `verify_bundle_signature()`. 12 unit tests. (2026-03-06)
+
+- **Bookmarks** — Local bookmark storage backed by `~/.epoca/bookmarks.json`. In-memory cache
+  avoids disk reads on the 30fps render path. URL normalization (lowercase host, strip fragment,
+  trailing-slash handling) prevents duplicate entries. Atomic `toggle()` for star icon. Star icon
+  in URL bar toggles bookmark for the active page (amber = bookmarked). Bookmarks panel accessible
+  via File > Bookmarks (⌘⇧B), Add Bookmark (⌘D). Click to open, X to remove. Session-restorable.
+  Platform-aware path (macOS `~/Library/Application Support/Epoca/`). `bookmarks.rs`, `BookmarksTab`
+  in `tabs.rs`, `AddBookmark`/`OpenBookmarks` actions. 11 unit tests. (2026-03-06)
+
+- **CARv1 .prod bundle format** — `.prod` bundles now support CARv1 (IPFS-native) in addition
+  to ZIP. `ProdBundle::from_file()` and `from_bytes()` auto-detect format via magic bytes.
+  Shared CAR/UnixFS parser extracted to `epoca-sandbox/src/car.rs` (~370 lines, zero external
+  deps). Walks dag-pb directory trees, reassembles multi-chunk files, handles raw leaves.
+  `epoca-chain/src/dotns.rs` deduplicated to use the shared parser. (2026-03-06)
+
+- **`prod-pack` CLI tool** — `tools/prod-pack`: converts a bundle directory into a CARv1
+  `.prod` file. Builds UnixFS directory DAG with raw leaf blocks (CIDv1 codec 0x55) and
+  dag-pb directory blocks (CIDv1 codec 0x70), SHA-256 multihash. Hand-encoded CBOR header
+  and protobuf. Round-trip verified against `epoca-sandbox` parser. Usage:
+  `prod-pack <directory> [output.prod]`. (2026-03-06)
+
+- **CID integrity verification** — CAR parser now recomputes SHA-256 for every block and
+  compares against the digest embedded in the CID. Tampered or corrupted blocks are rejected
+  with an error before any content is extracted. `epoca-sandbox/src/car.rs`. (2026-03-06)
+
+- **Lazy IPFS asset loading for dot apps** — DOTNS-resolved SPA tabs no longer download all
+  assets before opening. Only `manifest.toml` is fetched during resolution; remaining assets
+  are fetched on-demand from the IPFS gateway when the WKWebView requests them via `epocaapp://`.
+  `AssetSource` enum in `spa.rs` supports both `Eager` (local bundles) and `Lazy` (IPFS-backed
+  with caching) modes. `ProdBundle.ipfs_cid` field enables lazy mode. `dotns::resolve_lazy()`
+  fetches only manifest + CID. `dotns::ipfs_gateway()` exposes the gateway URL. (2026-03-06)
+
+- **Approved dot apps persistence** — `approved_dot_apps` HashMap (app name → CID) now persists
+  to `approved_apps.json` alongside `session.json`. Loaded on startup, saved on each approval.
+  Returning to a previously-approved dot app with the same CID skips the permission prompt.
+  `session.rs`: `load_approved_apps()`, `save_approved_apps()`. (2026-03-06)
+
+- **DotLoadingTab + permission approval flow** — Navigating to `dot://name.dot` opens an
+  animated loading tab with phases (Resolving → Fetching → Permission Review). Permission
+  card shows actual entitlements from bundle `PermissionsMeta` (network, signing, statement
+  store, media). Allow/Deny buttons with async-safe generation counter. `DotLoadingTab`,
+  `DotLoadingEvent`, `PendingDotLoad` in `tabs.rs`/`workbench.rs`. (2026-03-06)
+
 - **Ethereum Helios light client (Phase 4)** — `ConnectionBackend::Helios` variant added.
   Helios verifies beacon chain consensus and execution state locally — no trusted RPC servers.
   Public endpoints: consensus `ethereum.operationsolarstorm.org` (a16z), execution `eth.llamarpc.com`.
@@ -94,7 +142,35 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   standard browser behavior. Uses `on_mouse_down` with `click_count >= 3` to dispatch
   `gpui_component::input::SelectAll`. (2026-03-04)
 
+- **Back/forward swipe gestures** — Two-finger trackpad swipe navigates back/forward in
+  WebView tabs. Custom JS-based implementation with rubber-band resistance physics. Edge
+  shadow + frosted chevron arrow slides in from the swipe edge; arrow brightens near threshold.
+  Triggers after 150px accumulated delta. Springs back on cancel. `SWIPE_NAV_SCRIPT` in
+  `tabs.rs`, `NavEvent` enum in `shield.rs`. (2026-03-07)
+
+- **Tab drag-to-reorder** — Tabs in the sidebar can be reordered by dragging. Mouse-down starts
+  a potential drag; 4px movement threshold activates it. Dragged tab shows at 50% opacity.
+  Reordering respects pinned/regular group boundaries. Uses manual `on_mouse_down` /
+  `on_mouse_move` / `on_mouse_up` pattern (GPUI has no built-in drag API). `DragState`,
+  `reorder_tab()` in `workbench.rs`. (2026-03-07)
+
 ### Fixed
+- **blake2 import in statement_store.rs** — `blake2::Blake2b256` doesn't exist in blake2 0.10.
+  Fixed with `type Blake2b256 = Blake2b<U32>;` using `digest::consts::U32`. (2026-03-06)
+
+- **Borrowed variable escaping thread::spawn in statements_api.rs** — `channel` (a `&str`) was
+  captured by a `thread::spawn` closure. Added `let channel_owned = channel.to_string();` before
+  the closure. (2026-03-06)
+
+- **Statement store initialization** — `init()` now generates an ephemeral sr25519 keypair
+  internally (no wallet dependency). Network submit uses a bounded `mpsc::sync_channel(32)`
+  worker thread instead of unbounded thread spawning per write. `statement_store.rs`,
+  `statements_api.rs`. (2026-03-06)
+
+- **Mutex poison recovery in tabs.rs** — `PENDING_BOOKMARK_OPEN` and `PENDING_LAUNCH` static
+  mutex writers changed from `.unwrap()` to `if let Ok(mut guard)` to prevent UI-thread panics
+  if a previous thread panicked while holding the lock. (2026-03-06)
+
 - **Cursor pointer (hand icon) on links** — GPUI's `reset_cursor_style()` overrode WKWebView's CSS
   cursor every paint frame. Fix: `canvas` paint closure calls `window.set_window_cursor_style(
   CursorStyle::PointingHand)` with `hitbox_id: None`, bypassing hit-test. (2026-03-04)

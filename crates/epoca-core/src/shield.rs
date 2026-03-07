@@ -163,16 +163,25 @@ pub fn install_content_rules(
 
 use std::sync::{mpsc, Mutex, OnceLock};
 
-/// Channel for "open URL in new tab" events posted from page JS.
-/// Tuple: (url, focus) where focus=true means switch to the new tab.
+/// Navigation event posted from page JS via `epocaNav` handler.
+pub enum NavEvent {
+    /// Open URL in a new tab (focus=true → switch to it).
+    OpenUrl { url: String, focus: bool },
+    /// Navigate the current tab back.
+    GoBack,
+    /// Navigate the current tab forward.
+    GoForward,
+}
+
+/// Channel for navigation events posted from page JS.
 static NAV_CHANNEL: OnceLock<(
-    mpsc::SyncSender<(String, bool)>,
-    Mutex<mpsc::Receiver<(String, bool)>>,
+    mpsc::SyncSender<NavEvent>,
+    Mutex<mpsc::Receiver<NavEvent>>,
 )> = OnceLock::new();
 
 fn nav_channel() -> &'static (
-    mpsc::SyncSender<(String, bool)>,
-    Mutex<mpsc::Receiver<(String, bool)>>,
+    mpsc::SyncSender<NavEvent>,
+    Mutex<mpsc::Receiver<NavEvent>>,
 ) {
     NAV_CHANNEL.get_or_init(|| {
         let (tx, rx) = mpsc::sync_channel(64);
@@ -181,7 +190,7 @@ fn nav_channel() -> &'static (
 }
 
 /// Drain all pending nav events (called every render frame from Workbench).
-pub fn drain_nav_events() -> Vec<(String, bool)> {
+pub fn drain_nav_events() -> Vec<NavEvent> {
     let ch = nav_channel();
     let rx = ch.1.lock().unwrap();
     let mut events = Vec::new();
@@ -237,25 +246,35 @@ pub fn register_nav_handler(uc: *mut objc2::runtime::AnyObject) {
                 };
                 let type_val: *mut AnyObject =
                     objc2::msg_send![body, objectForKey: type_key];
-                let url_val: *mut AnyObject =
-                    objc2::msg_send![body, objectForKey: url_key];
-                if type_val.is_null() || url_val.is_null() {
-                    return;
-                }
+                if type_val.is_null() { return; }
 
                 let type_cstr: *const i8 = objc2::msg_send![type_val, UTF8String];
-                let url_cstr: *const i8 = objc2::msg_send![url_val, UTF8String];
-                if type_cstr.is_null() || url_cstr.is_null() {
-                    return;
+                if type_cstr.is_null() { return; }
+                let type_str = std::ffi::CStr::from_ptr(type_cstr).to_string_lossy();
+
+                match type_str.as_ref() {
+                    "goBack" => {
+                        let _ = nav_channel().0.try_send(NavEvent::GoBack);
+                        return;
+                    }
+                    "goForward" => {
+                        let _ = nav_channel().0.try_send(NavEvent::GoForward);
+                        return;
+                    }
+                    _ => {}
                 }
 
-                let type_str = std::ffi::CStr::from_ptr(type_cstr).to_string_lossy();
+                let url_val: *mut AnyObject =
+                    objc2::msg_send![body, objectForKey: url_key];
+                if url_val.is_null() { return; }
+                let url_cstr: *const i8 = objc2::msg_send![url_val, UTF8String];
+                if url_cstr.is_null() { return; }
                 let url_str = std::ffi::CStr::from_ptr(url_cstr)
                     .to_string_lossy()
                     .to_string();
 
                 let focus = type_str == "openInNewTabFocus";
-                let _ = nav_channel().0.try_send((url_str, focus));
+                let _ = nav_channel().0.try_send(NavEvent::OpenUrl { url: url_str, focus });
             }
 
             builder.add_method(
@@ -310,6 +329,39 @@ fn title_channel() -> &'static (
 /// Returns `(webview_ptr, title)` pairs.
 pub fn drain_title_events() -> Vec<(usize, String)> {
     let ch = title_channel();
+    let rx = ch.1.lock().unwrap();
+    let mut events = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        events.push(ev);
+    }
+    events
+}
+
+// ---------------------------------------------------------------------------
+// URL channel — page URL changes reported from TITLE_TRACKER_SCRIPT
+// ---------------------------------------------------------------------------
+
+/// Channel for page URL events.
+/// Tuple: (webview_ptr, url) where webview_ptr identifies which tab.
+static URL_CHANNEL: OnceLock<(
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+)> = OnceLock::new();
+
+fn url_channel() -> &'static (
+    mpsc::SyncSender<(usize, String)>,
+    Mutex<mpsc::Receiver<(usize, String)>>,
+) {
+    URL_CHANNEL.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel(128);
+        (tx, Mutex::new(rx))
+    })
+}
+
+/// Drain all pending URL events (called every render frame from Workbench).
+/// Returns `(webview_ptr, url)` pairs.
+pub fn drain_url_events() -> Vec<(usize, String)> {
+    let ch = url_channel();
     let rx = ch.1.lock().unwrap();
     let mut events = Vec::new();
     while let Ok(ev) = rx.try_recv() {
@@ -443,6 +495,23 @@ pub fn register_meta_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: us
                         if title.is_empty() { return; }
                         if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
                             let _ = title_channel().0.try_send((wv_ptr, title));
+                        }
+                    }
+                    "urlChanged" => {
+                        let url_key: *mut AnyObject = objc2::msg_send![
+                            AnyClass::get("NSString").unwrap(),
+                            stringWithUTF8String: b"url\0".as_ptr() as *const i8
+                        ];
+                        let url_val: *mut AnyObject = objc2::msg_send![body, objectForKey: url_key];
+                        if url_val.is_null() { return; }
+                        let url_cstr: *const i8 = objc2::msg_send![url_val, UTF8String];
+                        if url_cstr.is_null() { return; }
+                        let url = std::ffi::CStr::from_ptr(url_cstr)
+                            .to_string_lossy()
+                            .to_string();
+                        if url.is_empty() { return; }
+                        if let Some(wv_ptr) = UC_MAP.lock().unwrap().get(&uc_key).copied() {
+                            let _ = url_channel().0.try_send((wv_ptr, url));
                         }
                     }
                     "loading" => {

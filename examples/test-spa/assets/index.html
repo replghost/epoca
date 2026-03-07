@@ -89,6 +89,29 @@
   </div>
 
   <div class="card">
+    <h2>Host API: chain.query()</h2>
+    <div id="chain" class="result pending">not yet called</div>
+    <button onclick="testChainQuery()">system_chain</button>
+    <button onclick="testChainRuntime()">getRuntimeVersion</button>
+  </div>
+
+  <div class="card">
+    <h2>Host API: chain.submit()</h2>
+    <div id="submit" class="result pending">not yet called</div>
+    <input type="text" id="submit-data" placeholder="Call data (hex)" value="0x00000068656c6c6f">
+    <button onclick="testChainSubmit()">Submit (requires approval)</button>
+  </div>
+
+  <div class="card">
+    <h2>Host API: statements</h2>
+    <div id="stmt" class="result pending">not yet called</div>
+    <input type="text" id="stmt-channel" placeholder="Channel name" value="test-channel">
+    <input type="text" id="stmt-data" placeholder="Message data" value="hello from test-spa">
+    <button onclick="testStatementsSubscribe()">Subscribe</button>
+    <button onclick="testStatementsWrite()">Write</button>
+  </div>
+
+  <div class="card">
     <h2>Network Isolation Test</h2>
     <div id="net" class="result pending">not yet tested</div>
     <button onclick="testNetwork()">Try fetch(https://...)</button>
@@ -141,9 +164,18 @@
   log('SPA loaded');
   log('window.epoca exists: ' + (typeof window.epoca !== 'undefined'));
   if (window.epoca) {
-    log('window.epoca.sign: ' + typeof window.epoca.sign);
-    log('window.epoca.getAddress: ' + typeof window.epoca.getAddress);
-    log('window.epoca.on: ' + typeof window.epoca.on);
+    log('APIs: sign=' + typeof window.epoca.sign +
+        ' chain=' + typeof window.epoca.chain +
+        ' statements=' + typeof window.epoca.statements +
+        ' data=' + typeof window.epoca.data);
+
+    // Listen for statement events
+    window.epoca.on('statement', function(data) {
+      log('[event:statement] ch=' + data.channel + ' data=' + data.data + ' by=' + data.author);
+      var el = document.getElementById('stmt');
+      el.className = 'result';
+      el.textContent = 'Received: ' + data.data + ' on ' + data.channel;
+    });
   }
 
   async function testGetAddress() {
@@ -216,6 +248,98 @@
       el.className = 'result error';
       el.textContent = e.message;
       log('system.remark failed: ' + e.message);
+    }
+  }
+
+  async function testChainQuery() {
+    var el = document.getElementById('chain');
+    el.className = 'result pending';
+    el.textContent = 'querying...';
+    log('chain.query("system_chain") called');
+    try {
+      var result = await window.epoca.chain.query('system_chain', []);
+      el.className = 'result';
+      el.textContent = JSON.stringify(result);
+      log('chain.query resolved: ' + JSON.stringify(result));
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('chain.query rejected: ' + e.message);
+    }
+  }
+
+  async function testChainRuntime() {
+    var el = document.getElementById('chain');
+    el.className = 'result pending';
+    el.textContent = 'querying...';
+    log('chain.query("state_getRuntimeVersion") called');
+    try {
+      var result = await window.epoca.chain.query('state_getRuntimeVersion', []);
+      el.className = 'result';
+      el.textContent = JSON.stringify(result).slice(0, 200);
+      log('getRuntimeVersion resolved');
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('getRuntimeVersion rejected: ' + e.message);
+    }
+  }
+
+  async function testChainSubmit() {
+    var el = document.getElementById('submit');
+    var callData = document.getElementById('submit-data').value.trim();
+    if (!callData) { el.className = 'result error'; el.textContent = 'Enter call data'; return; }
+    el.className = 'result pending';
+    el.textContent = 'submitting (check approval dialog)...';
+    log('chain.submit called with: ' + callData);
+    try {
+      var result = await window.epoca.chain.submit(callData);
+      el.className = 'result';
+      el.textContent = JSON.stringify(result);
+      log('chain.submit resolved: ' + JSON.stringify(result));
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('chain.submit rejected: ' + e.message);
+    }
+  }
+
+  async function testStatementsSubscribe() {
+    var el = document.getElementById('stmt');
+    var channel = document.getElementById('stmt-channel').value.trim();
+    if (!channel) { el.className = 'result error'; el.textContent = 'Enter channel'; return; }
+    el.className = 'result pending';
+    el.textContent = 'subscribing...';
+    log('statements.subscribe("' + channel + '") called');
+    try {
+      await window.epoca.statements.subscribe(channel);
+      el.className = 'result';
+      el.textContent = 'Subscribed to: ' + channel;
+      log('statements.subscribe resolved');
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('statements.subscribe rejected: ' + e.message);
+    }
+  }
+
+  async function testStatementsWrite() {
+    var el = document.getElementById('stmt');
+    var channel = document.getElementById('stmt-channel').value.trim();
+    var data = document.getElementById('stmt-data').value.trim();
+    if (!channel || !data) { el.className = 'result error'; el.textContent = 'Enter channel and data'; return; }
+    el.className = 'result pending';
+    el.textContent = 'writing...';
+    log('statements.write("' + channel + '", "' + data + '") called');
+    try {
+      await window.epoca.statements.write(channel, data);
+      el.className = 'result';
+      el.textContent = 'Written to: ' + channel;
+      log('statements.write resolved');
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message;
+      log('statements.write rejected: ' + e.message);
     }
   }
 

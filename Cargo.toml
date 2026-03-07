@@ -12,6 +12,8 @@ members = [
     "crates/epoca-shield",
     "crates/epoca-chain",
     "crates/epoca-wallet",
+    "crates/epoca-hostapi",
+    "tools/prod-pack",
 ]
 exclude = []
 

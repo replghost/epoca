@@ -12,3 +12,9 @@ serde = { workspace = true }
 toml = { workspace = true }
 postcard = { version = "1", features = ["alloc"] }
 zip = { workspace = true }
+sha2 = "0.10"
+ed25519-zebra = "4"
+hex = "0.4"
+
+[dev-dependencies]
+rand_core = { version = "0.6", features = ["getrandom"] }

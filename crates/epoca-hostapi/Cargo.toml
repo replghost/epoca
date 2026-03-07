@@ -1,0 +1,10 @@
+[package]
+name = "epoca-hostapi"
+version = "0.0.1"
+edition = "2021"
+description = "Transport-agnostic host API engine for Polkadot app runtimes (SCALE binary protocol)"
+license = "MIT"
+
+[dependencies]
+log = { workspace = true }
+serde_json = { workspace = true }

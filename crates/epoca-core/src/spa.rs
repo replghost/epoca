@@ -7,25 +7,62 @@
 //! The host API (`window.epoca`) is injected at document start.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+/// How assets are served for a given SPA.
+enum AssetSource {
+    /// All assets loaded in memory (local .prod files).
+    Eager(HashMap<String, Vec<u8>>),
+    /// Assets fetched on-demand from IPFS gateway, cached locally.
+    Lazy {
+        /// IPFS CID of the bundle root directory.
+        cid: String,
+        /// IPFS gateway URL (e.g. "https://ipfs.dotspark.app").
+        gateway: String,
+        /// Cache of already-fetched assets.
+        cache: Mutex<HashMap<String, Vec<u8>>>,
+    },
+}
 
 /// Global registry of loaded SPA bundles, keyed by app_id.
 /// The WKURLSchemeHandler callback looks up assets here.
 /// Each entry is reference-counted so multiple tabs with the same app_id
-/// share the asset map and it's only freed when the last tab closes.
-static SPA_ASSETS: OnceLock<Mutex<HashMap<String, (u32, HashMap<String, Vec<u8>>)>>> = OnceLock::new();
+/// share the asset source and it's only freed when the last tab closes.
+static SPA_ASSETS: OnceLock<Mutex<HashMap<String, (u32, Arc<AssetSource>)>>> = OnceLock::new();
 
-fn spa_assets() -> &'static Mutex<HashMap<String, (u32, HashMap<String, Vec<u8>>)>> {
+fn spa_assets() -> &'static Mutex<HashMap<String, (u32, Arc<AssetSource>)>> {
     SPA_ASSETS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Register a bundle's assets so the scheme handler can serve them.
+/// Register a bundle's assets (eager, all in memory).
 /// If the app_id already exists, increments the reference count.
 pub fn register_spa_assets(app_id: &str, assets: HashMap<String, Vec<u8>>) {
     let mut map = spa_assets().lock().unwrap();
     map.entry(app_id.to_string())
         .and_modify(|(rc, _)| *rc += 1)
-        .or_insert((1, assets));
+        .or_insert((1, Arc::new(AssetSource::Eager(assets))));
+}
+
+/// Register an IPFS-backed lazy asset source.
+/// Assets are fetched from the gateway on first access and cached.
+/// `initial_assets` may contain pre-fetched files (e.g. manifest.toml).
+pub fn register_spa_assets_lazy(
+    app_id: &str,
+    cid: &str,
+    gateway: &str,
+    initial_assets: HashMap<String, Vec<u8>>,
+) {
+    let mut map = spa_assets().lock().unwrap();
+    map.entry(app_id.to_string())
+        .and_modify(|(rc, _)| *rc += 1)
+        .or_insert((
+            1,
+            Arc::new(AssetSource::Lazy {
+                cid: cid.to_string(),
+                gateway: gateway.to_string(),
+                cache: Mutex::new(initial_assets),
+            }),
+        ));
 }
 
 /// Unregister a bundle's assets when the tab is closed.
@@ -41,9 +78,67 @@ pub fn unregister_spa_assets(app_id: &str) {
 }
 
 /// Look up a single asset by app_id and path.
+/// For lazy sources, fetches from IPFS on cache miss (blocks the calling thread).
 pub fn lookup_spa_asset(app_id: &str, path: &str) -> Option<Vec<u8>> {
-    let map = spa_assets().lock().unwrap();
-    map.get(app_id)?.1.get(path).cloned()
+    // Reject path traversal attempts.
+    if path.contains("..") || path.starts_with('/') {
+        log::warn!("[spa] rejected path traversal attempt: {path}");
+        return None;
+    }
+    let source = {
+        let map = spa_assets().lock().unwrap();
+        map.get(app_id)?.1.clone()
+    };
+
+    match &*source {
+        AssetSource::Eager(assets) => assets.get(path).cloned(),
+        AssetSource::Lazy {
+            cid,
+            gateway,
+            cache,
+        } => {
+            // Check cache first.
+            {
+                let c = cache.lock().unwrap();
+                if let Some(data) = c.get(path) {
+                    return Some(data.clone());
+                }
+            }
+            // Fetch from IPFS gateway.
+            let url = format!("{gateway}/ipfs/{cid}/{path}");
+            log::info!("[spa-lazy] fetching: {path} from {url}");
+            match fetch_ipfs_asset(&url) {
+                Ok(data) => {
+                    log::info!("[spa-lazy] cached: {path} ({} bytes)", data.len());
+                    let mut c = cache.lock().unwrap();
+                    c.insert(path.to_string(), data.clone());
+                    Some(data)
+                }
+                Err(e) => {
+                    log::warn!("[spa-lazy] failed to fetch {path}: {e}");
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Fetch a single file from an IPFS gateway URL.
+fn fetch_ipfs_asset(url: &str) -> Result<Vec<u8>, String> {
+    let agent = ureq::Agent::new_with_config(
+        ureq::config::Config::builder()
+            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .build(),
+    );
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| format!("fetch failed: {e}"))?;
+    resp.into_body()
+        .with_config()
+        .limit(10 * 1024 * 1024)
+        .read_to_vec()
+        .map_err(|e| format!("read failed: {e}"))
 }
 
 /// Guess MIME type from file extension.
@@ -75,7 +170,7 @@ pub fn mime_for_path(path: &str) -> &'static str {
 
 /// JSON rule that blocks all HTTP/HTTPS loads. Installed on SPA WebViews
 /// separately from the shield (which is for browsing tabs).
-const BLOCK_ALL_RULE_JSON: &str = r#"[{"trigger":{"url-filter":"^https?://"},"action":{"type":"block"}}]"#;
+const BLOCK_ALL_RULE_JSON: &str = r#"[{"trigger":{"url-filter":"^(https?|wss?)://"},"action":{"type":"block"}}]"#;
 
 /// Install a block-all content rule on the given WKUserContentController.
 #[cfg(target_os = "macos")]
@@ -198,7 +293,13 @@ pub const HOST_API_SCRIPT: &str = r#"
     function _call(channel, method, params) {
         const id = _nextId++;
         return new Promise((resolve, reject) => {
-            _pending.set(id, { resolve, reject });
+            var timer = setTimeout(function() {
+                if (_pending.delete(id)) reject(new Error('host timeout'));
+            }, 30000);
+            _pending.set(id, {
+                resolve: function(v) { clearTimeout(timer); resolve(v); },
+                reject:  function(e) { clearTimeout(timer); reject(e); }
+            });
             window.webkit.messageHandlers[channel].postMessage({
                 id: id,
                 method: method,
@@ -238,26 +339,36 @@ pub const HOST_API_SCRIPT: &str = r#"
             return _call('epocaHost', 'getAddress', {});
         },
 
-        // Statement Store API
-        statementStore: Object.freeze({
+        // Statements — publish/subscribe messaging via the host.
+        statements: Object.freeze({
             write: function(channel, data) {
-                return _call('epocaHost', 'storeWrite', { channel: channel, data: data });
+                return _call('epocaHost', 'statementsWrite', { channel: channel, data: data });
             },
             subscribe: function(channel) {
-                return _call('epocaHost', 'storeSubscribe', { channel: channel });
+                return _call('epocaHost', 'statementsSubscribe', { channel: channel });
             }
         }),
 
-        // WebSocket proxy — host mediates the connection.
-        ws: Object.freeze({
-            connect: function(url) {
-                return _call('epocaHost', 'wsConnect', { url: url });
+        // Data connections — P2P communication via the host.
+        data: Object.freeze({
+            connect: function(peerAddress) {
+                return _call('epocaHost', 'dataConnect', { peerAddress: peerAddress });
             },
             send: function(connId, data) {
-                return _call('epocaHost', 'wsSend', { connId: connId, data: data });
+                return _call('epocaHost', 'dataSend', { connId: connId, data: data });
             },
             close: function(connId) {
-                return _call('epocaHost', 'wsClose', { connId: connId });
+                return _call('epocaHost', 'dataClose', { connId: connId });
+            }
+        }),
+
+        // Chain interaction — queries and extrinsics via the host's light client.
+        chain: Object.freeze({
+            query: function(method, params) {
+                return _call('epocaHost', 'chainQuery', { method: method, params: params || {} });
+            },
+            submit: function(callData) {
+                return _call('epocaHost', 'chainSubmit', { callData: callData });
             }
         }),
 
@@ -275,6 +386,13 @@ pub const HOST_API_SCRIPT: &str = r#"
                 if (i >= 0) list.splice(i, 1);
             }
         }
+    });
+
+    // Block window.open — sandboxed apps must not open new browsing contexts.
+    Object.defineProperty(window, 'open', {
+        value: function() { console.warn('epoca: window.open is blocked in sandboxed apps'); return null; },
+        writable: false,
+        configurable: false
     });
 
     // Host pushes events to the app via this non-writable global.
@@ -430,7 +548,10 @@ pub fn register_host_handler(uc: *mut objc2::runtime::AnyObject, webview_ptr: us
                 };
 
                 let uc_addr = uc as usize;
-                let webview_ptr = HOST_UC_MAP.lock().unwrap().get(&uc_addr).copied().unwrap_or(0);
+                let webview_ptr = match HOST_UC_MAP.lock().unwrap().get(&uc_addr).copied() {
+                    Some(p) if p != 0 => p,
+                    _ => return, // UC already unregistered, drop the message
+                };
 
                 let _ = spa_host_channel().0.try_send((webview_ptr, id_num, method, params_json));
             }

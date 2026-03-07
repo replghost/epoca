@@ -76,7 +76,7 @@ video-overlay sweeping which Brave does not have.
 ### P1 — Core blocking (partially done)
 - [x] EasyList + EasyPrivacy + AdGuard Base → `epoca-rules-*` lists
 - [x] Cosmetic compiler: `##` rules → CSS injection via `WKUserScript` (document_end)
-- [ ] `window.open` block: `createWebViewWith` delegate denial + document_start override
+- [x] ~~`window.open` block: overridden at document_start in HOST_API_SCRIPT~~ (2026-03-06)
 - [x] **Shield status UI** — Eye/EyeOff icon, per-site toggle popover, blocked count badge
 - [x] Settings page: toggle shield on/off
 - [x] Background update loop (6-hour interval)
@@ -120,17 +120,20 @@ video-overlay sweeping which Brave does not have.
 ### Navigation & History
 - [x] ~~Persist browsing history to SQLite (`~/.epoca/history.db`)~~ (done — `history.rs`, configurable TTL, frecency search)
 - [x] ~~Omnibox autocomplete from history + open tabs~~ (done — cached history results in omnibox, Globe icon, two-line layout)
-- [ ] Back/forward swipe gestures (macOS trackpad)
-- [ ] Reading list / bookmarks (local, no sync account required)
+- [x] ~~Back/forward swipe gestures (macOS trackpad)~~ (2026-03-07)
+- [x] ~~Reading list / bookmarks (local, no sync account required)~~ (2026-03-06)
 
 ### Tab Management
 - [x] ~~Session contexts~~ (experimental — named contexts to share cookies across tab groups)
-- [ ] Session restore on launch (persist open tabs to disk, reopen on next launch)
+- [x] ~~Session restore on launch (persist open tabs to disk, reopen on next launch)~~ (2026-03-04)
 - [ ] Duplicate tab
-- [ ] Drag-to-reorder in sidebar
+- [x] ~~Drag-to-reorder in sidebar~~ (2026-03-07)
 - [ ] Pin/unpin tab (UI wired but persistence not implemented)
 - [ ] Tab search (filter sidebar by title/URL — omnibox partially does this)
 - [ ] Mute tab audio
+
+### Credential Autofill (1Password integration)
+- [ ] **System credential autofill via WKWebView** — Verify `WKWebViewConfiguration` allows macOS `ASCredentialProviderExtension` autofill (1Password, iCloud Keychain). Check that sandboxed and `nonPersistentDataStore` WebViews don't opt out. No Epoca code needed if WKWebView config is compatible; fix config if it blocks autofill.
 
 ### UI / UX
 - [x] ~~**Crash reporting**~~ — Sentry integrated with compile-time `SENTRY_DSN` env var
@@ -156,19 +159,23 @@ video-overlay sweeping which Brave does not have.
 ## P1 — PolkaVM App Platform (Epoca's unique value)
 
 ### `.prod` Bundle Format
-Sandboxed PolkaVM apps are packaged as `.prod` files — ZIP archives with a known structure:
+Sandboxed PolkaVM apps are packaged as `.prod` files — CARv1 (IPFS-native) or ZIP archives:
 ```
-my-app.prod (ZIP)
+my-app.prod (CARv1 or ZIP)
 ├── manifest.toml       # required — declares type, permissions, metadata
-├── app.polkavm          # required — compiled guest binary
+├── app.polkavm          # required for non-SPA — compiled guest binary
 ├── icon.png             # optional — app icon (256x256)
 ├── assets/              # optional — images, data files
 │   └── ...
 └── signature.toml       # optional — ed25519 signature over manifest + binary hash
 ```
-- [ ] **`ProdBundle` loader** — `epoca-sandbox/src/prod_bundle.rs`: parse ZIP, extract manifest, memory-map or load `app.polkavm`, mount `assets/` for `host_asset_read`
+- [x] **`ProdBundle` loader** — `epoca-sandbox/src/bundle.rs`: auto-detects ZIP or CARv1 format, parses manifest, loads `app.polkavm` + `assets/`
+- [x] **CARv1 parser** — `epoca-sandbox/src/car.rs`: walks dag-pb/UnixFS directory trees, reassembles multi-chunk files, handles raw leaves
+- [x] **`prod-pack` CLI** — `tools/prod-pack`: converts a bundle directory into a CARv1 `.prod` file with SHA-256 CIDv1 blocks
+- [x] **CID verification** — recompute SHA-256 per block during CAR parse and compare against embedded CID
+- [x] **Lazy IPFS asset loading** — DOTNS-resolved SPA tabs fetch assets on-demand from IPFS gateway instead of downloading everything upfront. `AssetSource::Lazy` in `spa.rs`, `dotns::resolve_lazy()`, `ProdBundle.ipfs_cid`
 - [ ] **`host_asset_read(name_ptr, name_len, offset, dst_ptr, max_len) -> u32`** — guest reads files from the `.prod` bundle's `assets/` directory
-- [ ] **Bundle signature verification** — ed25519 over `sha256(manifest.toml) + sha256(app.polkavm)`; optional but checked if present
+- [x] ~~**Bundle signature verification** — ed25519 over `sha256(manifest.toml) + sha256(app.polkavm)`; optional but checked if present~~ (2026-03-06)
 - [ ] **`open_prod_bundle(path)`** in Workbench — reads `.prod`, dispatches to correct tab type based on `manifest.toml` type field
 
 ### Manifest Types
@@ -245,10 +252,11 @@ version = "1.0.0"
 entry = "index.html"
 sandbox = "strict"
 [permissions]
-statement_store = true
+statements = true
 sign = true
+chain = true
+data = true
 media = ["camera", "audio"]
-network = []
 ```
 - Hosts a bundled client-side SPA (HTML/JS/CSS) in a WKWebView, loaded via `epocaapp://` custom URL scheme
 - **No network access** — `WKURLSchemeHandler` serves assets from bundle; `block-all` WKContentRuleList prevents outbound HTTP
@@ -259,14 +267,18 @@ network = []
 - [x] **`SpaTab` struct + `TabKind::Spa`** — placeholder UI, bundle loading, session restore support (2026-03-05)
 - [x] **`ProdBundle` extended** — `program_bytes` optional for `type = "spa"`, `WebAppMeta` parsed from `[webapp]` section
 - [x] **`open_webapp()` in Workbench** — dispatches `.prod` bundles with `type = "spa"` to `SpaTab`
-- [ ] **`WKURLSchemeHandler` for `epocaapp://`** — ObjC class serves assets from in-memory `HashMap`
-- [ ] **`window.epoca` injection** — `addUserScript` at `documentStart`; Promise-based API with correlation IDs
-- [ ] **Signing relay** — `epocaSign` WKScriptMessageHandler → GPUI confirmation dialog → host signs → JS Promise resolves
-- [ ] **Statement Store relay** — `epocaStore` WKScriptMessageHandler → broker check → Rust-side Substrate client
-- [ ] **WebSocket proxy** — `epocaWs` handler; host opens native WebSocket, relays messages; broker checks `network` allowlist
-- [ ] **`block-all` WKContentRuleList** — installed on SPA WebViews (separate from shield rules)
-- [ ] **Bundle signature verification** — required for apps requesting `sign = true`
-- [ ] **TypeScript type definitions** — `@epoca/host-api` package for `window.epoca` type safety
+- [x] **`WKURLSchemeHandler` for `epocaapp://`** — `with_custom_protocol` serves assets from `SPA_ASSETS` registry (eager or lazy IPFS)
+- [x] **`window.epoca` injection** — `HOST_API_SCRIPT` at `documentStart`; Promise-based API with correlation IDs via `__epocaResolve`
+- [x] **Signing relay** — `epocaHost` WKScriptMessageHandler → `PendingSpaSign` → GPUI confirmation dialog → host signs → JS Promise resolves
+- [x] ~~**Statements pub/sub** — `epoca.statements.write/subscribe`, local in-memory pub/sub, namespaced by app_id, drain loop pushes events to webviews~~ (2026-03-06)
+- [x] ~~**Chain query/submit** — `epoca.chain.query` (method allowlist) + `epoca.chain.submit` (approval dialog), chain read from manifest~~ (2026-03-06)
+- [x] ~~**Data connections scaffold** — `epoca.data.connect/send/close`, connection state management, approval dialog, events wired (needs str0m WebRTC transport)~~ (2026-03-06)
+- [x] ~~**Manifest permission enforcement** — chain/statements/data APIs require declared permissions in manifest~~ (2026-03-06)
+- [ ] **Cross-host statement delivery** — statements currently local-only; needs gossip/networking for multi-node pub/sub
+- [ ] **str0m WebRTC transport** — P2P data connections via str0m, SDP signaling over statements
+- [x] **`block-all` WKContentRuleList** — `install_block_all_rule()` in `spa.rs` (skipped at runtime due to startup race; CSP headers enforce instead)
+- [x] ~~**Bundle signature verification** — required for apps requesting `sign = true`~~ (2026-03-06)
+- [x] ~~**TypeScript type definitions** — `types/epoca-host-api.d.ts` with full `window.epoca` types~~ (2026-03-06)
 
 ### Guest Host API (all app types)
 Expand the host function surface beyond current `host_set_view`/`host_poll_event`/`host_fetch`/`host_log`:
@@ -290,10 +302,10 @@ gpu = "2d"
 framebuffer = true
 max_gas_per_update = 2000000000
 ```
-- [ ] **`host_present_frame(ptr, width, height, stride)`** — guest hands ARGB pixel buffer to host; host converts to BGRA, uploads via GPUI `paint_image`
-- [ ] **`host_poll_input(buf_ptr, buf_len) -> u32`** — keyboard/mouse events as `InputEvent { type: u8, key_code: u8 }` structs
-- [ ] **`FramebufferSandboxInstance`** — variant of `SandboxInstance` with framebuffer host functions instead of ViewTree functions
-- [ ] **`FramebufferAppTab`** — new tab type using `paint_image` to blit pixels, captures GPUI key events → input queue, scales framebuffer to fill bounds
+- [x] **`host_present_frame(ptr, width, height, stride)`** — guest hands ARGB pixel buffer to host; host converts to BGRA, uploads via GPUI `paint_image`
+- [x] **`host_poll_input(buf_ptr, buf_len) -> u32`** — keyboard/mouse events as `InputEvent { type: u8, key_code: u8 }` structs
+- [x] **`FramebufferSandboxInstance`** — variant of `SandboxInstance` with framebuffer host functions instead of ViewTree functions
+- [x] **`FramebufferAppTab`** — new tab type using `paint_image` to blit pixels, captures GPUI key events → input queue, scales framebuffer to fill bounds
 - [ ] **Gas metering for framebuffer apps** — configurable via `manifest.toml [sandbox]` section; `GasMeteringKind::Async` preferred for perf
 
 ### DOOM on PolkaVM (proof of concept)
@@ -303,8 +315,8 @@ Source lives in the separate [epoca-games](https://github.com/replghost/epoca-ga
 - [x] Patch doomgeneric WAD I/O (`w_wad.c`) to use `host_asset_read` instead of `fopen`/`fread`
 - [x] Implement libc shim: `malloc`/`free` (8MB static arena bump allocator), `memcpy`/`memset`, `printf`→`host_log`, `exit`→`unimp`
 - [x] Build pipeline: `cargo +nightly build -Z build-std=core,alloc --target $(polkatool get-target-json-path --bitness 32) --release` then `polkatool link`
-- [ ] Validate 35fps at 320×200 in `FramebufferAppTab` with `doom1.wad` (shareware, ~4MB)
-- [ ] Soft-float: verify clang `-march=rv32emac -mabi=ilp32e` soft-float works for Doom's trig (`cos`/`sin`/`atan2`)
+- [x] ~~Validate 35fps at 320×200 in `FramebufferAppTab` with `doom1.wad` (shareware, ~4MB)~~ (50+ fps after JIT, 2026-03-07)
+- [x] ~~Soft-float: verify clang `-march=rv32emac -mabi=ilp32e` soft-float works for Doom's trig (`cos`/`sin`/`atan2`)~~ (confirmed working via gameplay, 2026-03-07)
 
 ### Scene Graph API (3D, medium-term)
 For GPU-accelerated 3D rendering — guest describes scene, host renders with Metal:
@@ -352,12 +364,12 @@ the host renders them natively (GPUI on desktop, wgpu on Android, future: web/iO
 ### App Installation & Library
 App identity = `app.id` from manifest. Two `.prod` files with the same `id` are the same app (newer replaces older).
 
-**Phase 1 — MVP (in progress)**
-- [ ] **File → Open App** — file picker filtered to `.prod`, opens and installs
-- [ ] **Install to `~/.epoca/apps/`** — on first open, extract `.prod` to `~/.epoca/apps/{app_id}/`; subsequent launches load from disk (skip ZIP extraction + binary-search file size probe)
-- [ ] **App Library tab** — built-in tab showing installed apps as a grid of cards (icon, name, last launched); click to launch; right-click to uninstall
+**Phase 1 — MVP (done)**
+- [x] **File → Open App** — file picker filtered to `.prod`, opens and installs (2026-03-06)
+- [x] **Install to `~/.epoca/apps/`** — on first open, extract `.prod` to `~/.epoca/apps/{app_id}/`; subsequent launches load from disk (2026-03-06)
+- [x] **App Library tab** — built-in tab showing installed apps as a grid of cards (icon, name, last launched); click to launch (2026-03-06)
 - [ ] **Session restore for FramebufferApp tabs** — re-open from installed path on restore
-- [ ] **Controls hint overlay** — `controls_hint` field in manifest, shown on first launch, dismissed on keypress
+- [x] **Controls hint overlay** — `controls_hint` field in manifest, shown on first launch, dismissed on keypress (2026-03-06)
 
 **Phase 2 — Polish**
 - [ ] Register `.prod` UTI — Open With / double-click from Finder
@@ -431,10 +443,10 @@ via the WebAuthn / FIDO2 standard. This is table-stakes for security-conscious u
 - [x] **App ID collision via filename** — uses canonical path
 - [ ] **ZML actions not broker-checked at execution time** — `exec_actions` runs actions without consulting the broker. Add per-action broker checks for fetch/storage/clipboard.
 - [ ] **Network fetch is fully stubbed** — broker allows fetch but nothing executes. When implementing: run on background thread, cap response size (10 MB), reject redirect chains outside declared domain.
-- [ ] **Permission store in cwd** — `epoca_permissions.json` lives in the working directory. Move to `~/Library/Application Support/Epoca/` on macOS.
+- [x] ~~**Permission store in cwd** — moved to `~/Library/Application Support/Epoca/permissions.json` on macOS, `~/.epoca/permissions.json` elsewhere~~ (2026-03-06)
 
 ### QA findings (from automated review)
-- [ ] **Broker lock poisoning ignored** — all `broker.lock()` calls silently discard poisoning. Recover with `poisoned.into_inner()` and log the error.
+- [x] ~~**Broker lock poisoning** — all `broker.lock()` calls now recover via `into_inner()` with error logging~~ (2026-03-06)
 - [ ] **ZML state reset heuristic too coarse** — state is fully reset if state-block *count* changes. Should compare variable names instead.
 - [ ] **`find_node_by_callback` unbounded recursion** — malformed ZML with deeply nested views could stack-overflow. Add a depth limit (e.g. 1000).
 

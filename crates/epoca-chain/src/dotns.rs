@@ -12,12 +12,20 @@
 
 use std::collections::HashMap;
 use tiny_keccak::{Hasher, Keccak};
+use epoca_sandbox::car::{is_car_file, parse_car_to_assets};
 
 /// DOTNS content resolver contract on Asset Hub Paseo.
 const CONTENT_RESOLVER: [u8; 20] = hex_addr("7756DF72CBc7f062e7403cD59e45fBc78bed1cD7");
 
 /// Solidity function selector for `contenthash(bytes32)`.
 const CONTENTHASH_SELECTOR: [u8; 4] = [0xbc, 0x1c, 0x58, 0xd1];
+
+/// DOTNS registry contract on Asset Hub Paseo.
+const REGISTRY: [u8; 20] = hex_addr("4Da0d37aBe96C06ab19963F31ca2DC0412057a6f");
+
+/// Solidity function selector for `owner(bytes32)` on the DOTNS registry.
+/// keccak256("owner(bytes32)")[:4]
+const OWNER_SELECTOR: [u8; 4] = [0x02, 0x57, 0x1b, 0xe3];
 
 /// JSON-RPC endpoints for Asset Hub Paseo (tried in order).
 const RPC_ENDPOINTS: &[&str] = &[
@@ -208,7 +216,7 @@ fn rpc_state_call(method: &str, params_hex: &str) -> Result<Vec<u8>, String> {
             .send(payload_str.as_bytes());
         match result {
             Ok(resp) => {
-                let resp_bytes = match resp.into_body().read_to_vec() {
+                let resp_bytes = match resp.into_body().with_config().limit(2 * 1024 * 1024).read_to_vec() {
                     Ok(v) => v,
                     Err(e) => {
                         log::warn!("[dotns] failed to read response from {endpoint}: {e}");
@@ -403,6 +411,9 @@ fn decode_unsigned_varint(data: &[u8]) -> (u64, usize) {
     let mut value: u64 = 0;
     let mut shift = 0;
     for (i, &byte) in data.iter().enumerate() {
+        if shift >= 64 {
+            break;
+        }
         value |= ((byte & 0x7f) as u64) << shift;
         if byte & 0x80 == 0 {
             return (value, i + 1);
@@ -482,42 +493,153 @@ pub fn resolve_dotns(name: &str) -> Result<String, String> {
     Ok(cid)
 }
 
+/// Resolve the owner of a .dot name by calling `owner(bytes32)` on the DOTNS registry.
+/// Returns the H160 address as a `0x`-prefixed hex string, or `None` on failure.
+pub fn resolve_owner(name: &str) -> Option<String> {
+    let domain = if name.ends_with(".dot") {
+        name.to_string()
+    } else {
+        format!("{name}.dot")
+    };
+    let node = namehash(&domain);
+
+    let mut call_data = Vec::with_capacity(36);
+    call_data.extend_from_slice(&OWNER_SELECTOR);
+    call_data.extend_from_slice(&node);
+
+    let params = scale_encode_revive_call(&REGISTRY, &call_data);
+    let params_hex = hex_encode(&params);
+
+    let response = rpc_state_call("ReviveApi_call", &params_hex).ok()?;
+    let return_data = decode_contract_result(&response).ok()?;
+
+    // ABI-encoded address: 32 bytes, address right-aligned (bytes 12..32).
+    if return_data.len() < 32 {
+        return None;
+    }
+    let addr_bytes = &return_data[12..32];
+    if addr_bytes.iter().all(|&b| b == 0) {
+        return None;
+    }
+    Some(format!(
+        "0x{}",
+        addr_bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ))
+}
+
 /// Fetch content from IPFS and return a map of filename → bytes.
 ///
-/// Tries the IPFS gateway to fetch the CID. If the content is a single HTML file,
-/// returns it as `{"index.html": bytes}`. If it's a directory listing, fetches
-/// individual files.
+/// Strategy:
+/// 1. Request directory listing via `Accept: text/html` + `?format=html` query
+///    param (forces gateway to return listing instead of index.html).
+/// 2. If that works, parse filenames from listing and fetch each file.
+/// 3. If the CID is a single file (not a directory), treat it as index.html.
 pub fn fetch_ipfs(cid: &str) -> Result<HashMap<String, Vec<u8>>, String> {
-    let url = format!("{IPFS_GATEWAY}/ipfs/{cid}/");
-    log::info!("[dotns] fetching IPFS: {url}");
+    log::info!("[dotns] fetching IPFS: {cid}");
 
-    // First, try fetching as a directory (with trailing slash)
-    match fetch_ipfs_url(&url) {
+    // Try to get a directory listing. Many gateways support ?format=html to
+    // force directory listing mode even when index.html exists.
+    let listing_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/?format=html&noResolve");
+    if let Ok((ct, body)) = fetch_ipfs_url(&listing_url) {
+        if ct.contains("text/html") && looks_like_directory_listing(&body) {
+            log::info!("[dotns] got directory listing for {cid}");
+            return fetch_ipfs_directory(cid, &body);
+        }
+    }
+
+    // Fallback: the gateway may not support ?format=html, or the CID is a
+    // regular directory that serves index.html. Try the trailing-slash request.
+    let dir_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/");
+    match fetch_ipfs_url_large(&dir_url) {
         Ok((content_type, body)) => {
+            // CAR file returned even with trailing slash
+            if content_type.contains("octet-stream") && body.len() > 60 && is_car_file(&body) {
+                log::info!("[dotns] detected CAR file from dir request ({} bytes)", body.len());
+                return parse_car_to_assets(&body);
+            }
             if content_type.contains("text/html") && looks_like_directory_listing(&body) {
-                // Parse directory listing and fetch individual files
                 return fetch_ipfs_directory(cid, &body);
             }
-            // Single file — treat as index.html
+            // Gateway served index.html directly from the directory.
+            // We have index.html but may be missing companion files (CSS, JS).
+            // Parse the HTML to discover referenced local assets and fetch them.
             let mut assets = HashMap::new();
+            let referenced = extract_local_references(&body);
+            for path in &referenced {
+                let file_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/{path}");
+                log::info!("[dotns] fetching referenced asset: {path}");
+                match fetch_ipfs_url(&file_url) {
+                    Ok((_, file_body)) => { assets.insert(path.clone(), file_body); }
+                    Err(e) => { log::warn!("[dotns] failed to fetch {path}: {e}"); }
+                }
+            }
             assets.insert("index.html".into(), body);
             return Ok(assets);
         }
         Err(_) => {}
     }
 
-    // Fallback: fetch without trailing slash (single file)
+    // Last resort: fetch without trailing slash — might be a single file or CAR.
     let url = format!("{IPFS_GATEWAY}/ipfs/{cid}");
-    let (_, body) = fetch_ipfs_url(&url)?;
+    let (content_type, body) = fetch_ipfs_url_large(&url)?;
+
+    // Detect CAR files: content-type is application/octet-stream and starts with
+    // CAR magic (CBOR map with "roots" + "version" keys).
+    if content_type.contains("octet-stream") && body.len() > 60 && is_car_file(&body) {
+        log::info!("[dotns] detected CAR file ({} bytes), parsing...", body.len());
+        return parse_car_to_assets(&body);
+    }
+
     let mut assets = HashMap::new();
     assets.insert("index.html".into(), body);
     Ok(assets)
 }
 
+/// Extract local asset paths referenced in HTML (src="...", href="...").
+/// Only returns relative paths (no http://, //, data:, #, etc.).
+fn extract_local_references(html_bytes: &[u8]) -> Vec<String> {
+    let html = std::str::from_utf8(html_bytes).unwrap_or("");
+    let mut paths = Vec::new();
+    // Match src="..." and href="..." attributes
+    for attr in &["src=\"", "href=\""] {
+        for segment in html.split(attr).skip(1) {
+            if let Some(end) = segment.find('"') {
+                let path = &segment[..end];
+                // Skip absolute URLs, anchors, data URIs, empty
+                if path.is_empty()
+                    || path.starts_with("http://")
+                    || path.starts_with("https://")
+                    || path.starts_with("//")
+                    || path.starts_with("data:")
+                    || path.starts_with('#')
+                    || path.starts_with("javascript:")
+                {
+                    continue;
+                }
+                let clean = path.trim_start_matches("./");
+                if !clean.is_empty() && !clean.contains("..") && !paths.contains(&clean.to_string()) {
+                    paths.push(clean.to_string());
+                }
+            }
+        }
+    }
+    paths
+}
+
+// CAR/UnixFS parsing lives in epoca_sandbox::car (imported at top).
+
 fn fetch_ipfs_url(url: &str) -> Result<(String, Vec<u8>), String> {
+    fetch_ipfs_url_with_limit(url, 10 * 1024 * 1024)
+}
+
+fn fetch_ipfs_url_large(url: &str) -> Result<(String, Vec<u8>), String> {
+    fetch_ipfs_url_with_limit(url, 64 * 1024 * 1024)
+}
+
+fn fetch_ipfs_url_with_limit(url: &str, max_bytes: u64) -> Result<(String, Vec<u8>), String> {
     let agent = ureq::Agent::new_with_config(
         ureq::config::Config::builder()
-            .timeout_global(Some(std::time::Duration::from_secs(30)))
+            .timeout_global(Some(std::time::Duration::from_secs(60)))
             .build(),
     );
     let resp = agent
@@ -533,6 +655,8 @@ fn fetch_ipfs_url(url: &str) -> Result<(String, Vec<u8>), String> {
         .to_string();
 
     let body = resp.into_body()
+        .with_config()
+        .limit(max_bytes)
         .read_to_vec()
         .map_err(|e| format!("IPFS read failed: {e}"))?;
 
@@ -540,9 +664,12 @@ fn fetch_ipfs_url(url: &str) -> Result<(String, Vec<u8>), String> {
 }
 
 fn looks_like_directory_listing(body: &[u8]) -> bool {
-    // IPFS directory listings contain links to files
+    // IPFS gateway directory listings have a specific structure —
+    // don't confuse actual HTML pages (which also have <a href=) with listings.
     let s = std::str::from_utf8(body).unwrap_or("");
-    s.contains("Index of") || s.contains("<a href=")
+    // Kubo/go-ipfs gateway listings contain "Index of" in the title.
+    // Some gateways use a JSON directory listing or "ipfs-404.html" page.
+    s.contains("Index of /ipfs") || s.contains("<title>Index of")
 }
 
 fn fetch_ipfs_directory(cid: &str, listing_html: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
@@ -587,10 +714,72 @@ fn fetch_ipfs_directory(cid: &str, listing_html: &[u8]) -> Result<HashMap<String
     Ok(assets)
 }
 
+/// Result of a full DOTNS resolution — includes the CID for verification display.
+pub struct DotnsResolution {
+    /// The IPFS CID that was resolved on-chain.
+    pub cid: String,
+    /// On-chain owner/addr associated with this name (if resolvable).
+    pub owner: Option<String>,
+    /// Fetched assets from IPFS.
+    pub assets: HashMap<String, Vec<u8>>,
+}
+
+/// Lightweight DOTNS resolution — resolves CID, fetches only manifest.toml.
+/// Returns the CID, owner, and parsed manifest. Assets are NOT fetched;
+/// callers should use `IPFS_GATEWAY` to fetch them lazily.
+pub struct DotnsLazyResolution {
+    pub cid: String,
+    pub owner: Option<String>,
+    /// `None` when the IPFS content has no `manifest.toml`
+    /// (e.g. a raw website or Product SDK app deployed directly to IPFS).
+    pub manifest_bytes: Option<Vec<u8>>,
+}
+
+/// The IPFS gateway URL used for fetching content.
+pub fn ipfs_gateway() -> &'static str {
+    IPFS_GATEWAY
+}
+
 /// Full resolution pipeline: DOTNS lookup → IPFS fetch → asset map.
 pub fn resolve_and_fetch(name: &str) -> Result<HashMap<String, Vec<u8>>, String> {
+    let r = resolve_and_fetch_full(name)?;
+    Ok(r.assets)
+}
+
+/// Full resolution pipeline with metadata: DOTNS lookup → IPFS fetch → resolution struct.
+pub fn resolve_and_fetch_full(name: &str) -> Result<DotnsResolution, String> {
     let cid = resolve_dotns(name)?;
-    fetch_ipfs(&cid)
+    // Best-effort: resolve the on-chain owner from the DOTNS registry.
+    let owner = resolve_owner(name);
+    log::info!("[dotns] owner for {name}: {owner:?}");
+    let assets = fetch_ipfs(&cid)?;
+    Ok(DotnsResolution { cid, owner, assets })
+}
+
+/// Lazy resolution: DOTNS lookup → fetch only manifest.toml.
+/// Assets are fetched on-demand by the SPA runtime via the IPFS gateway.
+pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
+    let cid = resolve_dotns(name)?;
+    let owner = resolve_owner(name);
+    log::info!("[dotns] lazy resolve {name}: cid={cid}, owner={owner:?}");
+
+    let manifest_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/manifest.toml");
+    let manifest_bytes = match fetch_ipfs_url(&manifest_url) {
+        Ok((_, bytes)) => {
+            log::info!("[dotns] fetched manifest.toml ({} bytes)", bytes.len());
+            Some(bytes)
+        }
+        Err(e) => {
+            log::info!("[dotns] no manifest.toml ({e}), treating as raw web app");
+            None
+        }
+    };
+
+    Ok(DotnsLazyResolution {
+        cid,
+        owner,
+        manifest_bytes,
+    })
 }
 
 #[cfg(test)]
@@ -629,6 +818,17 @@ mod tests {
 
     #[test]
     #[ignore] // requires network
+    fn test_resolve_dailydotpuzzles() {
+        eprintln!("Resolving dailydotpuzzles.dot ...");
+        let result = resolve_dotns("dailydotpuzzles");
+        eprintln!("Result: {result:?}");
+        let cid = result.expect("DOTNS resolution failed for dailydotpuzzles");
+        eprintln!("CID: {cid}");
+        assert!(!cid.is_empty());
+    }
+
+    #[test]
+    #[ignore] // requires network
     fn test_full_pipeline_mytestapp() {
         let assets = resolve_and_fetch("mytestapp").expect("resolve_and_fetch failed");
         eprintln!("Fetched {} assets:", assets.len());
@@ -636,6 +836,17 @@ mod tests {
             eprintln!("  {name}: {} bytes", data.len());
         }
         assert!(assets.contains_key("index.html"), "missing index.html");
+    }
+
+    #[test]
+    #[ignore] // requires network
+    fn test_resolve_owner_mytestapp() {
+        let owner = resolve_owner("mytestapp");
+        eprintln!("owner: {owner:?}");
+        assert!(owner.is_some(), "owner should be resolvable");
+        let addr = owner.unwrap();
+        assert!(addr.starts_with("0x"), "owner should be 0x-prefixed H160");
+        assert_eq!(addr.len(), 42, "owner should be 42 chars (0x + 40 hex)");
     }
 
     #[test]

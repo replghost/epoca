@@ -85,7 +85,47 @@ pub fn is_restorable(kind: &TabKind) -> bool {
         TabKind::WebView { .. }
             | TabKind::Settings
             | TabKind::AppLibrary
+            | TabKind::Bookmarks
             | TabKind::CodeEditor { .. }
             | TabKind::DeclarativeApp { .. }
     )
+}
+
+// ---------------------------------------------------------------------------
+// Approved dot apps persistence — maps app name → CID
+// ---------------------------------------------------------------------------
+
+fn approved_apps_path() -> PathBuf {
+    let mut p = session_path();
+    p.set_file_name("approved_apps.json");
+    p
+}
+
+/// Load approved dot apps from disk.
+pub fn load_approved_apps() -> std::collections::HashMap<String, String> {
+    let path = approved_apps_path();
+    let data = match std::fs::read_to_string(&path) {
+        Ok(d) => d,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    serde_json::from_str(&data).unwrap_or_default()
+}
+
+/// Save approved dot apps to disk (atomic write).
+pub fn save_approved_apps(apps: &std::collections::HashMap<String, String>) {
+    let path = approved_apps_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let tmp = path.with_extension("json.tmp");
+    match serde_json::to_string_pretty(apps) {
+        Ok(json) => {
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to serialize approved apps: {e}");
+        }
+    }
 }
