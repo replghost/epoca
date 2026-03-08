@@ -6,6 +6,13 @@ use epoca_protocol::{
     deserialize_view_tree, serialize_event, GuestEvent, ViewTree,
 };
 
+/// Shared ring buffer for audio: interleaved i16 stereo samples (L, R, L, R, …).
+/// Fed by `host_audio_submit` on the game thread, drained by the cpal callback.
+type AudioRing = Arc<Mutex<VecDeque<i16>>>;
+
+/// 2 seconds of stereo 44100 Hz audio — maximum buffer before we drop oldest samples.
+const AUDIO_RING_MAX: usize = 44100 * 2 * 2;
+
 /// An input event for framebuffer guests (8 bytes, packed).
 ///
 /// Event types:
@@ -71,10 +78,12 @@ struct HostState {
     time_origin: std::time::Instant,
     /// Set by `host_yield` to signal cooperative yield from the guest.
     yield_requested: bool,
+    /// Ring buffer shared with the cpal audio callback thread.
+    audio_ring: AudioRing,
 }
 
-impl Default for HostState {
-    fn default() -> Self {
+impl HostState {
+    fn new(audio_ring: AudioRing) -> Self {
         Self {
             view_tree: None,
             event_queue: VecDeque::new(),
@@ -84,6 +93,7 @@ impl Default for HostState {
             assets: HashMap::new(),
             time_origin: std::time::Instant::now(),
             yield_requested: false,
+            audio_ring,
         }
     }
 }
@@ -108,6 +118,40 @@ fn read_guest_memory(
     Ok(buf)
 }
 
+/// Build a cpal output stream that drains samples from the shared audio ring buffer.
+/// Returns `None` if no audio device is available (audio will be silently disabled).
+fn build_audio_stream(audio_ring: &AudioRing) -> Option<cpal::Stream> {
+    use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+
+    let host = cpal::default_host();
+    let device = host.default_output_device()?;
+
+    let config = cpal::StreamConfig {
+        channels: 2,
+        sample_rate: cpal::SampleRate(44100),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    let ring = Arc::clone(audio_ring);
+    let stream = device
+        .build_output_stream(
+            &config,
+            move |output: &mut [i16], _info: &cpal::OutputCallbackInfo| {
+                let mut buf = ring.lock().unwrap();
+                for sample in output.iter_mut() {
+                    *sample = buf.pop_front().unwrap_or(0);
+                }
+            },
+            |err| log::error!("[audio] cpal stream error: {err}"),
+            None,
+        )
+        .ok()?;
+
+    stream.play().ok()?;
+    log::info!("[audio] cpal output stream started (44100 Hz stereo i16)");
+    Some(stream)
+}
+
 /// A running PolkaVM sandbox instance.
 pub struct SandboxInstance {
     instance: Instance<HostState, anyhow::Error>,
@@ -117,7 +161,16 @@ pub struct SandboxInstance {
     /// True when the guest yielded mid-execution via `host_yield`.
     /// The next `call_update` will resume execution instead of calling "update".
     yielded: bool,
+    /// Keeps the cpal audio stream alive. Dropped when the sandbox is dropped.
+    _audio_stream: Option<SendStream>,
 }
+
+/// Wrapper to make cpal::Stream Send. CoreAudio streams are internally
+/// thread-safe (callback runs on its own thread), but contain raw pointers
+/// that prevent auto-Send. This is safe because we only hold the stream
+/// alive — we never access its internals from another thread.
+struct SendStream(cpal::Stream);
+unsafe impl Send for SendStream {}
 
 impl SandboxInstance {
     /// Create a new sandbox from a .polkavm program blob.
@@ -306,6 +359,41 @@ impl SandboxInstance {
             )
             .context("Failed to define host_yield")?;
 
+        // host_audio_submit(ptr: u32, num_samples: u32) -> u32
+        // Submits interleaved i16 stereo PCM at 44100 Hz into the shared audio ring buffer.
+        // num_samples is the count of i16 values (stereo frames * 2).
+        // Returns 0 on success, 1 if samples were dropped due to buffer overflow.
+        linker
+            .define_typed(
+                "host_audio_submit",
+                |caller: polkavm::Caller<'_, HostState>, ptr: u32, num_samples: u32| -> Result<u32, anyhow::Error> {
+                    if num_samples == 0 {
+                        return Ok(0);
+                    }
+                    // Hard cap: 1 second per call
+                    if num_samples > 44100 * 2 {
+                        return Ok(1);
+                    }
+                    let byte_len = num_samples.checked_mul(2)
+                        .ok_or_else(|| anyhow!("audio submit overflow"))?;
+                    let bytes = read_guest_memory(caller.instance, ptr, byte_len)?;
+
+                    let mut ring = caller.user_data.audio_ring.lock().unwrap();
+
+                    // Drop oldest on overflow
+                    let overflow = (ring.len() + num_samples as usize).saturating_sub(AUDIO_RING_MAX);
+                    if overflow > 0 {
+                        ring.drain(..overflow);
+                    }
+
+                    ring.extend(
+                        bytes.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    );
+                    Ok(if overflow > 0 { 1 } else { 0 })
+                },
+            )
+            .context("Failed to define host_audio_submit")?;
+
         // host_asset_read(name_ptr: u32, name_len: u32, offset: u32, dst_ptr: u32, max_len: u32) -> u32
         // Reads from HostState.assets, writes slice into guest memory, returns bytes read (0 = not found / EOF).
         linker
@@ -342,9 +430,18 @@ impl SandboxInstance {
             .instantiate()
             .context("Failed to instantiate module")?;
 
-        let state = Arc::new(Mutex::new(HostState::default()));
+        let audio_ring: AudioRing = Arc::new(Mutex::new(VecDeque::with_capacity(AUDIO_RING_MAX)));
+        let audio_stream = build_audio_stream(&audio_ring).map(SendStream);
 
-        Ok(Self { instance, state, max_gas_per_update: config.max_gas_per_update, yielded: false })
+        let state = Arc::new(Mutex::new(HostState::new(audio_ring)));
+
+        Ok(Self {
+            instance,
+            state,
+            max_gas_per_update: config.max_gas_per_update,
+            yielded: false,
+            _audio_stream: audio_stream,
+        })
     }
 
     /// Load a .polkavm file from disk.
@@ -463,5 +560,12 @@ impl SandboxInstance {
     pub fn load_assets(&self, assets: HashMap<String, Vec<u8>>) {
         let mut state = self.state.lock().unwrap();
         state.assets = assets;
+    }
+
+    /// Returns true if the audio ring buffer has samples in it (guest is producing audio).
+    pub fn audio_active(&self) -> bool {
+        let state = self.state.lock().unwrap();
+        let ring = state.audio_ring.lock().unwrap();
+        !ring.is_empty()
     }
 }

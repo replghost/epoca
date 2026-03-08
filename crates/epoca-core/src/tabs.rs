@@ -923,6 +923,8 @@ struct FramebufferShared {
     stopped: bool,
     /// Frame counter incremented by the background thread.
     frame_count: u64,
+    /// True when the guest is producing audio samples.
+    audio_active: bool,
 }
 
 pub struct FramebufferAppTab {
@@ -980,6 +982,7 @@ impl FramebufferAppTab {
             error: None,
             stopped: false,
             frame_count: 0,
+            audio_active: false,
         }));
 
         let mut init_error = None;
@@ -1085,6 +1088,13 @@ impl FramebufferAppTab {
                 log::info!("[fb-bg] tick {} ok", tick_count);
             }
 
+            // Update audio activity flag (check every 30 ticks to avoid lock contention).
+            if tick_count % 30 == 0 {
+                let active = sandbox.audio_active();
+                let mut s = shared.lock().unwrap();
+                s.audio_active = active;
+            }
+
             // If the guest presented a frame, convert to RGBA and build RenderImage.
             // Guest writes 0xAARRGGBB u32s. On little-endian (riscv32) that's [B,G,R,A] in memory.
             if let Some((argb, w, h)) = sandbox.take_framebuffer() {
@@ -1157,6 +1167,11 @@ impl FramebufferAppTab {
             }
             cx.notify();
         }
+    }
+
+    /// Whether the sandbox is currently producing audio.
+    pub fn audio_active(&self) -> bool {
+        self.shared.lock().unwrap().audio_active
     }
 
     /// Translate a GPUI keystroke into a key_code for the guest.

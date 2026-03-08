@@ -16,6 +16,7 @@ sha2 = "0.10"
 ed25519-zebra = "4"
 hex = "0.4"
 zstd = { workspace = true }
+cpal = "0.15"
 
 [dev-dependencies]
 rand_core = { version = "0.6", features = ["getrandom"] }

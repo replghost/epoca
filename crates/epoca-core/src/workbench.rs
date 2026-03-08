@@ -3219,10 +3219,21 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                                     cid: Some(resolution.cid.clone()),
                                     owner: resolution.owner,
                                 };
+
+                                // For non-SPA bundles, extract program + assets from fetched files.
+                                let mut all_files = resolution.all_files;
+                                let program_bytes = all_files.remove("app.polkavm");
+                                // Strip "assets/" prefix from remaining files.
+                                let mut assets = HashMap::new();
+                                for (k, v) in all_files {
+                                    if k == "manifest.toml" { continue; }
+                                    let key = k.strip_prefix("assets/").unwrap_or(&k).to_string();
+                                    assets.insert(key, v);
+                                }
                                 let bundle = ProdBundle {
                                     manifest,
-                                    program_bytes: None,
-                                    assets: HashMap::new(),
+                                    program_bytes,
+                                    assets,
                                     ipfs_cid: Some(resolution.cid.clone()),
                                 };
 
@@ -4304,6 +4315,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             _pinned: bool,
                             context_color: Option<Rgba>,
                             wallet_connected: bool,
+                            audio_active: bool,
                             cx: &mut Context<Self>| {
             let close_icon = IconName::Close;
             let close_id = SharedString::from(format!("close-{tab_id}"));
@@ -4351,6 +4363,17 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .truncate()
                         .child(title),
                 )
+                // Audio indicator — small teal dot when guest is producing audio
+                .when(audio_active, |d| {
+                    d.child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded_full()
+                            .bg(rgba(0x00d4aacc_u32))
+                            .flex_shrink_0()
+                    )
+                })
                 // Wallet connected indicator — CircleCheck icon next to close button
                 .when(wallet_connected, |d| {
                     d.child(
@@ -4413,6 +4436,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             let cc = context_color_for(&t.context_id);
             let wc = t.entity.clone().downcast::<WebViewTab>()
                 .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
+            let aa = t.entity.clone().downcast::<FramebufferAppTab>()
+                .ok().map(|e| e.read(cx).audio_active()).unwrap_or(false);
             pinned_items.push(make_tab_row(
                 t.id,
                 t.icon.clone(),
@@ -4422,6 +4447,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 true,
                 cc,
                 wc,
+                aa,
                 cx,
             ));
         }
@@ -4435,6 +4461,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             let cc = context_color_for(&t.context_id);
             let wc = t.entity.clone().downcast::<WebViewTab>()
                 .ok().map(|e| e.read(cx).wallet_connected).unwrap_or(false);
+            let aa = t.entity.clone().downcast::<FramebufferAppTab>()
+                .ok().map(|e| e.read(cx).audio_active()).unwrap_or(false);
             regular_items.push(make_tab_row(
                 t.id,
                 t.icon.clone(),
@@ -4444,6 +4472,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 false,
                 cc,
                 wc,
+                aa,
                 cx,
             ));
         }
@@ -7326,7 +7355,12 @@ impl Render for Workbench {
 
         // Handle deferred dot-loading approve/deny (subscribe callbacks lack window).
         if let Some((bundle, verification)) = self.pending_dot_approve.take() {
-            self.open_spa_with_verification(bundle, verification, window, cx);
+            if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+                // Framebuffer/application bundle — open in PolkaVM sandbox.
+                self.open_framebuffer_app(bundle, window, cx);
+            } else {
+                self.open_spa_with_verification(bundle, verification, window, cx);
+            }
         }
         if let Some(tab_id) = self.pending_dot_deny_tab.take() {
             self.close_tab(tab_id, window, cx);

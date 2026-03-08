@@ -672,48 +672,106 @@ fn looks_like_directory_listing(body: &[u8]) -> bool {
     // Kubo/go-ipfs gateway listings contain "Index of" in the title.
     // Some gateways use a JSON directory listing or "ipfs-404.html" page.
     s.contains("Index of /ipfs") || s.contains("<title>Index of")
+        || (s.contains("Index of") && s.contains("/ipfs/"))
 }
 
 fn fetch_ipfs_directory(cid: &str, listing_html: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
-    let html = std::str::from_utf8(listing_html).map_err(|e| format!("invalid UTF-8: {e}"))?;
     let mut assets = HashMap::new();
+    fetch_ipfs_directory_recursive(cid, "", listing_html, &mut assets)?;
+    if assets.is_empty() {
+        return Err("directory listing contained no files".into());
+    }
+    Ok(assets)
+}
 
-    // Parse simple anchor tags to extract filenames
+fn fetch_ipfs_directory_recursive(
+    cid: &str,
+    prefix: &str,
+    listing_html: &[u8],
+    assets: &mut HashMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let html = std::str::from_utf8(listing_html).map_err(|e| format!("invalid UTF-8: {e}"))?;
+
+    // Extract entry names from the directory listing.
+    // Gateway links look like: /ipfs/{cid}/name or /ipfs/{sub_cid}?filename=name
+    // We extract names from the {cid}/{name} pattern.
+    let cid_prefix = format!("/ipfs/{cid}/");
+    let mut names: Vec<String> = Vec::new();
     for segment in html.split("<a href=\"") {
         if let Some(end) = segment.find('"') {
-            let filename = &segment[..end];
-            // Skip parent directory links and anchors
-            if filename.is_empty()
-                || filename == ".."
-                || filename == "/"
-                || filename.starts_with('?')
-                || filename.starts_with('#')
-            {
-                continue;
-            }
-            let clean = filename.trim_start_matches("./").trim_end_matches('/');
-            if clean.is_empty() || clean.contains("..") {
-                continue;
-            }
-
-            let file_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/{clean}");
-            log::info!("[dotns] fetching: {clean}");
-            match fetch_ipfs_url(&file_url) {
-                Ok((_, body)) => {
-                    assets.insert(clean.to_string(), body);
-                }
-                Err(e) => {
-                    log::warn!("[dotns] failed to fetch {clean}: {e}");
+            let href = &segment[..end];
+            // Match links like /ipfs/{cid}/filename
+            if let Some(name) = href.strip_prefix(&cid_prefix) {
+                let clean = name.trim_end_matches('/');
+                if !clean.is_empty() && !clean.contains('/') && !clean.contains("..") {
+                    if !names.contains(&clean.to_string()) {
+                        names.push(clean.to_string());
+                    }
                 }
             }
         }
     }
 
-    if assets.is_empty() {
-        return Err("directory listing contained no files".into());
-    }
+    for name in &names {
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let url = format!("{IPFS_GATEWAY}/ipfs/{cid}/{name}");
+        log::info!("[dotns] fetching: {path}");
 
-    Ok(assets)
+        // First check if this is a subdirectory by looking for a sub-CID in
+        // the parent listing (the ?filename=name link).
+        let sub_cid = extract_sub_cid(html, name);
+        if let Some(ref sc) = sub_cid {
+            // It has a separate CID — it's a subdirectory. Fetch its listing
+            // directly with trailing slash to avoid 301 redirect issues.
+            let dir_url = format!("{IPFS_GATEWAY}/ipfs/{sc}/?format=html&noResolve");
+            match fetch_ipfs_url_large(&dir_url) {
+                Ok((_, body)) => {
+                    if looks_like_directory_listing(&body) {
+                        log::info!("[dotns] recursing into subdirectory: {path}");
+                        fetch_ipfs_directory_recursive(sc, &path, &body, assets)?;
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    log::warn!("[dotns] failed to list subdir {path}: {e}");
+                }
+            }
+        }
+
+        // Fetch as a file.
+        match fetch_ipfs_url_large(&url) {
+            Ok((_, body)) => {
+                assets.insert(path, body);
+            }
+            Err(e) => {
+                log::warn!("[dotns] failed to fetch {path}: {e}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Extract the CID for a subdirectory from the directory listing HTML.
+/// Links look like: /ipfs/{sub_cid}?filename=name
+fn extract_sub_cid(html: &str, name: &str) -> Option<String> {
+    // Search for href="...?filename=name" anywhere in the HTML.
+    // The href attribute may appear after other attributes (class, translate, etc).
+    let needle = format!("?filename={name}");
+    for segment in html.split("href=\"") {
+        if let Some(end) = segment.find('"') {
+            let href = &segment[..end];
+            if href.ends_with(&needle) {
+                let without_query = href.strip_suffix(&needle)?;
+                let sub_cid = without_query.strip_prefix("/ipfs/")?;
+                return Some(sub_cid.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Result of a full DOTNS resolution — includes the CID for verification display.
@@ -726,15 +784,17 @@ pub struct DotnsResolution {
     pub assets: HashMap<String, Vec<u8>>,
 }
 
-/// Lightweight DOTNS resolution — resolves CID, fetches only manifest.toml.
-/// Returns the CID, owner, and parsed manifest. Assets are NOT fetched;
-/// callers should use `IPFS_GATEWAY` to fetch them lazily.
+/// DOTNS resolution result. For SPAs only manifest.toml is fetched (lazy);
+/// for application/framebuffer bundles the full asset set is fetched eagerly.
 pub struct DotnsLazyResolution {
     pub cid: String,
     pub owner: Option<String>,
     /// `None` when the IPFS content has no `manifest.toml`
     /// (e.g. a raw website or Product SDK app deployed directly to IPFS).
     pub manifest_bytes: Option<Vec<u8>>,
+    /// For application bundles: all files fetched from IPFS (app.polkavm, assets/, etc).
+    /// Empty for SPAs (they fetch lazily via the gateway).
+    pub all_files: HashMap<String, Vec<u8>>,
 }
 
 /// The IPFS gateway URL used for fetching content.
@@ -758,8 +818,8 @@ pub fn resolve_and_fetch_full(name: &str) -> Result<DotnsResolution, String> {
     Ok(DotnsResolution { cid, owner, assets })
 }
 
-/// Lazy resolution: DOTNS lookup → fetch only manifest.toml.
-/// Assets are fetched on-demand by the SPA runtime via the IPFS gateway.
+/// DOTNS resolution: resolves CID, fetches manifest.toml, and for non-SPA
+/// bundles (application/framebuffer) also fetches all files eagerly.
 pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
     log::info!("[dotns] resolve_lazy START for {name}");
     let cid = resolve_dotns(name)?;
@@ -779,10 +839,32 @@ pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
         }
     };
 
+    // For non-SPA bundles (application/framebuffer), fetch all files eagerly
+    // since PolkaVM sandboxes need program_bytes + assets upfront.
+    let mut all_files = HashMap::new();
+    if let Some(ref raw) = manifest_bytes {
+        if let Ok(s) = std::str::from_utf8(raw) {
+            let is_spa = s.contains("app_type = \"spa\"");
+            if !is_spa {
+                log::info!("[dotns] non-SPA bundle detected, fetching all files...");
+                match fetch_ipfs(&cid) {
+                    Ok(files) => {
+                        log::info!("[dotns] fetched {} files from IPFS", files.len());
+                        all_files = files;
+                    }
+                    Err(e) => {
+                        log::warn!("[dotns] failed to fetch bundle files: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     Ok(DotnsLazyResolution {
         cid,
         owner,
         manifest_bytes,
+        all_files,
     })
 }
 
