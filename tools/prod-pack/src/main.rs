@@ -60,6 +60,11 @@ fn collect_files(
                 .unwrap()
                 .to_string_lossy()
                 .to_string();
+            // Skip non-bundle artifacts.
+            if rel.ends_with(".prod") || rel.ends_with(".polkavm") && rel != "app.polkavm" {
+                eprintln!("Skipping: {rel}");
+                continue;
+            }
             out.insert(rel, std::fs::read(&path)?);
         }
     }
@@ -90,10 +95,28 @@ fn build_car(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut blocks: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     let mut root = Dir::new();
 
-    // Create raw leaf blocks for each file, insert into directory tree.
+    // Create raw leaf blocks for each file, zstd-compressed.
+    // CID is over the compressed bytes so integrity checks work on the wire format.
     for (path, data) in files {
-        let cid = make_cid(0x55, data); // raw codec
-        blocks.push((cid.clone(), data.clone()));
+        let compressed = zstd::encode_all(data.as_slice(), 19).expect("zstd compress failed");
+        // Only use compressed version if it's actually smaller.
+        let (block_data, saved) = if compressed.len() < data.len() {
+            let saved = data.len() - compressed.len();
+            (compressed, saved)
+        } else {
+            (data.clone(), 0)
+        };
+        if saved > 0 {
+            eprintln!(
+                "  {path}: {} → {} bytes (zstd saved {})",
+                data.len(),
+                block_data.len(),
+                saved
+            );
+        }
+        let block_len = block_data.len() as u64;
+        let cid = make_cid(0x55, &block_data); // raw codec
+        blocks.push((cid.clone(), block_data));
 
         let parts: Vec<&str> = path.split('/').collect();
         let mut current = &mut root;
@@ -104,7 +127,7 @@ fn build_car(files: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
                 .or_insert_with(Dir::new);
         }
         let file_name = parts.last().unwrap().to_string();
-        current.files.push((file_name, cid, data.len() as u64));
+        current.files.push((file_name, cid, block_len));
     }
 
     // Build directory dag-pb blocks bottom-up.

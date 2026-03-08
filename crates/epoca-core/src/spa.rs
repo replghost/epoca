@@ -282,8 +282,10 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
 pub const HOST_API_SCRIPT: &str = r#"
 (function() {
     'use strict';
+    console.log('[epoca-host-api] running, guard=' + !!window.__epocaHostApi + ' bridge=' + !!window.__epocaHostApiBridge);
     if (window.__epocaHostApi) return;
     window.__epocaHostApi = true;
+    console.log('[epoca-host-api] window.epoca being defined');
 
     // Correlation ID counter for request/response matching.
     let _nextId = 1;

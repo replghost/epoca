@@ -28,15 +28,7 @@
 
 ## Install
 
-```bash
-brew tap replghost/epoca
-brew install --cask epoca
-```
-
-Or download the latest `.app` from [Releases](https://github.com/replghost/epoca/releases).
-
-> First launch: macOS may warn about an unidentified developer.
-> Right-click the app > Open, then click Open in the dialog.
+Build from source (see [below](#building-from-source)). Prebuilt binaries coming soon.
 
 ## Features
 
@@ -81,9 +73,7 @@ Or download the latest `.app` from [Releases](https://github.com/replghost/epoca
 ### Build
 
 ```bash
-# Clone with the PolkaVM dependency
 git clone https://github.com/replghost/epoca.git
-git clone https://github.com/replghost/polkavm.git
 cd epoca
 
 cargo build -p epoca --release

@@ -4239,6 +4239,7 @@ dependencies = [
  "sha2 0.10.9",
  "toml 0.8.23",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -9658,6 +9659,7 @@ version = "0.1.0"
 dependencies = [
  "epoca-sandbox",
  "sha2 0.10.9",
+ "zstd",
 ]
 
 [[package]]

@@ -11,6 +11,7 @@ use gpui_component::Sizable;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Icon, IconName};
+use gpui_component::tooltip::Tooltip;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -291,8 +292,8 @@ pub struct Workbench {
     pending_hostapi_rpc: std::collections::HashMap<u64, (usize, String)>,
     connected_sites: std::collections::HashSet<String>,
     wallet_popover_open: bool,
-    dot_popover_open: bool,
-    dot_permissions_expanded: bool,
+    /// When true, the sidebar shows the page-info panel instead of the tab list.
+    page_info_open: bool,
 
     // Tab drag-to-reorder
     /// Tab being dragged (by tab id), start y, current y in sidebar coordinates.
@@ -478,8 +479,7 @@ impl Workbench {
             pending_hostapi_rpc: std::collections::HashMap::new(),
             connected_sites: std::collections::HashSet::new(),
             wallet_popover_open: false,
-            dot_popover_open: false,
-            dot_permissions_expanded: false,
+            page_info_open: false,
             dragging_tab: None,
         }
     }
@@ -1353,6 +1353,24 @@ impl Workbench {
                             }
                         }
                     }
+                    epoca_hostapi::HostApiOutcome::NeedsNavigate {
+                        request_id,
+                        url,
+                    } => {
+                        log::info!("[hostapi] NeedsNavigate url={url} request_id={request_id}");
+                        // Send success response back to the app immediately.
+                        let response = epoca_hostapi::protocol::encode_navigate_response(&request_id);
+                        crate::host::send_response(ev_ptr, &response);
+                        // Open the URL — handles .dot addresses, http(s), etc.
+                        if url.ends_with(".dot") && !url.contains('/') && !url.contains(' ') {
+                            let dot_url = format!("dot://{url}");
+                            self.resolve_dot_url(&dot_url, window, cx);
+                        } else if url.starts_with("dot://") {
+                            self.resolve_dot_url(&url, window, cx);
+                        } else if url.starts_with("http://") || url.starts_with("https://") {
+                            self.navigate_or_open(&url, window, cx);
+                        }
+                    }
                     epoca_hostapi::HostApiOutcome::Silent => {}
                 }
             }
@@ -2059,7 +2077,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     }
 
     fn switch_tab(&mut self, tab_id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.dot_popover_open = false;
+        self.page_info_open = false;
         self.active_tab_id = Some(tab_id);
         let tab = self.tabs.iter().find(|t| t.id == tab_id);
         let value = tab
@@ -3759,6 +3777,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .and_then(|t| t.dot_verification.clone())
             .or_else(|| self.pending_dotns_validation.clone());
 
+        let page_info_is_open = self.page_info_open;
         let url_prefix: AnyElement = if let Some(ref dv) = active_dot_verification {
             let (dot_icon, dot_color): (IconName, Rgba) = match &dv.status {
                 DotStatus::Verified => (IconName::CircleCheck, rgba(0x22c55eff)),
@@ -3766,16 +3785,34 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 DotStatus::Failed(_) => (IconName::CircleX, rgba(0xef4444ff)),
                 DotStatus::Local => (IconName::Info, rgba(0x8b8b8bff)),
             };
+            let tip = match &dv.status {
+                DotStatus::Verified => "Verified app — click for details",
+                DotStatus::Pending => "Verifying app...",
+                DotStatus::Failed(_) => "Verification failed — click for details",
+                DotStatus::Local => "Local app — click for details",
+            };
+            let glow_bg = rgba(
+                ((dot_color.r * 255.0) as u32) << 24
+                    | ((dot_color.g * 255.0) as u32) << 16
+                    | ((dot_color.b * 255.0) as u32) << 8
+                    | 0x22,
+            );
             div()
                 .id("dot-shield")
                 .flex()
                 .items_center()
-                .gap(px(4.0))
+                .justify_center()
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(5.0))
                 .cursor_pointer()
+                .hover(|d| d.bg(glow_bg))
+                .when(page_info_is_open, |d| d.bg(glow_bg))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.dot_popover_open = !this.dot_popover_open;
+                    this.page_info_open = !this.page_info_open;
                     cx.notify();
                 }))
+                .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
                 .child(Icon::new(dot_icon).size(px(13.0)).text_color(dot_color))
                 .into_any_element()
         } else if experimental_contexts_on {
@@ -3812,10 +3849,23 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .child(Icon::new(IconName::Globe).size(px(13.0)))
                 .into_any_element()
         } else {
+            let glow_bg = rgba(0xffffff18);
             div()
+                .id("globe-badge")
                 .flex()
                 .items_center()
-                .gap(px(4.0))
+                .justify_center()
+                .w(px(20.0))
+                .h(px(20.0))
+                .rounded(px(5.0))
+                .cursor_pointer()
+                .hover(|d| d.bg(glow_bg))
+                .when(page_info_is_open, |d| d.bg(glow_bg))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page_info_open = !this.page_info_open;
+                    cx.notify();
+                }))
+                .tooltip(move |window, cx| Tooltip::new("Page info & security").build(window, cx))
                 .child(Icon::new(IconName::Globe).size(px(13.0)))
                 .into_any_element()
         };
@@ -3953,211 +4003,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             None
         };
 
-        // ── .dot verification inline panel ──────────────────────────────────
-        // Rendered inline between URL bar and tabs (not absolute/popover).
-        let dot_panel: Option<Div> = if self.dot_popover_open {
-            if let Some(ref dv) = active_dot_verification {
-                let (header_icon, header_color): (IconName, Rgba) = match &dv.status {
-                    DotStatus::Verified => (IconName::CircleCheck, rgba(0x22c55eff)),
-                    DotStatus::Pending => (IconName::LoaderCircle, rgba(0xf59e0bff)),
-                    DotStatus::Failed(_) => (IconName::CircleX, rgba(0xef4444ff)),
-                    DotStatus::Local => (IconName::Info, rgba(0x8b8b8bff)),
-                };
-                let status_text = match &dv.status {
-                    DotStatus::Verified => "Verified on-chain",
-                    DotStatus::Pending => "Validating",
-                    DotStatus::Failed(_) => "Resolution failed",
-                    DotStatus::Local => "Loaded locally",
-                };
-                let status_color: Rgba = match &dv.status {
-                    DotStatus::Verified => rgba(0x22c55eff),
-                    DotStatus::Pending => rgba(0xf59e0bff),
-                    DotStatus::Failed(_) => rgba(0xef4444ff),
-                    DotStatus::Local => rgba(0x8b8b8bff),
-                };
-                let is_pending = matches!(dv.status, DotStatus::Pending);
-                let cid_display = dv.cid.as_deref().map(|c| {
-                    if c.len() > 20 {
-                        format!("{}...{}", &c[..10], &c[c.len()-6..])
-                    } else {
-                        c.to_string()
-                    }
-                });
-                let owner_display = dv.owner.as_deref().map(|o| {
-                    if o.len() > 20 {
-                        format!("{}...{}", &o[..8], &o[o.len()-6..])
-                    } else {
-                        o.to_string()
-                    }
-                });
-                let name_str = dv.name.clone();
-
-                let label_style = |label: &str| -> AnyElement {
-                    div()
-                        .w(px(52.0))
-                        .text_xs()
-                        .text_color(text_muted)
-                        .flex_shrink_0()
-                        .child(label.to_string())
-                        .into_any_element()
-                };
-
-                let info_row = |label: &str, value: String, color: Rgba| -> AnyElement {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .px(px(10.0))
-                        .py(px(3.0))
-                        .child(label_style(label))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_xs()
-                                .text_color(color)
-                                .truncate()
-                                .child(value),
-                        )
-                        .into_any_element()
-                };
-
-                Some(
-                    div()
-                        .mx(px(8.0))
-                        .mb(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(rgba(0xffffff0a))
-                        .border_1()
-                        .border_color(rgba(0xffffff14))
-                        .flex()
-                        .flex_col()
-                        // Header: shield + name.dot + status
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .px(px(10.0))
-                                .pt(px(8.0))
-                                .pb(px(4.0))
-                                .child(Icon::new(header_icon).size(px(13.0)).text_color(header_color))
-                                .child(
-                                    div().flex().child(
-                                        div().text_sm().text_color(rgba(0xffffffee)).child(name_str),
-                                    ).child(
-                                        div().text_sm().text_color(text_muted).child(".dot"),
-                                    ),
-                                )
-                        )
-                        // Status line
-                        .child(
-                            div()
-                                .px(px(10.0))
-                                .pb(px(4.0))
-                                .text_xs()
-                                .text_color(status_color)
-                                .child(status_text)
-                        )
-                        // Separator
-                        .child(div().h(px(1.0)).mx(px(6.0)).my(px(2.0)).bg(rgba(0xffffff14)))
-                        // CID
-                        .child(info_row("CID", cid_display.unwrap_or_else(|| if is_pending { "Resolving...".to_string() } else { "—".to_string() }), rgba(0xffffffcc)))
-                        // Owner
-                        .child(info_row("OWNER", owner_display.unwrap_or_else(|| if is_pending { "Resolving...".to_string() } else { "Unavailable".to_string() }), rgba(0xffffffcc)))
-                        // Honor
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .px(px(10.0))
-                                .py(px(3.0))
-                                .pb(px(6.0))
-                                .child(label_style("HONOR"))
-                                .child(
-                                    div()
-                                        .px(px(6.0))
-                                        .py(px(1.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgba(0xffffff14))
-                                        .text_xs()
-                                        .text_color(text_muted)
-                                        .child("Unknown"),
-                                )
-                        )
-                        // Separator
-                        .child(div().h(px(1.0)).mx(px(6.0)).my(px(2.0)).bg(rgba(0xffffff14)))
-                        // Permissions header (collapsible)
-                        .child(
-                            div()
-                                .id("dot-permissions-toggle")
-                                .flex()
-                                .items_center()
-                                .gap(px(4.0))
-                                .px(px(10.0))
-                                .py(px(4.0))
-                                .cursor_pointer()
-                                .rounded(px(4.0))
-                                .hover(|d| d.bg(rgba(0xffffff0a)))
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.dot_permissions_expanded = !this.dot_permissions_expanded;
-                                    cx.notify();
-                                }))
-                                .child(
-                                    Icon::new(if self.dot_permissions_expanded { IconName::ChevronDown } else { IconName::ChevronRight })
-                                        .size(px(10.0))
-                                        .text_color(text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(text_muted)
-                                        .child("Sandbox"),
-                                )
-                        )
-                        // Permissions rows (when expanded)
-                        .when(self.dot_permissions_expanded, |d| {
-                            let perm_row = |icon: IconName, color: Rgba, label: &str, value: &str, value_color: Rgba| -> AnyElement {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.0))
-                                    .px(px(10.0))
-                                    .pl(px(24.0))
-                                    .py(px(2.0))
-                                    .child(Icon::new(icon).size(px(10.0)).text_color(color))
-                                    .child(
-                                        div()
-                                            .w(px(72.0))
-                                            .text_xs()
-                                            .text_color(rgba(0xffffffaa))
-                                            .flex_shrink_0()
-                                            .child(label.to_string()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(value_color)
-                                            .child(value.to_string()),
-                                    )
-                                    .into_any_element()
-                            };
-                            let green = rgba(0x22c55eff);
-                            let red = rgba(0xef4444ff);
-                            let amber = rgba(0xf59e0bff);
-                            d.child(perm_row(IconName::Check, green, "Chain (WSS)", "Allowed", green))
-                             .child(perm_row(IconName::CircleX, red, "HTTP / Fetch", "Blocked", red))
-                             .child(perm_row(IconName::Check, amber, "Wallet signing", "With approval", amber))
-                             .child(perm_row(IconName::CircleX, red, "iFrames", "Blocked", red))
-                             .child(div().h(px(4.0))) // bottom padding
-                        }),
-                )
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // ── Page-info panel ──────────────────────────────────────────────
+        // Replaces the tab list when page_info_open is true. Shows trust
+        // info for .dot apps (CID, owner, sandbox) or privacy info for
+        // regular websites (HTTPS status, shield stats).
 
         // Backdrop is now rendered at the root level (Render::render)
         // so it covers the full window, not just the sidebar.
@@ -4170,13 +4019,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .and_then(|id| self.tabs.iter().find(|t| t.id == id))
             .map(|t| t.reader_active)
             .unwrap_or(false);
-        let (active_is_webview, active_is_bookmarked) = self.active_tab_id
-            .and_then(|id| self.tabs.iter().find(|t| t.id == id))
-            .map(|t| match &t.kind {
-                TabKind::WebView { url } => (true, crate::bookmarks::is_bookmarked(url)),
-                _ => (false, false),
-            })
-            .unwrap_or((false, false));
+        // (bookmark / reader actions moved into page-info panel)
 
         let url_row = div()
             .id("url-bar")
@@ -4204,60 +4047,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         .prefix(url_prefix)
                         .cleanable(true),
                 ),
-            )
-            .when(active_readerable, |d| {
-                d.child(
-                    div()
-                        .id("reader-btn")
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .mr(px(4.0))
-                        .rounded(px(4.0))
-                        .hover(|d| d.bg(rgba(0xffffff14)))
-                        .when(active_reader_on, |d| d.bg(rgba(0x8b5cf633)))
-                        .child(
-                            Icon::new(IconName::BookOpen)
-                                .size(px(14.0))
-                                .text_color(if active_reader_on {
-                                    rgba(0x8b5cf6ff)
-                                } else {
-                                    rgba(0xffffffaa)
-                                }),
-                        )
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_reader_mode(cx);
-                        })),
-                )
-            })
-            .when(active_is_webview, |d| {
-                d.child(
-                    div()
-                        .id("bookmark-btn")
-                        .cursor_pointer()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .mr(px(4.0))
-                        .rounded(px(4.0))
-                        .hover(|d| d.bg(rgba(0xffffff14)))
-                        .child(
-                            Icon::new(if active_is_bookmarked {
-                                IconName::Star
-                            } else {
-                                IconName::StarOff
-                            })
-                                .size(px(14.0))
-                                .text_color(if active_is_bookmarked {
-                                    rgba(0xf59e0bff) // amber for bookmarked
-                                } else {
-                                    rgba(0xffffffaa)
-                                }),
-                        )
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_bookmark(window, cx);
-                        })),
-                )
-            });
+            );
 
         // ── Context color lookup ─────────────────────────────────────────
         let contexts = cx
@@ -4553,6 +4343,307 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     .children(regular_items)
             });
 
+        // ── Page-info panel (replaces tab list when open) ────────────────
+        let page_info_panel: Option<AnyElement> = if self.page_info_open {
+            // Gather active tab info
+            let active_tab = self.active_tab_id
+                .and_then(|id| self.tabs.iter().find(|t| t.id == id));
+
+            let label_style = |label: &str| -> AnyElement {
+                div()
+                    .w(px(56.0))
+                    .text_xs()
+                    .text_color(text_muted)
+                    .flex_shrink_0()
+                    .child(label.to_string())
+                    .into_any_element()
+            };
+            let info_row = |label: &str, value: String, color: Rgba| -> AnyElement {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(12.0))
+                    .py(px(3.0))
+                    .child(label_style(label))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(color)
+                            .truncate()
+                            .child(value),
+                    )
+                    .into_any_element()
+            };
+            let section_header = |label: &str| -> AnyElement {
+                div()
+                    .px(px(12.0))
+                    .pt(px(10.0))
+                    .pb(px(4.0))
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child(label.to_string())
+                    .into_any_element()
+            };
+            let separator = || -> AnyElement {
+                div().h(px(1.0)).mx(px(8.0)).my(px(4.0)).bg(rgba(0xffffff14)).into_any_element()
+            };
+            let perm_row = |icon: IconName, color: Rgba, label: &str, value: &str, value_color: Rgba| -> AnyElement {
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(12.0))
+                    .py(px(3.0))
+                    .child(Icon::new(icon).size(px(11.0)).text_color(color))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgba(0xffffffaa))
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(value_color)
+                            .child(value.to_string()),
+                    )
+                    .into_any_element()
+            };
+
+            let green = rgba(0x22c55eff);
+            let red = rgba(0xef4444ff);
+            let amber = rgba(0xf59e0bff);
+
+            let mut panel = div()
+                .id("page-info-panel")
+                .flex_1()
+                .overflow_y_hidden()
+                .flex()
+                .flex_col()
+                .px(px(4.0))
+                .pt(px(4.0))
+                // "Back to tabs" row
+                .child(
+                    div()
+                        .id("back-to-tabs")
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(5.0))
+                        .cursor_pointer()
+                        .hover(|d| d.bg(item_hover_bg))
+                        .child(Icon::new(IconName::ArrowLeft).size(px(12.0)).text_color(text_muted))
+                        .child(div().text_sm().text_color(text_muted).child("Back to tabs"))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.page_info_open = false;
+                            cx.notify();
+                        })),
+                );
+
+            // ── .dot app info ──────────────────────────────────────────
+            if let Some(ref dv) = active_dot_verification {
+                let (header_icon, header_color): (IconName, Rgba) = match &dv.status {
+                    DotStatus::Verified => (IconName::CircleCheck, green),
+                    DotStatus::Pending => (IconName::LoaderCircle, amber),
+                    DotStatus::Failed(_) => (IconName::CircleX, red),
+                    DotStatus::Local => (IconName::Info, rgba(0x8b8b8bff)),
+                };
+                let status_text = match &dv.status {
+                    DotStatus::Verified => "Verified on-chain",
+                    DotStatus::Pending => "Validating...",
+                    DotStatus::Failed(_) => "Resolution failed",
+                    DotStatus::Local => "Loaded locally",
+                };
+                let status_color: Rgba = header_color;
+                let is_pending = matches!(dv.status, DotStatus::Pending);
+
+                let cid_display = dv.cid.as_deref().map(|c| {
+                    if c.len() > 20 { format!("{}...{}", &c[..10], &c[c.len()-6..]) } else { c.to_string() }
+                });
+                let owner_display = dv.owner.as_deref().map(|o| {
+                    if o.len() > 20 { format!("{}...{}", &o[..8], &o[o.len()-6..]) } else { o.to_string() }
+                });
+
+                // Trust header
+                panel = panel
+                    .child(separator())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(12.0))
+                            .pt(px(6.0))
+                            .pb(px(2.0))
+                            .child(Icon::new(header_icon).size(px(15.0)).text_color(header_color))
+                            .child(
+                                div().flex().flex_col()
+                                    .child(
+                                        div().flex()
+                                            .child(div().text_sm().text_color(rgba(0xffffffee)).child(dv.name.clone()))
+                                            .child(div().text_sm().text_color(text_muted).child(".dot"))
+                                    )
+                                    .child(
+                                        div().text_xs().text_color(status_color).child(status_text)
+                                    )
+                            )
+                    );
+
+                // Identity section
+                panel = panel
+                    .child(section_header("IDENTITY"))
+                    .child(info_row("CID", cid_display.unwrap_or_else(|| if is_pending { "Resolving...".into() } else { "—".into() }), rgba(0xffffffcc)))
+                    .child(info_row("OWNER", owner_display.unwrap_or_else(|| if is_pending { "Resolving...".into() } else { "Unknown".into() }), rgba(0xffffffcc)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(12.0))
+                            .py(px(3.0))
+                            .child(label_style("HONOR"))
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(1.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgba(0xffffff14))
+                                    .text_xs()
+                                    .text_color(text_muted)
+                                    .child("Unknown"),
+                            )
+                            .into_any_element()
+                    );
+
+                // Sandbox section
+                panel = panel
+                    .child(section_header("SANDBOX"))
+                    .child(perm_row(IconName::Check, green, "Chain (WSS)", "Allowed", green))
+                    .child(perm_row(IconName::CircleX, red, "HTTP / Fetch", "Blocked", red))
+                    .child(perm_row(IconName::Check, amber, "Wallet signing", "With approval", amber))
+                    .child(perm_row(IconName::CircleX, red, "iFrames", "Blocked", red));
+            } else if let Some(tab) = active_tab {
+                // ── Regular web page info ──────────────────────────────
+                let (url_str, is_https) = match &tab.kind {
+                    TabKind::WebView { url } => (url.clone(), url.starts_with("https://")),
+                    _ => (String::new(), false),
+                };
+                let hostname = if !url_str.is_empty() {
+                    hostname_from_url(&url_str).to_string()
+                } else {
+                    tab.title.clone()
+                };
+
+                // Connection header
+                let (conn_icon, conn_color, conn_text) = if is_https {
+                    (IconName::CircleCheck, green, "Secure connection (HTTPS)")
+                } else if url_str.starts_with("http://") {
+                    (IconName::TriangleAlert, amber, "Not secure (HTTP)")
+                } else {
+                    (IconName::Info, rgba(0x8b8b8bff), "Local page")
+                };
+
+                panel = panel
+                    .child(separator())
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(12.0))
+                            .pt(px(6.0))
+                            .pb(px(2.0))
+                            .child(Icon::new(conn_icon).size(px(15.0)).text_color(conn_color))
+                            .child(
+                                div().flex().flex_col()
+                                    .child(div().text_sm().text_color(rgba(0xffffffee)).truncate().child(hostname))
+                                    .child(div().text_xs().text_color(conn_color).child(conn_text))
+                            )
+                    );
+
+                // Shield / privacy section
+                let blocked = active_tab.and_then(|t| {
+                    t.entity.clone().downcast::<WebViewTab>().ok()
+                }).map(|e| e.read(cx).blocked_count).unwrap_or(0);
+
+                panel = panel
+                    .child(section_header("PRIVACY"))
+                    .child(info_row("Trackers", format!("{blocked} blocked"), if blocked > 0 { green } else { text_muted }))
+                    .child(info_row("Cookies", if self.isolated_tabs { "Isolated".into() } else { "Shared".into() }, rgba(0xffffffcc)));
+
+                // Actions section
+                if matches!(tab.kind, TabKind::WebView { .. }) {
+                    let is_bookmarked = if let TabKind::WebView { ref url } = tab.kind {
+                        crate::bookmarks::is_bookmarked(url)
+                    } else {
+                        false
+                    };
+                    panel = panel
+                        .child(section_header("ACTIONS"))
+                        .child(
+                            div()
+                                .id("pi-bookmark")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(12.0))
+                                .py(px(5.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgba(0xffffff14)))
+                                .child(
+                                    Icon::new(if is_bookmarked { IconName::Star } else { IconName::StarOff })
+                                        .size(px(12.0))
+                                        .text_color(if is_bookmarked { amber } else { text_muted })
+                                )
+                                .child(div().text_xs().text_color(rgba(0xffffffcc)).child(
+                                    if is_bookmarked { "Remove bookmark" } else { "Add bookmark" }
+                                ))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_bookmark(window, cx);
+                                    cx.notify();
+                                }))
+                        );
+
+                    if active_readerable {
+                        panel = panel.child(
+                            div()
+                                .id("pi-reader")
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(12.0))
+                                .py(px(5.0))
+                                .rounded(px(4.0))
+                                .cursor_pointer()
+                                .hover(|d| d.bg(rgba(0xffffff14)))
+                                .child(
+                                    Icon::new(IconName::BookOpen)
+                                        .size(px(12.0))
+                                        .text_color(if active_reader_on { rgba(0x8b5cf6ff) } else { text_muted })
+                                )
+                                .child(div().text_xs().text_color(rgba(0xffffffcc)).child(
+                                    if active_reader_on { "Exit reader mode" } else { "Reader mode" }
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_reader_mode(cx);
+                                    cx.notify();
+                                }))
+                        );
+                    }
+                }
+            }
+
+            Some(panel.into_any_element())
+        } else {
+            None
+        };
+
         div()
             .relative()
             .flex()
@@ -4564,11 +4655,11 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .text_color(gpui::white())
             .child(top_row)
             .child(url_row)
-            // .dot verification panel — inline between URL bar and tabs
-            .children(dot_panel)
-            // Wallet connection consent banner — between URL bar and tab list
+            // Wallet connection consent banner — between URL bar and content area
             .children(self.render_wallet_connect_banner(_window, cx).map(|b| b.into_any_element()))
-            .child(tabs_area)
+            // Either page-info panel or tab list
+            .when_some(page_info_panel, |d, panel| d.child(panel))
+            .when(!self.page_info_open, |d| d.child(tabs_area))
             .child(bottom_bar)
             // Context picker dropdown — painted last so it sits on top of tabs
             .children(context_dropdown)

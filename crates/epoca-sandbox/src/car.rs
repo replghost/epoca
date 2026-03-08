@@ -286,6 +286,18 @@ fn is_directory_node(block: &[u8]) -> bool {
     }
 }
 
+/// zstd frame magic number.
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
+/// If data starts with the zstd magic number, decompress it; otherwise return as-is.
+fn maybe_decompress_zstd(data: Vec<u8>) -> Result<Vec<u8>, String> {
+    if data.len() >= 4 && data[..4] == ZSTD_MAGIC {
+        zstd::decode_all(data.as_slice()).map_err(|e| format!("zstd decompress failed: {e}"))
+    } else {
+        Ok(data)
+    }
+}
+
 /// Reassemble a file from its dag-pb block(s).
 /// Handles single-chunk files, multi-chunk files, and raw leaves.
 /// Returns Err for directory nodes (caller should recurse instead).
@@ -308,10 +320,10 @@ fn reassemble_file(
     if links.is_empty() {
         // Leaf node — extract data from UnixFS protobuf
         if let Some(data) = extract_dagpb_data(block) {
-            return extract_unixfs_data(&data);
+            return maybe_decompress_zstd(extract_unixfs_data(&data)?);
         }
-        // Raw leaf — the block IS the data
-        return Ok(block.clone());
+        // Raw leaf — the block IS the data (possibly zstd-compressed)
+        return maybe_decompress_zstd(block.clone());
     }
 
     // Multi-chunk file — concatenate child blocks in order

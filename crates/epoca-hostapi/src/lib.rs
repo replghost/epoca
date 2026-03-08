@@ -44,6 +44,11 @@ pub enum HostApiOutcome {
         method: String,
         params: serde_json::Value,
     },
+    /// Navigation request — the workbench should open this URL (may be a .dot address).
+    NeedsNavigate {
+        request_id: String,
+        url: String,
+    },
     /// No response needed (fire-and-forget).
     Silent,
 }
@@ -121,8 +126,12 @@ impl HostApi {
                 ))
             }
 
-            HostRequest::FeatureSupported { .. } => {
-                HostApiOutcome::Response(encode_feature_response(&request_id, false))
+            HostRequest::FeatureSupported { feature_data } => {
+                // Check if the feature matches known supported features.
+                let feature_str = std::str::from_utf8(&feature_data).unwrap_or("");
+                let supported = matches!(feature_str, "signing" | "sign" | "navigate");
+                log::info!("[hostapi] feature_supported: '{feature_str}' → {supported}");
+                HostApiOutcome::Response(encode_feature_response(&request_id, supported))
             }
 
             HostRequest::AccountConnectionStatusStart => {
@@ -179,7 +188,10 @@ impl HostApi {
 
             HostRequest::NavigateTo { url } => {
                 log::info!("[hostapi] navigate_to: {url}");
-                HostApiOutcome::Response(encode_navigate_response(&request_id))
+                HostApiOutcome::NeedsNavigate {
+                    request_id,
+                    url,
+                }
             }
 
             HostRequest::SignPayload { public_key, payload } => {
@@ -342,7 +354,6 @@ pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
         } else if (ArrayBuffer.isView(data)) {
             bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         } else {
-            console.error('[epoca-bridge] unexpected message type:', typeof data);
             return;
         }
         var binary = '';
@@ -354,12 +365,16 @@ pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
 
     // Native sends responses back by calling this function with base64.
     window.__epocaHostApiReply = function(b64) {
-        var binary = atob(b64);
-        var bytes = new Uint8Array(binary.length);
-        for (var i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
+        try {
+            var binary = atob(b64);
+            var bytes = new Uint8Array(binary.length);
+            for (var i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            port1.postMessage(bytes, [bytes.buffer]);
+        } catch(e) {
+            console.error('[epoca-bridge] reply delivery failed:', e.message);
         }
-        port1.postMessage(bytes, [bytes.buffer]);
     };
 })();
 "#;
@@ -391,6 +406,7 @@ mod tests {
             HostApiOutcome::Response(_) => "Response",
             HostApiOutcome::NeedsSign { .. } => "NeedsSign",
             HostApiOutcome::NeedsChainQuery { .. } => "NeedsChainQuery",
+            HostApiOutcome::NeedsNavigate { .. } => "NeedsNavigate",
             HostApiOutcome::Silent => "Silent",
         }
     }

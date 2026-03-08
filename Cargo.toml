@@ -48,12 +48,13 @@ tungstenite = { version = "0.24", features = ["native-tls"] }
 smoldot-light = { version = "0.19", default-features = false, features = ["std"] }
 smol = "2"
 zip = "2"
+zstd = "0.13"
 image = "0.25"
 smallvec = { version = "1", features = ["union"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 
 [patch.crates-io]
-polkavm = { path = "../polkavm/crates/polkavm" }
-polkavm-derive = { path = "../polkavm/crates/polkavm-derive" }
-polkavm-common = { path = "../polkavm/crates/polkavm-common" }
-polkavm-assembler = { path = "../polkavm/crates/polkavm-assembler" }
+polkavm = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
+polkavm-derive = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
+polkavm-common = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
+polkavm-assembler = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }

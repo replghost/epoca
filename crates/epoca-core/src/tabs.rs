@@ -2594,6 +2594,7 @@ unsafe fn inject_page_world_script(
         AnyClass::get("WKContentWorld").unwrap(),
         pageWorld
     ];
+    log::info!("[spa-inject] page_world={:?}", page_world);
     let ns_source: *mut AnyObject = {
         let cls = AnyClass::get("NSString").unwrap();
         let alloc: *mut AnyObject = objc2::msg_send![cls, alloc];
@@ -2604,7 +2605,10 @@ unsafe fn inject_page_world_script(
             encoding: 4u64 // NSUTF8StringEncoding
         ]
     };
-    if ns_source.is_null() { return; }
+    if ns_source.is_null() {
+        log::error!("[spa-inject] ns_source is null!");
+        return;
+    }
     // WKUserScriptInjectionTimeAtDocumentStart = 0
     let script: *mut AnyObject = {
         let cls = AnyClass::get("WKUserScript").unwrap();
@@ -2617,8 +2621,12 @@ unsafe fn inject_page_world_script(
             inContentWorld: page_world
         ]
     };
-    if script.is_null() { return; }
+    if script.is_null() {
+        log::error!("[spa-inject] WKUserScript is null!");
+        return;
+    }
     let _: () = objc2::msg_send![uc, addUserScript: script];
+    log::info!("[spa-inject] added user script ({} bytes) to page world", js.len());
 }
 
 /// Register a minimal `epocaConsole` WKScriptMessageHandler that logs JS
@@ -3159,7 +3167,17 @@ impl SpaTab {
                 window.addEventListener('unhandledrejection', function(e) {
                     console.log('[EPOCA-ERR] unhandled rejection: ' + e.reason);
                 });
+                document.addEventListener('click', function(e) {
+                    var el = e.target;
+                    var tag = el ? el.tagName : '?';
+                    var href = '';
+                    var a = el;
+                    while (a && a.tagName !== 'A') a = a.parentElement;
+                    if (a) href = a.href || '';
+                    console.log('[EPOCA-CLICK] tag=' + tag + ' href=' + href + ' defaultPrevented=' + e.defaultPrevented);
+                }, true);
             "#)
+            .with_initialization_script(CONSOLE_RELAY_SCRIPT)
             .with_initialization_script(crate::spa::HOST_API_SCRIPT)
             .with_initialization_script(epoca_hostapi::HOST_API_BRIDGE_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
@@ -3179,9 +3197,25 @@ impl SpaTab {
 
                     log::info!("[spa-proto] app_id={app_id_inner} path={path}");
                     let csp = "default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' epocaapp: data: blob:; font-src 'self' epocaapp: data:; connect-src 'self' epocaapp:; object-src 'none'; frame-src 'none'";
-                    match crate::spa::lookup_spa_asset(&app_id_inner, path) {
+                    // Look up the asset; if not found and the path looks like
+                    // an HTML route (no file extension), fall back to index.html
+                    // so that client-side routers (Next.js, React Router, etc.)
+                    // can handle the URL.
+                    let asset = crate::spa::lookup_spa_asset(&app_id_inner, path)
+                        .or_else(|| {
+                            let is_html_route = !path.contains('.');
+                            if is_html_route {
+                                log::info!("[spa-proto] fallback {path} → index.html");
+                                crate::spa::lookup_spa_asset(&app_id_inner, "index.html")
+                            } else {
+                                None
+                            }
+                        });
+                    match asset {
                         Some(data) => {
                             let mime = crate::spa::mime_for_path(path);
+                            // For fallback routes, serve as HTML.
+                            let mime = if !path.contains('.') { "text/html" } else { mime };
                             // Strip `crossorigin` from HTML — WKURLSchemeHandler
                             // doesn't support CORS mode for custom schemes.
                             let data = if mime == "text/html" {
@@ -3230,6 +3264,9 @@ impl SpaTab {
                         let obj = &*wk as *const _ as *mut objc2::runtime::AnyObject;
                         webview_ptr = obj as usize;
 
+                        // Enable Safari Web Inspector for SPA tabs.
+                        let _: () = objc2::msg_send![obj, setInspectable: true];
+
                         let config: *mut objc2::runtime::AnyObject =
                             objc2::msg_send![obj, configuration];
                         if !config.is_null() {
@@ -3245,6 +3282,15 @@ impl SpaTab {
                                 crate::spa::register_host_handler(uc, webview_ptr);
                                 crate::host::register_hostapi_handler(uc, webview_ptr);
                                 crate::shield::register_cursor_handler(uc, webview_ptr);
+                                register_console_handler(uc);
+                                // wry's with_initialization_script runs in an
+                                // isolated content world — page JS can't see
+                                // globals set there.  Re-inject HOST_API_SCRIPT
+                                // and CONSOLE_RELAY into the PAGE world so the
+                                // app's inline scripts can call window.epoca.*
+                                // and have console.log relayed to Rust.
+                                inject_page_world_script(uc, crate::spa::HOST_API_SCRIPT);
+                                inject_page_world_script(uc, CONSOLE_RELAY_SCRIPT);
                             }
                         }
                     }
@@ -3724,15 +3770,12 @@ impl Render for DotLoadingTab {
                             let perms = self.permissions.as_ref();
                             let mut rows: Vec<AnyElement> = Vec::new();
 
-                            // Network: check if network list includes "wss:" or similar
-                            let has_network = perms
-                                .and_then(|p| p.network.as_ref())
-                                .map(|n| !n.is_empty())
-                                .unwrap_or(false);
-                            if has_network {
-                                rows.push(perm_row("Chain RPC (WSS)", "Allowed", accent));
+                            // Chain access (read-only queries via host RPC bridge)
+                            let has_chain = perms.map(|p| p.chain).unwrap_or(false);
+                            if has_chain {
+                                rows.push(perm_row("Chain queries", "Allowed", accent));
                             } else {
-                                rows.push(perm_row("Chain RPC (WSS)", "Blocked", denied_color));
+                                rows.push(perm_row("Chain queries", "Blocked", denied_color));
                             }
 
                             // HTTP: always blocked in strict sandbox

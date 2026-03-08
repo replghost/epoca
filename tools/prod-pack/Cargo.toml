@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 sha2 = "0.10"
+zstd = "0.13"
 
 [dev-dependencies]
 epoca-sandbox = { path = "../../crates/epoca-sandbox" }

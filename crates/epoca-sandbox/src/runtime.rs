@@ -119,7 +119,21 @@ impl SandboxInstance {
         let blob = ProgramBlob::parse(blob_bytes.into())
             .context("Failed to parse PolkaVM program blob")?;
 
-        let engine_config = Config::from_env().unwrap_or_default();
+        let mut engine_config = Config::from_env().unwrap_or_default();
+        match config.backend {
+            SandboxBackend::Compiler => {
+                engine_config.set_backend(Some(polkavm::BackendKind::Compiler));
+            }
+            SandboxBackend::Interpreter => {
+                engine_config.set_backend(Some(polkavm::BackendKind::Interpreter));
+            }
+            SandboxBackend::Auto => {
+                // Default to compiler (JIT) when available.
+                engine_config.set_backend(Some(polkavm::BackendKind::Compiler));
+            }
+        }
+        // The generic sandbox (macOS/non-Linux) requires this flag.
+        engine_config.set_allow_experimental(true);
         let engine = Engine::new(&engine_config).map_err(|e| {
             log::error!("[sandbox] Engine::new error: {e}");
             e
