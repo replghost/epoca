@@ -3149,13 +3149,14 @@ impl SpaTab {
                 cx.notify();
             });
 
+        let has_chain_perm = permissions.as_ref().map(|p| p.chain).unwrap_or(false);
         let entry_url = format!("epocaapp://{}/{}", app_id, entry);
         let mut error = None;
         let mut wv_entity = None;
         let mut sidebar_blocker_ptr: u64 = 0;
         let mut webview_ptr: usize = 0;
 
-        log::info!("[spa] entry_url={entry_url} app_id={app_id}");
+        log::info!("[spa] entry_url={entry_url} app_id={app_id} chain_perm={has_chain_perm}");
         // Build the SPA WebView with custom protocol + host API injection.
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&entry_url)
@@ -3216,12 +3217,45 @@ impl SpaTab {
                             let mime = crate::spa::mime_for_path(path);
                             // For fallback routes, serve as HTML.
                             let mime = if !path.contains('.') { "text/html" } else { mime };
-                            // Strip `crossorigin` from HTML — WKURLSchemeHandler
-                            // doesn't support CORS mode for custom schemes.
+                            // For HTML responses: strip `crossorigin` (WKURLSchemeHandler
+                            // doesn't support CORS mode for custom schemes) and inject
+                            // HOST_API_SCRIPT inline so it runs in the page world.
+                            // wry's with_initialization_script runs in an isolated
+                            // content world — page JS can't see globals set there.
                             let data = if mime == "text/html" {
                                 if let Ok(html) = std::str::from_utf8(&data) {
                                     let cleaned = html.replace(" crossorigin", "");
-                                    cleaned.into_bytes()
+                                    // Inject host API + bridge + console relay into <head>
+                                    // so they execute before any page scripts.
+                                    // HOST_API_BRIDGE_SCRIPT sets up __HOST_API_PORT__ and
+                                    // __HOST_WEBVIEW_MARK__ used by the Product SDK path.
+                                    // Error handlers + click tracker must also be
+                                    // inline — with_initialization_script runs in
+                                    // an isolated content world on WKWebView.
+                                    let error_handlers = r#"
+window.onerror=function(msg,url,line,col){console.log('[EPOCA-ERR] '+msg+' at '+url+':'+line+':'+col);};
+window.addEventListener('unhandledrejection',function(e){console.log('[EPOCA-ERR] unhandled rejection: '+e.reason);});
+document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagName:'?';console.log('[EPOCA-CLICK] tag='+tag+' href='+(el&&el.href||'')+' defaultPrevented='+e.defaultPrevented);},true);
+"#;
+                                    let inject = format!(
+                                        "<script>{}</script><script>{}</script><script>{}</script><script>{}</script>",
+                                        CONSOLE_RELAY_SCRIPT,
+                                        error_handlers,
+                                        crate::spa::HOST_API_SCRIPT,
+                                        epoca_hostapi::HOST_API_BRIDGE_SCRIPT,
+                                    );
+                                    let injected = if let Some(pos) = cleaned.find("<head>") {
+                                        let after = pos + "<head>".len();
+                                        format!("{}{}{}", &cleaned[..after], inject, &cleaned[after..])
+                                    } else if let Some(pos) = cleaned.find("<HEAD>") {
+                                        let after = pos + "<HEAD>".len();
+                                        format!("{}{}{}", &cleaned[..after], inject, &cleaned[after..])
+                                    } else {
+                                        // No <head> tag — prepend to the whole document.
+                                        format!("{inject}{cleaned}")
+                                    };
+                                    log::info!("[spa-proto] injected scripts into HTML for {path}, first 200 chars: {}", &injected[..injected.len().min(200)]);
+                                    injected.into_bytes()
                                 } else {
                                     data
                                 }
@@ -3283,14 +3317,6 @@ impl SpaTab {
                                 crate::host::register_hostapi_handler(uc, webview_ptr);
                                 crate::shield::register_cursor_handler(uc, webview_ptr);
                                 register_console_handler(uc);
-                                // wry's with_initialization_script runs in an
-                                // isolated content world — page JS can't see
-                                // globals set there.  Re-inject HOST_API_SCRIPT
-                                // and CONSOLE_RELAY into the PAGE world so the
-                                // app's inline scripts can call window.epoca.*
-                                // and have console.log relayed to Rust.
-                                inject_page_world_script(uc, crate::spa::HOST_API_SCRIPT);
-                                inject_page_world_script(uc, CONSOLE_RELAY_SCRIPT);
                             }
                         }
                     }
@@ -3350,6 +3376,14 @@ impl SpaTab {
         self.permissions.as_ref().map(|p| p.data).unwrap_or(false)
     }
 
+    /// Returns the list of granted media capabilities (e.g. ["camera", "audio"]).
+    pub fn media_permissions(&self) -> Vec<String> {
+        self.permissions
+            .as_ref()
+            .map(|p| p.media.clone())
+            .unwrap_or_default()
+    }
+
     pub fn reload(&self, cx: &App) {
         if let Some(wv) = &self.webview {
             let _ = wv.read(cx).raw().reload();
@@ -3371,6 +3405,7 @@ impl Drop for SpaTab {
         crate::chain_api::cleanup_for_webview(self.webview_ptr);
         crate::statements_api::cleanup_for_webview(self.webview_ptr);
         crate::data_api::cleanup_for_webview(self.webview_ptr);
+        crate::media_api::cleanup_for_webview(self.webview_ptr);
     }
 }
 

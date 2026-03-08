@@ -137,7 +137,6 @@ fn main() {
                     MenuItem::action("App Library", OpenAppLibrary),
                     MenuItem::action("Bookmarks", OpenBookmarks),
                     MenuItem::action("Add Bookmark", AddBookmark),
-                    MenuItem::action("Open Test SPA (dot://)", OpenTestSpa),
                     MenuItem::separator(),
                     MenuItem::action("Close Tab", CloseActiveTab),
                 ],

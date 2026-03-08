@@ -15,6 +15,12 @@ pub enum BridgeRequest {
     DataConnect { peer_address: String },
     DataSend { conn_id: u64, data: String },
     DataClose { conn_id: u64 },
+    MediaGetUserMedia { audio: bool, video: bool },
+    MediaConnect { peer_address: String, track_ids: Vec<u64> },
+    MediaClose { session_id: u64 },
+    MediaAttachTrack { track_id: u64, element_id: String },
+    MediaSignal { session_id: u64, signal_type: String, data: String },
+    MediaGetPeerId,
 }
 
 /// Permission context needed for dispatch decisions.
@@ -23,6 +29,8 @@ pub struct BridgePermissions {
     pub chain: bool,
     pub statements: bool,
     pub data: bool,
+    /// Granted media capabilities, e.g. ["camera", "audio"].
+    pub media: Vec<String>,
 }
 
 /// Result of dispatching a bridge request.
@@ -41,6 +49,37 @@ pub enum BridgeAsyncAction {
     ChainQuery { method: String, rpc_params: serde_json::Value, chain: String },
     ChainSubmit { call_data: String, chain: String },
     DataConnect { peer_address: String, conn_id: u64 },
+    /// getUserMedia: resolve the promise with track IDs, then evaluate the
+    /// getUserMedia JS on the webview to actually open the camera/mic.
+    MediaGetUserMedia {
+        call_id: u64,
+        webview_ptr: usize,
+        audio: bool,
+        video: bool,
+        audio_track_id: Option<u64>,
+        video_track_id: Option<u64>,
+    },
+    /// attachTrack: evaluate JS that wires a track to a DOM element.
+    MediaAttachTrack {
+        call_id: u64,
+        webview_ptr: usize,
+        track_id: u64,
+        element_id: String,
+    },
+    /// connect: set up RTCPeerConnection via evaluateScript + start signaling.
+    MediaConnect {
+        call_id: u64,
+        webview_ptr: usize,
+        session_id: u64,
+        peer_address: String,
+        track_ids: Vec<u64>,
+    },
+    /// close: tear down RTCPeerConnection and clean up session.
+    MediaClose {
+        call_id: u64,
+        webview_ptr: usize,
+        session_id: u64,
+    },
 }
 
 /// Format a JS resolve call for success.
@@ -129,6 +168,52 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
         "dataClose" => {
             let conn_id = params.get("connId").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(BridgeRequest::DataClose { conn_id })
+        }
+        "mediaGetUserMedia" => {
+            let audio = params.get("audio").and_then(|v| v.as_bool()).unwrap_or(false);
+            let video = params.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
+            Ok(BridgeRequest::MediaGetUserMedia { audio, video })
+        }
+        "mediaConnect" => {
+            let peer_address = params
+                .get("peer")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let track_ids = params
+                .get("trackIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+                .unwrap_or_default();
+            Ok(BridgeRequest::MediaConnect { peer_address, track_ids })
+        }
+        "mediaClose" => {
+            let session_id = params.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
+            Ok(BridgeRequest::MediaClose { session_id })
+        }
+        "mediaAttachTrack" => {
+            let track_id = params.get("trackId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let element_id = params
+                .get("elementId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(BridgeRequest::MediaAttachTrack { track_id, element_id })
+        }
+        "mediaGetPeerId" => Ok(BridgeRequest::MediaGetPeerId),
+        "mediaSignal" => {
+            let session_id = params.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let signal_type = params
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let data = params
+                .get("data")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(BridgeRequest::MediaSignal { session_id, signal_type, data })
         }
         other => Err(other.to_string()),
     }
@@ -274,6 +359,119 @@ pub fn dispatch(
                 Ok(()) => BridgeResult::Js(resolve_ok(id, "true")),
                 Err(e) => BridgeResult::Js(resolve_err(id, &e)),
             }
+        }
+
+        BridgeRequest::MediaGetUserMedia { audio, video } => {
+            // Require at least one media capability to be granted.
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            if *video && !perms.media.iter().any(|c| c == "camera") {
+                return BridgeResult::Js(resolve_err(id, "camera permission not granted"));
+            }
+            if *audio && !perms.media.iter().any(|c| c == "audio") {
+                return BridgeResult::Js(resolve_err(id, "audio permission not granted"));
+            }
+            // Allocate track IDs now. The workbench will then: (1) resolve the
+            // promise with the IDs, (2) evaluate the getUserMedia JS.
+            let (audio_tid, video_tid) =
+                crate::media_api::request_get_user_media(webview_ptr, *audio, *video);
+            BridgeResult::Async(BridgeAsyncAction::MediaGetUserMedia {
+                call_id: id,
+                webview_ptr,
+                audio: *audio,
+                video: *video,
+                audio_track_id: audio_tid,
+                video_track_id: video_tid,
+            })
+        }
+
+        BridgeRequest::MediaGetPeerId => {
+            let peer_id = crate::media_api::local_peer_id_pub();
+            BridgeResult::Js(resolve_ok(id, &format!("'{peer_id}'")))
+        }
+
+        BridgeRequest::MediaConnect { peer_address, track_ids } => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            if peer_address.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "peer address cannot be empty"));
+            }
+            let session_id = crate::media_api::create_session(
+                webview_ptr, app_id, peer_address, track_ids.clone(),
+            );
+            // Start signaling relay thread.
+            match crate::media_api::start_signaling(session_id, app_id, peer_address) {
+                Ok(handle) => {
+                    crate::media_api::set_signaling_handle(session_id, handle);
+                }
+                Err(e) => {
+                    return BridgeResult::Js(resolve_err(id, &e));
+                }
+            }
+            BridgeResult::Async(BridgeAsyncAction::MediaConnect {
+                call_id: id,
+                webview_ptr,
+                session_id,
+                peer_address: peer_address.clone(),
+                track_ids: track_ids.clone(),
+            })
+        }
+
+        BridgeRequest::MediaClose { session_id } => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            BridgeResult::Async(BridgeAsyncAction::MediaClose {
+                call_id: id,
+                webview_ptr,
+                session_id: *session_id,
+            })
+        }
+
+        BridgeRequest::MediaSignal { session_id, signal_type, data } => {
+            // Signals from JS are fire-and-forget (id=0), no promise to resolve.
+            match signal_type.as_str() {
+                "offer" | "answer" | "candidate" => {
+                    // Relay to remote peer via Statement Store.
+                    if let Err(e) = crate::media_api::publish_signal(*session_id, signal_type, data) {
+                        log::warn!("[media] publish signal failed: {e}");
+                    }
+                }
+                "connected" => {
+                    crate::media_api::session_connected(*session_id);
+                }
+                "closed" => {
+                    crate::media_api::close_session(*session_id, data);
+                }
+                "remoteTrack" => {
+                    if let Ok(info) = serde_json::from_str::<serde_json::Value>(data) {
+                        let track_id = info.get("trackId").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let kind = info.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+                        crate::media_api::push_remote_track(*session_id, track_id, kind);
+                    }
+                }
+                _ => {}
+            }
+            // id=0 signals have no pending promise, resolve is a no-op.
+            BridgeResult::Js(resolve_ok(id, "true"))
+        }
+
+        BridgeRequest::MediaAttachTrack { track_id, element_id } => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            // Reject element IDs with characters that could escape a JS string context.
+            if element_id.contains(['\'', '"', '\\', '\n', '\r']) {
+                return BridgeResult::Js(resolve_err(id, "invalid elementId"));
+            }
+            BridgeResult::Async(BridgeAsyncAction::MediaAttachTrack {
+                call_id: id,
+                webview_ptr,
+                track_id: *track_id,
+                element_id: element_id.clone(),
+            })
         }
     }
 }

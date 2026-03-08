@@ -8,6 +8,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Media API Phase A (functional getUserMedia + attachTrack)** — `window.epoca.media.getUserMedia()`
+  now allocates opaque track IDs via `media_api.rs`, resolves the JS promise with `{audioTrackId, videoTrackId}`,
+  then evaluates getUserMedia JS in the WKWebView (browser native stack, no ObjC/AVFoundation).
+  `window.epoca.media.attachTrack(trackId, elementId)` wires a track to a DOM element via `srcObject`.
+  `RTCPeerConnection`/`RTCSessionDescription`/`RTCIceCandidate` remain frozen; `getUserMedia` is
+  intentionally left unblocked (harmless without PeerConnection). `cleanup_for_webview()` added to
+  `SpaTab::drop`. Push events `mediaTrackReady`, `mediaConnected`, `mediaRemoteTrack`, `mediaClosed`,
+  `mediaError` drain loop added to workbench render path. New `BridgeAsyncAction::MediaGetUserMedia`
+  and `MediaAttachTrack` variants. `media_api.rs`, `js_bridge.rs`, `spa.rs`, `tabs.rs`, `workbench.rs`. (2026-03-07)
+
+- **Media API scaffold (Phase A)** — `window.epoca.media` namespace injected into SPA WebViews
+  with `getUserMedia`, `connect`, `close`, and `attachTrack` methods. Native WebRTC globals
+  (`RTCPeerConnection`, `RTCSessionDescription`, `RTCIceCandidate`, `navigator.mediaDevices.getUserMedia`)
+  are nulled at document_start so apps must go through the host API. Bridge variants
+  `MediaGetUserMedia`, `MediaConnect`, `MediaClose`, `MediaAttachTrack` added to `BridgeRequest`.
+  Permission checks enforce `media = ["camera"]`/`["audio"]` from `PermissionsMeta`. Push events
+  `mediaTrackReady`, `mediaConnected`, `mediaRemoteTrack`, `mediaClosed`, `mediaError` wired into
+  `__epocaPush`. TypeScript types in `types/epoca-host-api.d.ts` updated. `js_bridge.rs`, `spa.rs`,
+  `tabs.rs`, `workbench.rs`. (2026-03-07)
+
 - **Bundle signature verification** — `.prod` bundles can now include an optional `signature.toml`
   with an ed25519 public key and signature over `sha256(manifest.toml) || sha256(app.polkavm)`.
   SPA bundles use `sha256("")` for program hash. Self-signed model (integrity, not authenticity).

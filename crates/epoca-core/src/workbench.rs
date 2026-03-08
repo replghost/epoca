@@ -1025,6 +1025,7 @@ impl Workbench {
                             chain: entity.read(cx).has_permission_chain(),
                             statements: entity.read(cx).has_permission_statements(),
                             data: entity.read(cx).has_permission_data(),
+                            media: entity.read(cx).media_permissions(),
                         };
 
                         let wallet_address: Result<String, String> =
@@ -1081,7 +1082,7 @@ impl Workbench {
                                         app_id: app_id.clone(),
                                         payload,
                                     });
-                                    cx.set_global(OmniboxOpen(true));
+                                    self.trigger_sidebar_show(false, cx);
                                     cx.notify();
                                 }
                                 crate::js_bridge::BridgeAsyncAction::ChainQuery { .. } => {
@@ -1100,7 +1101,7 @@ impl Workbench {
                                         chain: chain_id,
                                         call_data,
                                     });
-                                    cx.set_global(OmniboxOpen(true));
+                                    self.trigger_sidebar_show(false, cx);
                                     cx.notify();
                                 }
                                 crate::js_bridge::BridgeAsyncAction::DataConnect {
@@ -1114,8 +1115,83 @@ impl Workbench {
                                         peer_address,
                                         conn_id,
                                     });
-                                    cx.set_global(OmniboxOpen(true));
+                                    self.trigger_sidebar_show(false, cx);
                                     cx.notify();
+                                }
+                                crate::js_bridge::BridgeAsyncAction::MediaGetUserMedia {
+                                    call_id,
+                                    webview_ptr: wv_ptr,
+                                    audio,
+                                    video,
+                                    audio_track_id,
+                                    video_track_id,
+                                } => {
+                                    // Step 1: resolve the JS promise with the allocated track IDs.
+                                    let result = serde_json::json!({
+                                        "audioTrackId": audio_track_id,
+                                        "videoTrackId": video_track_id,
+                                    });
+                                    let resolve_js = format!(
+                                        "window.__epocaResolve({call_id}, null, {})",
+                                        serde_json::to_string(&result).unwrap_or_else(|_| "{}".into())
+                                    );
+                                    entity.read(cx).evaluate_script(&resolve_js, cx);
+                                    // Step 2: evaluate the getUserMedia JS to open camera/mic.
+                                    let gum_js = crate::media_api::get_user_media_js(
+                                        audio_track_id,
+                                        video_track_id,
+                                        audio,
+                                        video,
+                                    );
+                                    entity.read(cx).evaluate_script(&gum_js, cx);
+                                    let _ = wv_ptr; // already used entity above
+                                }
+                                crate::js_bridge::BridgeAsyncAction::MediaAttachTrack {
+                                    call_id,
+                                    webview_ptr: wv_ptr,
+                                    track_id,
+                                    element_id,
+                                } => {
+                                    // Evaluate the attach JS, then resolve the promise.
+                                    let attach_js = crate::media_api::attach_track_js(track_id, &element_id);
+                                    entity.read(cx).evaluate_script(&attach_js, cx);
+                                    let resolve_js = format!(
+                                        "window.__epocaResolve({call_id}, null, true)"
+                                    );
+                                    entity.read(cx).evaluate_script(&resolve_js, cx);
+                                    let _ = wv_ptr;
+                                }
+                                crate::js_bridge::BridgeAsyncAction::MediaConnect {
+                                    call_id,
+                                    webview_ptr: _wv_ptr,
+                                    session_id,
+                                    ref peer_address,
+                                    ref track_ids,
+                                } => {
+                                    // Resolve the promise with the session ID.
+                                    let resolve_js = format!(
+                                        "window.__epocaResolve({call_id}, null, {session_id})"
+                                    );
+                                    entity.read(cx).evaluate_script(&resolve_js, cx);
+                                    // Set up RTCPeerConnection via evaluateScript.
+                                    let offerer = crate::media_api::is_offerer(peer_address);
+                                    let setup_js = crate::media_api::setup_session_js(
+                                        session_id, track_ids, offerer,
+                                    );
+                                    entity.read(cx).evaluate_script(&setup_js, cx);
+                                }
+                                crate::js_bridge::BridgeAsyncAction::MediaClose {
+                                    call_id,
+                                    webview_ptr: _wv_ptr,
+                                    session_id,
+                                } => {
+                                    let close_js = crate::media_api::close_session_js(session_id);
+                                    entity.read(cx).evaluate_script(&close_js, cx);
+                                    crate::media_api::close_session(session_id, "closed by app");
+                                    let resolve_js = format!(
+                                        "window.__epocaResolve({call_id}, null, true)"
+                                    );
+                                    entity.read(cx).evaluate_script(&resolve_js, cx);
                                 }
                             },
                             crate::js_bridge::BridgeResult::UnknownMethod(m) => {
@@ -1230,6 +1306,58 @@ impl Workbench {
             }
         }
 
+        // Drain media events (push mediaTrackReady, mediaError, etc. to SPA webviews).
+        for ev in crate::media_api::drain_events() {
+            let js = match ev.event_type {
+                crate::media_api::MediaEventType::TrackReady { track_id, ref kind } => {
+                    let json = serde_json::json!({ "trackId": track_id, "kind": kind });
+                    format!(
+                        "window.__epocaPush('mediaTrackReady', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
+                crate::media_api::MediaEventType::SessionConnected { session_id, ref peer_address } => {
+                    let json = serde_json::json!({ "sessionId": session_id, "peer": peer_address });
+                    format!(
+                        "window.__epocaPush('mediaConnected', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
+                crate::media_api::MediaEventType::RemoteTrack { session_id, track_id, ref kind } => {
+                    let json = serde_json::json!({ "sessionId": session_id, "trackId": track_id, "kind": kind });
+                    format!(
+                        "window.__epocaPush('mediaRemoteTrack', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
+                crate::media_api::MediaEventType::SessionClosed { session_id, ref reason } => {
+                    let json = serde_json::json!({ "sessionId": session_id, "reason": reason });
+                    format!(
+                        "window.__epocaPush('mediaClosed', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
+                crate::media_api::MediaEventType::Error { session_id, ref error } => {
+                    let json = serde_json::json!({ "sessionId": session_id, "error": error });
+                    format!(
+                        "window.__epocaPush('mediaError', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
+                crate::media_api::MediaEventType::EvalJs { ref js } => {
+                    js.clone()
+                }
+            };
+            for tab in &self.tabs {
+                if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
+                    if entity.read(cx).webview_ptr == ev.webview_ptr {
+                        entity.read(cx).evaluate_script(&js, cx);
+                        break;
+                    }
+                }
+            }
+        }
+
         // Drain Polkadot app host-api events (epocaHostApi WKScriptMessageHandler → SCALE binary)
         {
             let hostapi_events = crate::host::drain_hostapi_events();
@@ -1306,8 +1434,7 @@ impl Workbench {
                                 app_id: app_id.clone(),
                                 payload,
                             });
-                            // Hide the WebView so the sign dialog is visible above it.
-                            cx.set_global(OmniboxOpen(true));
+                            self.trigger_sidebar_show(false, cx);
                             cx.notify();
                         }
                     }
@@ -1476,6 +1603,7 @@ impl Workbench {
                                             display_message,
                                             origin: origin_host,
                                         });
+                                        self.trigger_sidebar_show(false, cx);
                                         cx.notify();
                                     }
                                 }
@@ -1602,6 +1730,7 @@ impl Workbench {
                                             message,
                                             origin: origin_host,
                                         });
+                                        self.trigger_sidebar_show(false, cx);
                                         cx.notify();
                                     }
                                 }
@@ -2968,9 +3097,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                                         },
                                         permissions: Some(epoca_sandbox::bundle::PermissionsMeta {
                                             network: None,
-                                            sign: false,
+                                            sign: true,
                                             statements: false,
-                                            chain: false,
+                                            chain: true,
                                             data: false,
                                             media: vec![],
                                         }),
@@ -4644,6 +4773,14 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             None
         };
 
+        // Approval panel replaces the tab list when a pending action requires user consent.
+        let has_pending = self.has_pending_approval();
+        let approval_panel = if has_pending && !self.page_info_open {
+            self.render_approval_panel(_window, cx)
+        } else {
+            None
+        };
+
         div()
             .relative()
             .flex()
@@ -4657,9 +4794,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .child(url_row)
             // Wallet connection consent banner — between URL bar and content area
             .children(self.render_wallet_connect_banner(_window, cx).map(|b| b.into_any_element()))
-            // Either page-info panel or tab list
+            // Either page-info panel, approval panel, or tab list
             .when_some(page_info_panel, |d, panel| d.child(panel))
-            .when(!self.page_info_open, |d| d.child(tabs_area))
+            .when_some(approval_panel, |d, panel| d.child(panel))
+            .when(!self.page_info_open && !has_pending, |d| d.child(tabs_area))
             .child(bottom_bar)
             // Context picker dropdown — painted last so it sits on top of tabs
             .children(context_dropdown)
@@ -5335,6 +5473,336 @@ impl Workbench {
 }
 
 // ---------------------------------------------------------------------------
+// Unified approval panel (replaces the 6 separate backdrop dialogs)
+// ---------------------------------------------------------------------------
+impl Workbench {
+    fn has_pending_approval(&self) -> bool {
+        self.pending_wallet_sign.is_some()
+            || self.pending_btc_wallet_sign.is_some()
+            || self.pending_spa_sign.is_some()
+            || self.pending_chain_submit.is_some()
+            || self.pending_data_connect.is_some()
+            || self.pending_hostapi_sign.is_some()
+    }
+
+    fn render_approval_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Color constants matching the design system.
+        let amber = rgba(0xf5a623ff_u32);
+        let teal = rgba(0x00d4aaff_u32);
+        let border_color = rgba(0xffffff14_u32);
+        let text_primary = rgba(0xffffffe0_u32);
+        let text_secondary = rgba(0xffffff66_u32);
+        let text_muted = rgba(0xffffff44_u32);
+        let payload_bg = rgba(0x00000033_u32);
+        let deny_bg = rgba(0xffffff0f_u32);
+
+        // Determine which approval to show and extract display data.
+        // Priority: wallet_sign → btc_sign → spa_sign → hostapi_sign → chain_submit → data_connect
+        enum ApprovalKind {
+            WalletSign,
+            BtcSign,
+            SpaSign,
+            HostApiSign,
+            ChainSubmit,
+            DataConnect,
+        }
+
+        let kind;
+        let title: &str;
+        let app_label: String;
+        let detail_rows: Vec<(&str, String)>;
+        let payload_text: String;
+        let note: &str;
+        let approve_label: &str;
+        let is_high_risk: bool; // amber vs teal accent
+
+        if let Some(req) = &self.pending_wallet_sign {
+            kind = ApprovalKind::WalletSign;
+            title = "Signature Request";
+            app_label = req.origin.clone();
+            detail_rows = vec![
+                ("Method", req.method.clone()),
+            ];
+            payload_text = req.display_message.clone();
+            note = "This website is requesting a cryptographic signature.";
+            approve_label = "Sign";
+            is_high_risk = true;
+        } else if let Some(req) = &self.pending_btc_wallet_sign {
+            kind = ApprovalKind::BtcSign;
+            title = "Bitcoin Sign Message";
+            app_label = req.origin.clone();
+            detail_rows = vec![];
+            payload_text = if req.message.chars().count() > 200 {
+                let t: String = req.message.chars().take(200).collect();
+                format!("{t}…")
+            } else {
+                req.message.clone()
+            };
+            note = "This website is requesting a Bitcoin message signature.";
+            approve_label = "Sign";
+            is_high_risk = true;
+        } else if let Some(req) = &self.pending_spa_sign {
+            kind = ApprovalKind::SpaSign;
+            title = "Signature Request";
+            app_label = req.app_id.clone();
+            detail_rows = vec![];
+            payload_text = if req.payload.len() > 200 {
+                format!("{}…", &req.payload[..200])
+            } else {
+                req.payload.clone()
+            };
+            note = "This app is requesting a cryptographic signature.";
+            approve_label = "Sign";
+            is_high_risk = true;
+        } else if let Some(req) = &self.pending_hostapi_sign {
+            kind = ApprovalKind::HostApiSign;
+            let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+            title = if is_raw { "Sign Raw Data" } else { "Sign Transaction" };
+            app_label = req.app_id.clone();
+            detail_rows = vec![];
+            payload_text = if req.payload.len() > 60 {
+                format!("{}…", hex_encode(&req.payload[..60]))
+            } else {
+                hex_encode(&req.payload)
+            };
+            note = "This app is requesting access to your signing key.";
+            approve_label = "Sign";
+            is_high_risk = true;
+        } else if let Some(req) = &self.pending_chain_submit {
+            kind = ApprovalKind::ChainSubmit;
+            title = "Transaction Request";
+            app_label = req.app_id.clone();
+            detail_rows = vec![
+                ("Chain", req.chain.display_name().to_string()),
+            ];
+            payload_text = if req.call_data.len() > 200 {
+                format!("{}…", &req.call_data[..200])
+            } else {
+                req.call_data.clone()
+            };
+            note = "This app wants to submit a transaction to the network.";
+            approve_label = "Submit";
+            is_high_risk = true;
+        } else if let Some(req) = &self.pending_data_connect {
+            kind = ApprovalKind::DataConnect;
+            title = "Connection Request";
+            app_label = req.app_id.clone();
+            let peer = &req.peer_address;
+            let peer_display = if peer.len() > 20 {
+                format!("{}…{}", &peer[..8], &peer[peer.len() - 8..])
+            } else {
+                peer.clone()
+            };
+            detail_rows = vec![
+                ("Peer", peer_display),
+            ];
+            payload_text = String::new();
+            note = "This app wants to open a peer-to-peer data connection.";
+            approve_label = "Allow";
+            is_high_risk = false;
+        } else {
+            return None;
+        }
+
+        let accent = if is_high_risk { amber } else { teal };
+        let approve_bg = if is_high_risk {
+            rgba(0xf5a62333_u32)
+        } else {
+            rgba(0x00d4aa33_u32)
+        };
+
+        // Choose icon based on approval type.
+        let icon_name = match kind {
+            ApprovalKind::ChainSubmit => IconName::ExternalLink,
+            ApprovalKind::DataConnect => IconName::Globe,
+            _ => IconName::TriangleAlert,
+        };
+
+        // Build detail row elements.
+        let detail_els: Vec<AnyElement> = detail_rows
+            .into_iter()
+            .map(|(label, value)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .w(px(72.0))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(text_secondary)
+                            .truncate()
+                            .child(value),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        // Build the panel.
+        let panel = div()
+            .id("approval-panel")
+            .flex()
+            .flex_col()
+            .flex_1()
+            .overflow_hidden()
+            .px(px(12.0))
+            .py(px(14.0))
+            .gap(px(10.0))
+            // Header: icon + title + app name
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(Icon::new(icon_name).size(px(16.0)).text_color(accent))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(text_primary)
+                                    .child(title.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(text_muted)
+                                    .truncate()
+                                    .child(app_label),
+                            ),
+                    ),
+            )
+            // Separator
+            .child(
+                div()
+                    .h(px(1.0))
+                    .w_full()
+                    .bg(border_color),
+            )
+            // Detail rows
+            .children(detail_els)
+            // Payload box (only when non-empty)
+            .when(!payload_text.is_empty(), |d| {
+                d.child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(4.0))
+                        .bg(payload_bg)
+                        .max_h(px(120.0))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_family("monospace")
+                                .text_color(text_secondary)
+                                .child(payload_text),
+                        ),
+                )
+            })
+            // Security note
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(text_muted)
+                    .child(note.to_string()),
+            )
+            // Spacer to push buttons to bottom
+            .child(div().flex_1())
+            // Button row
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.0))
+                    // Deny button
+                    .child(
+                        div()
+                            .id("approval-deny-btn")
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(32.0))
+                            .rounded(px(6.0))
+                            .bg(deny_bg)
+                            .cursor_pointer()
+                            .hover(|d| d.bg(rgba(0xffffff1a_u32)))
+                            .text_xs()
+                            .text_color(text_secondary)
+                            .child("Deny")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // Deny whichever approval is pending.
+                                if this.pending_wallet_sign.is_some() {
+                                    this.deny_wallet_sign(cx);
+                                } else if this.pending_btc_wallet_sign.is_some() {
+                                    this.deny_btc_wallet_sign(cx);
+                                } else if this.pending_spa_sign.is_some() {
+                                    this.deny_spa_sign(cx);
+                                } else if this.pending_hostapi_sign.is_some() {
+                                    this.deny_hostapi_sign(cx);
+                                } else if this.pending_chain_submit.is_some() {
+                                    this.deny_chain_submit(cx);
+                                } else if this.pending_data_connect.is_some() {
+                                    this.deny_data_connect(cx);
+                                }
+                            })),
+                    )
+                    // Approve button
+                    .child(
+                        div()
+                            .id("approval-approve-btn")
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .h(px(32.0))
+                            .rounded(px(6.0))
+                            .bg(approve_bg)
+                            .cursor_pointer()
+                            .hover(|d| d.opacity(0.85))
+                            .text_xs()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(accent)
+                            .child(approve_label.to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // Approve whichever approval is pending.
+                                if this.pending_wallet_sign.is_some() {
+                                    this.approve_wallet_sign(cx);
+                                } else if this.pending_btc_wallet_sign.is_some() {
+                                    this.approve_btc_wallet_sign(cx);
+                                } else if this.pending_spa_sign.is_some() {
+                                    this.approve_spa_sign(cx);
+                                } else if this.pending_hostapi_sign.is_some() {
+                                    this.approve_hostapi_sign(cx);
+                                } else if this.pending_chain_submit.is_some() {
+                                    this.approve_chain_submit(cx);
+                                } else if this.pending_data_connect.is_some() {
+                                    this.approve_data_connect(cx);
+                                }
+                            })),
+                    ),
+            );
+
+        Some(panel.into_any_element())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wallet sign confirmation dialog
 // ---------------------------------------------------------------------------
 impl Workbench {
@@ -5378,7 +5846,6 @@ impl Workbench {
 
     fn approve_spa_sign(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_spa_sign.take() else { return };
-        cx.set_global(OmniboxOpen(false));
 
         if !cx.has_global::<crate::wallet::WalletGlobal>() {
             self.resolve_spa_js(req.webview_ptr, req.id, Err("no wallet configured"), cx);
@@ -5410,14 +5877,12 @@ impl Workbench {
 
     fn deny_spa_sign(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_spa_sign.take() else { return };
-        cx.set_global(OmniboxOpen(false));
         self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected signing request"), cx);
         cx.notify();
     }
 
     fn approve_chain_submit(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_chain_submit.take() else { return };
-        cx.set_global(OmniboxOpen(false));
 
         match crate::chain_api::submit_extrinsic(
             req.chain,
@@ -5435,14 +5900,12 @@ impl Workbench {
 
     fn deny_chain_submit(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_chain_submit.take() else { return };
-        cx.set_global(OmniboxOpen(false));
         self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected transaction"), cx);
         cx.notify();
     }
 
     fn approve_data_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_data_connect.take() else { return };
-        cx.set_global(OmniboxOpen(false));
 
         match crate::data_api::approve_connection(req.conn_id) {
             Ok(()) => {
@@ -5460,7 +5923,6 @@ impl Workbench {
 
     fn deny_data_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_data_connect.take() else { return };
-        cx.set_global(OmniboxOpen(false));
         let _ = crate::data_api::deny_connection(req.conn_id);
         self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected connection"), cx);
         cx.notify();
@@ -5479,7 +5941,6 @@ impl Workbench {
 
     fn approve_hostapi_sign(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_hostapi_sign.take() else { return };
-        cx.set_global(OmniboxOpen(false));
         let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
 
         let response = if cx.has_global::<crate::wallet::WalletGlobal>() {
@@ -5506,7 +5967,6 @@ impl Workbench {
 
     fn deny_hostapi_sign(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_hostapi_sign.take() else { return };
-        cx.set_global(OmniboxOpen(false));
         let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
         let response = epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw);
         crate::host::send_response(req.webview_ptr, &response);
@@ -6284,19 +6744,6 @@ impl Render for Workbench {
                     None
                 };
 
-                let wallet_dialog = self.render_wallet_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let btc_sign_dialog = self.render_btc_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let spa_sign_dialog = self.render_spa_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let chain_submit_dialog = self.render_chain_submit_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let data_connect_dialog = self.render_data_connect_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let hostapi_sign_dialog = self.render_hostapi_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-
                 // Backdrop to dismiss wallet popover when clicking outside
                 let wallet_backdrop = if self.wallet_popover_open {
                     Some(
@@ -6344,12 +6791,6 @@ impl Render for Workbench {
                     .children(wallet_backdrop)
                     .children(ctx_backdrop)
                     .children(omnibox)
-                    .children(wallet_dialog)
-                    .children(btc_sign_dialog)
-                    .children(spa_sign_dialog)
-                    .children(chain_submit_dialog)
-                    .children(data_connect_dialog)
-                    .children(hostapi_sign_dialog)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -6478,19 +6919,6 @@ impl Render for Workbench {
                     None
                 };
 
-                let wallet_dialog_overlay = self.render_wallet_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let btc_sign_dialog_overlay = self.render_btc_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let spa_sign_dialog_overlay = self.render_spa_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let chain_submit_dialog_overlay = self.render_chain_submit_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let data_connect_dialog_overlay = self.render_data_connect_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-                let hostapi_sign_dialog_overlay = self.render_hostapi_sign_dialog(window, cx)
-                    .map(|d| d.into_any_element());
-
                 let wallet_backdrop_overlay = if self.wallet_popover_open {
                     Some(
                         div()
@@ -6535,12 +6963,6 @@ impl Render for Workbench {
                     .children(ctx_backdrop_overlay)
                     .children(sidebar)
                     .children(omnibox)
-                    .children(wallet_dialog_overlay)
-                    .children(btc_sign_dialog_overlay)
-                    .children(spa_sign_dialog_overlay)
-                    .children(chain_submit_dialog_overlay)
-                    .children(data_connect_dialog_overlay)
-                    .children(hostapi_sign_dialog_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {

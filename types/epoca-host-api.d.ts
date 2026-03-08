@@ -9,6 +9,7 @@
  *   statements.*    → [permissions] statements = true
  *   chain.*         → [permissions] chain = true
  *   data.*          → [permissions] data = true
+ *   media.*         → [permissions] media = ["camera", "audio"]
  */
 
 interface EpocaStatements {
@@ -25,6 +26,30 @@ interface EpocaData {
   send(connId: number, data: string): Promise<true>;
   /** Close a data connection. */
   close(connId: number): Promise<true>;
+}
+
+interface MediaConstraints {
+  audio?: boolean;
+  video?: boolean;
+}
+
+interface EpocaMedia {
+  /**
+   * Request access to camera/audio. Resolves immediately with a pending stream ID.
+   * Track readiness arrives via the 'mediaTrackReady' push event.
+   * Requires manifest.toml: media = ["camera"] and/or ["audio"].
+   */
+  getUserMedia(constraints: MediaConstraints): Promise<number>;
+  /**
+   * Open a peer-to-peer media session using previously captured track IDs.
+   * Resolves immediately with a pending session ID.
+   * Connection readiness arrives via the 'mediaConnected' push event.
+   */
+  connect(peer: string, trackIds?: number[]): Promise<number>;
+  /** Close a media session. The host cleans up tracks and connections. */
+  close(sessionId: number): Promise<true>;
+  /** Attach a local or remote track to a DOM element by element ID. */
+  attachTrack(trackId: number, elementId: string): Promise<true>;
 }
 
 interface EpocaChain {
@@ -61,12 +86,47 @@ interface DataErrorEvent {
   error: string;
 }
 
+interface MediaTrackReadyEvent {
+  /** Stream ID returned by getUserMedia. */
+  streamId: number;
+  /** Individual track ID within the stream. */
+  trackId: number;
+  /** "audio" or "video". */
+  kind: string;
+}
+
+interface MediaConnectedEvent {
+  sessionId: number;
+  peer: string;
+}
+
+interface MediaRemoteTrackEvent {
+  sessionId: number;
+  trackId: number;
+  kind: string;
+}
+
+interface MediaClosedEvent {
+  sessionId: number;
+  reason: string;
+}
+
+interface MediaErrorEvent {
+  sessionId: number;
+  error: string;
+}
+
 type EpocaEventMap = {
   statement: StatementEvent;
   dataConnected: DataConnectedEvent;
   dataMessage: DataMessageEvent;
   dataClosed: DataClosedEvent;
   dataError: DataErrorEvent;
+  mediaTrackReady: MediaTrackReadyEvent;
+  mediaConnected: MediaConnectedEvent;
+  mediaRemoteTrack: MediaRemoteTrackEvent;
+  mediaClosed: MediaClosedEvent;
+  mediaError: MediaErrorEvent;
 };
 
 interface Epoca {
@@ -78,6 +138,7 @@ interface Epoca {
   readonly statements: EpocaStatements;
   readonly data: EpocaData;
   readonly chain: EpocaChain;
+  readonly media: EpocaMedia;
 
   /** Subscribe to host-pushed events. */
   on<K extends keyof EpocaEventMap>(event: K, callback: (data: EpocaEventMap[K]) => void): void;

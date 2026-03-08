@@ -19,6 +19,7 @@ pub mod reader;
 pub mod chain_api;
 pub mod statements_api;
 pub mod data_api;
+pub mod media_api;
 pub mod bookmarks;
 
 #[cfg(feature = "test-server")]

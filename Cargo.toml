@@ -54,7 +54,7 @@ smallvec = { version = "1", features = ["union"] }
 rusqlite = { version = "0.33", features = ["bundled"] }
 
 [patch.crates-io]
-polkavm = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
-polkavm-derive = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
-polkavm-common = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
-polkavm-assembler = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f" }
+polkavm = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f", version = "=0.31.0" }
+polkavm-derive = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f", version = "=0.31.0" }
+polkavm-common = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f", version = "=0.31.0" }
+polkavm-assembler = { git = "https://github.com/replghost/polkavm.git", rev = "3638e6f", version = "=0.31.0" }

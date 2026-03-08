@@ -461,10 +461,12 @@ pub fn resolve_dotns(name: &str) -> Result<String, String> {
 
     // 2. ABI-encode contenthash(bytes32) call
     let call_data = encode_contenthash_call(&node);
+    log::info!("[dotns] call_data encoded ({} bytes)", call_data.len());
 
     // 3. SCALE-encode ReviveApi::call() params
     let params = scale_encode_revive_call(&CONTENT_RESOLVER, &call_data);
     let params_hex = hex_encode(&params);
+    log::info!("[dotns] params encoded ({} hex chars), calling RPC...", params_hex.len());
 
     // 4. RPC state_call
     let response = rpc_state_call("ReviveApi_call", &params_hex)?;
@@ -759,7 +761,9 @@ pub fn resolve_and_fetch_full(name: &str) -> Result<DotnsResolution, String> {
 /// Lazy resolution: DOTNS lookup → fetch only manifest.toml.
 /// Assets are fetched on-demand by the SPA runtime via the IPFS gateway.
 pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
+    log::info!("[dotns] resolve_lazy START for {name}");
     let cid = resolve_dotns(name)?;
+    log::info!("[dotns] resolve_dotns done, cid={cid}, now resolving owner...");
     let owner = resolve_owner(name);
     log::info!("[dotns] lazy resolve {name}: cid={cid}, owner={owner:?}");
 

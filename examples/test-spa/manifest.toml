@@ -13,3 +13,4 @@ chain = "paseo-asset-hub"
 sign = true
 statements = true
 chain = true
+media = ["camera", "audio"]

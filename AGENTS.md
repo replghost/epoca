@@ -254,7 +254,18 @@ If unsure, ask rather than assume.
 - `PermissionsMeta` extended with `sign`, `statement_store`, `media` fields
 - `open_webapp()` in Workbench dispatches SPA bundles from `.prod` file open path
 - Broker `Permissions` extended with `sign: bool`, `statement_store: bool`, `media: Vec<String>`
-- **Pending**: `WKURLSchemeHandler` for `epocaapp://` scheme, `window.epoca` host API injection, signing relay, Statement Store relay, WebSocket proxy, block-all content rules
+- **Pending**: `WKURLSchemeHandler` for `epocaapp://` scheme, signing relay, Statement Store relay, WebSocket proxy, block-all content rules
+
+### Media API (Phase A — WebView-native getUserMedia)
+- `crates/epoca-core/src/media_api.rs`: global track/session state, monotonic IDs, `cleanup_for_webview()`
+- `request_get_user_media(webview_ptr, audio, video)` allocates opaque u64 track IDs; actual camera/mic access happens via `get_user_media_js()` evaluated in the WKWebView
+- `attach_track_js(track_id, element_id)` returns JS that sets `el.srcObject = stream` for a given track
+- `cleanup_tracks_js(webview_ptr)` generates JS to stop all tracks before destroying a webview
+- `BridgeAsyncAction::MediaGetUserMedia` / `MediaAttachTrack` in `js_bridge.rs` carry IDs to workbench
+- Workbench handles both actions: resolves JS promise + evaluates getUserMedia/attach JS in two steps
+- `drain_events()` loop in `process_pending_nav` pushes `mediaTrackReady`, `mediaError`, etc. to SPAs
+- `RTCPeerConnection` frozen; `getUserMedia` left available (harmless without PeerConnection)
+- `SpaTab::drop` calls `media_api::cleanup_for_webview()`
 
 ### .prod Bundle Format (CARv1 + ZIP)
 - `ProdBundle::from_file()` and `from_bytes()` auto-detect ZIP (magic `PK\x03\x04`) or CARv1 format

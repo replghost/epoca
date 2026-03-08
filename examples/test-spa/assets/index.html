@@ -112,6 +112,27 @@
   </div>
 
   <div class="card">
+    <h2>Host API: media.getUserMedia()</h2>
+    <div id="media" class="result pending">not yet called</div>
+    <video id="local-video" autoplay playsinline muted style="width:200px;height:150px;background:#000;border-radius:4px;margin-top:0.5rem;display:none;"></video>
+    <br>
+    <button onclick="testMediaAudio()">Audio Only</button>
+    <button onclick="testMediaVideo()">Video Only</button>
+    <button onclick="testMediaBoth()">Audio + Video</button>
+  </div>
+
+  <div class="card">
+    <h2>Host API: media.connect()</h2>
+    <div id="peer-id" class="result pending">loading peer ID...</div>
+    <div id="connect" class="result pending">not yet called</div>
+    <video id="remote-video" autoplay playsinline style="width:200px;height:150px;background:#000;border-radius:4px;margin-top:0.5rem;display:none;"></video>
+    <br>
+    <input type="text" id="peer-address" placeholder="Peer address" value="">
+    <button onclick="testMediaConnect()">Connect</button>
+    <button onclick="testMediaClose()">Close Session</button>
+  </div>
+
+  <div class="card">
     <h2>Network Isolation Test</h2>
     <div id="net" class="result pending">not yet tested</div>
     <button onclick="testNetwork()">Try fetch(https://...)</button>
@@ -167,7 +188,8 @@
     log('APIs: sign=' + typeof window.epoca.sign +
         ' chain=' + typeof window.epoca.chain +
         ' statements=' + typeof window.epoca.statements +
-        ' data=' + typeof window.epoca.data);
+        ' data=' + typeof window.epoca.data +
+        ' media=' + typeof window.epoca.media);
 
     // Listen for statement events
     window.epoca.on('statement', function(data) {
@@ -341,6 +363,123 @@
       el.textContent = e.message;
       log('statements.write rejected: ' + e.message);
     }
+  }
+
+  async function testMedia(audio, video) {
+    var el = document.getElementById('media');
+    el.className = 'result pending';
+    el.textContent = 'requesting media...';
+    var label = (audio && video) ? 'audio+video' : audio ? 'audio' : 'video';
+    log('media.getUserMedia({audio:' + audio + ', video:' + video + '}) called');
+    try {
+      var result = await window.epoca.media.getUserMedia({ audio: audio, video: video });
+      el.className = 'result';
+      el.textContent = label + ' tracks: ' + JSON.stringify(result);
+      log('getUserMedia resolved: ' + JSON.stringify(result));
+
+      // Store track IDs for media.connect()
+      if (result.audioTrackId) localTrackIds.push(result.audioTrackId);
+      if (result.videoTrackId) localTrackIds.push(result.videoTrackId);
+
+      // If we got a video track, attach it to the preview element
+      if (result && result.videoTrackId) {
+        var vid = document.getElementById('local-video');
+        vid.style.display = 'block';
+        log('attaching video track ' + result.videoTrackId + ' to local-video');
+        await window.epoca.media.attachTrack(result.videoTrackId, 'local-video');
+        log('attachTrack resolved');
+      }
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message || String(e);
+      log('getUserMedia rejected: ' + (e.message || e));
+    }
+  }
+
+  function testMediaAudio() { testMedia(true, false); }
+  function testMediaVideo() { testMedia(false, true); }
+  function testMediaBoth() { testMedia(true, true); }
+
+  var currentSessionId = null;
+  var localTrackIds = [];
+
+  async function testMediaConnect() {
+    var el = document.getElementById('connect');
+    var peer = document.getElementById('peer-address').value.trim();
+    if (!peer) { el.className = 'result error'; el.textContent = 'Enter peer address'; return; }
+    el.className = 'result pending';
+    el.textContent = 'connecting to ' + peer + '...';
+    log('media.connect("' + peer + '", ' + JSON.stringify(localTrackIds) + ') called');
+    try {
+      var sessionId = await window.epoca.media.connect(peer, localTrackIds);
+      currentSessionId = sessionId;
+      el.className = 'result';
+      el.textContent = 'Session ' + sessionId + ' signaling...';
+      log('media.connect resolved: sessionId=' + sessionId);
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message || String(e);
+      log('media.connect rejected: ' + (e.message || e));
+    }
+  }
+
+  async function testMediaClose() {
+    var el = document.getElementById('connect');
+    if (!currentSessionId) { el.className = 'result error'; el.textContent = 'No active session'; return; }
+    log('media.close(' + currentSessionId + ') called');
+    try {
+      await window.epoca.media.close(currentSessionId);
+      el.className = 'result';
+      el.textContent = 'Session ' + currentSessionId + ' closed';
+      currentSessionId = null;
+    } catch (e) {
+      el.className = 'result error';
+      el.textContent = e.message || String(e);
+    }
+  }
+
+  // Listen for media events
+  if (window.epoca) {
+    window.epoca.on('mediaTrackReady', function(data) {
+      log('[event:mediaTrackReady] trackId=' + data.trackId + ' kind=' + data.kind);
+    });
+    window.epoca.on('mediaError', function(data) {
+      log('[event:mediaError] sessionId=' + data.sessionId + ' error=' + data.error);
+      var el = document.getElementById('media');
+      el.className = 'result error';
+      el.textContent = 'Error: ' + data.error;
+    });
+    // Show local peer ID for copy-paste into the other instance.
+    window.epoca.media.getPeerId().then(function(pid) {
+      document.getElementById('peer-id').className = 'result';
+      document.getElementById('peer-id').textContent = 'Your peer ID: ' + pid;
+      log('peer ID: ' + pid);
+    }).catch(function(e) {
+      document.getElementById('peer-id').className = 'result error';
+      document.getElementById('peer-id').textContent = 'peer ID error: ' + e.message;
+    });
+
+    window.epoca.on('mediaConnected', function(data) {
+      log('[event:mediaConnected] sessionId=' + data.sessionId + ' peer=' + data.peer);
+      var el = document.getElementById('connect');
+      el.className = 'result';
+      el.textContent = 'Connected! Session ' + data.sessionId + ' peer=' + data.peer;
+    });
+    window.epoca.on('mediaRemoteTrack', function(data) {
+      log('[event:mediaRemoteTrack] sessionId=' + data.sessionId + ' trackId=' + data.trackId + ' kind=' + data.kind);
+      if (data.kind === 'video') {
+        var vid = document.getElementById('remote-video');
+        vid.style.display = 'block';
+        window.epoca.media.attachTrack(data.trackId, 'remote-video');
+      }
+    });
+    window.epoca.on('mediaClosed', function(data) {
+      log('[event:mediaClosed] sessionId=' + data.sessionId + ' reason=' + data.reason);
+      var el = document.getElementById('connect');
+      el.className = 'result';
+      el.textContent = 'Session closed: ' + data.reason;
+      currentSessionId = null;
+    });
   }
 
   async function testNetwork() {

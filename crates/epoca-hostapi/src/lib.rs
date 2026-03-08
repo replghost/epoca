@@ -327,16 +327,19 @@ fn is_subscription_control(tag: u8) -> bool {
 pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
 (function() {
     'use strict';
+    console.log('[epoca-bridge] STARTING, guard=' + !!window.__epocaHostApiBridge);
     if (window.__epocaHostApiBridge) return;
     window.__epocaHostApiBridge = true;
 
     // Signal to the app SDK that we're a webview host.
     window.__HOST_WEBVIEW_MARK__ = true;
+    console.log('[epoca-bridge] set __HOST_WEBVIEW_MARK__=true');
 
     // Create the MessageChannel.
     var ch = new MessageChannel();
     window.__HOST_API_PORT__ = ch.port2;
     ch.port2.start();
+    console.log('[epoca-bridge] set __HOST_API_PORT__, port2.start() done');
 
     // Host-side port — messages from the app arrive here.
     var port1 = ch.port1;
@@ -345,6 +348,7 @@ pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
     // Forward binary messages from app to native as base64.
     port1.onmessage = function(ev) {
         var data = ev.data;
+        console.log('[epoca-bridge] port1.onmessage fired, data type=' + (data ? data.constructor.name : 'null'));
         if (!data) return;
         var bytes;
         if (data instanceof Uint8Array) {
@@ -354,17 +358,20 @@ pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
         } else if (ArrayBuffer.isView(data)) {
             bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         } else {
+            console.log('[epoca-bridge] port1.onmessage: unrecognized data type, ignoring');
             return;
         }
         var binary = '';
         for (var i = 0; i < bytes.length; i++) {
             binary += String.fromCharCode(bytes[i]);
         }
+        console.log('[epoca-bridge] forwarding ' + bytes.length + ' bytes to native');
         window.webkit.messageHandlers.epocaHostApi.postMessage(btoa(binary));
     };
 
     // Native sends responses back by calling this function with base64.
     window.__epocaHostApiReply = function(b64) {
+        console.log('[epoca-bridge] __epocaHostApiReply called, b64 len=' + (b64 ? b64.length : 0));
         try {
             var binary = atob(b64);
             var bytes = new Uint8Array(binary.length);
@@ -376,6 +383,7 @@ pub const HOST_API_BRIDGE_SCRIPT: &str = r#"
             console.error('[epoca-bridge] reply delivery failed:', e.message);
         }
     };
+    console.log('[epoca-bridge] SETUP COMPLETE, __HOST_API_PORT__=' + !!window.__HOST_API_PORT__ + ' __HOST_WEBVIEW_MARK__=' + !!window.__HOST_WEBVIEW_MARK__);
 })();
 "#;
 

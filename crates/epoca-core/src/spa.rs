@@ -283,6 +283,28 @@ pub const HOST_API_SCRIPT: &str = r#"
 (function() {
     'use strict';
     console.log('[epoca-host-api] running, guard=' + !!window.__epocaHostApi + ' bridge=' + !!window.__epocaHostApiBridge);
+
+    // Save WebRTC constructors for host-mediated use, then freeze for app code.
+    // The host creates RTCPeerConnection via evaluateScript for media.connect() sessions.
+    // getUserMedia is intentionally left available (harmless without RTCPeerConnection).
+    var _OrigRTC = window.RTCPeerConnection;
+    var _OrigDesc = window.RTCSessionDescription;
+    var _OrigICE = window.RTCIceCandidate;
+    window.RTCPeerConnection = undefined;
+    window.RTCSessionDescription = undefined;
+    window.RTCIceCandidate = undefined;
+    if (_OrigRTC) {
+        Object.defineProperty(window, '__epocaRTC', {
+            value: Object.freeze({ PC: _OrigRTC, Desc: _OrigDesc, ICE: _OrigICE }),
+            writable: false, enumerable: false, configurable: false
+        });
+    }
+    if (!window.__epocaMediaSessions) {
+        Object.defineProperty(window, '__epocaMediaSessions', {
+            value: {}, writable: false, enumerable: false, configurable: false
+        });
+    }
+
     if (window.__epocaHostApi) return;
     window.__epocaHostApi = true;
     console.log('[epoca-host-api] window.epoca being defined');
@@ -374,6 +396,30 @@ pub const HOST_API_SCRIPT: &str = r#"
             }
         }),
 
+        // Media — camera/audio capture and peer-to-peer media sessions via the host.
+        // getUserMedia and connect resolve immediately with opaque IDs; actual readiness
+        // arrives via mediaTrackReady and mediaConnected push events.
+        media: Object.freeze({
+            getUserMedia: function(constraints) {
+                return _call('epocaHost', 'mediaGetUserMedia', {
+                    audio: !!(constraints && constraints.audio),
+                    video: !!(constraints && constraints.video)
+                });
+            },
+            connect: function(peer, trackIds) {
+                return _call('epocaHost', 'mediaConnect', { peer: peer, trackIds: trackIds || [] });
+            },
+            close: function(sessionId) {
+                return _call('epocaHost', 'mediaClose', { sessionId: sessionId });
+            },
+            attachTrack: function(trackId, elementId) {
+                return _call('epocaHost', 'mediaAttachTrack', { trackId: trackId, elementId: elementId });
+            },
+            getPeerId: function() {
+                return _call('epocaHost', 'mediaGetPeerId', {});
+            }
+        }),
+
         // Event subscription — listeners stored in closure scope (not frozen).
         on: function(event, callback) {
             if (!_listeners[event]) {
@@ -398,6 +444,9 @@ pub const HOST_API_SCRIPT: &str = r#"
     });
 
     // Host pushes events to the app via this non-writable global.
+    // Supported event names:
+    //   statement, dataConnected, dataMessage, dataClosed, dataError
+    //   mediaTrackReady, mediaConnected, mediaRemoteTrack, mediaClosed, mediaError
     Object.defineProperty(window, '__epocaPush', {
         value: function(event, data) {
             const list = _listeners[event];

@@ -4166,6 +4166,7 @@ name = "epoca-core"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "blake2",
  "block2 0.5.1",
  "epoca-broker",
@@ -9374,6 +9375,7 @@ dependencies = [
 [[package]]
 name = "polkavm"
 version = "0.31.0"
+source = "git+https://github.com/replghost/polkavm.git?rev=3638e6f#3638e6f10d3bcee3d24067cb57cd4308485911f0"
 dependencies = [
  "libc",
  "log",
@@ -9386,6 +9388,7 @@ dependencies = [
 [[package]]
 name = "polkavm-assembler"
 version = "0.31.0"
+source = "git+https://github.com/replghost/polkavm.git?rev=3638e6f#3638e6f10d3bcee3d24067cb57cd4308485911f0"
 dependencies = [
  "log",
 ]
@@ -9393,6 +9396,7 @@ dependencies = [
 [[package]]
 name = "polkavm-common"
 version = "0.31.0"
+source = "git+https://github.com/replghost/polkavm.git?rev=3638e6f#3638e6f10d3bcee3d24067cb57cd4308485911f0"
 dependencies = [
  "log",
  "picosimd",
@@ -9402,6 +9406,7 @@ dependencies = [
 [[package]]
 name = "polkavm-linux-raw"
 version = "0.31.0"
+source = "git+https://github.com/replghost/polkavm.git?rev=3638e6f#3638e6f10d3bcee3d24067cb57cd4308485911f0"
 
 [[package]]
 name = "polling"
@@ -15869,3 +15874,4 @@ dependencies = [
 [[patch.unused]]
 name = "polkavm-derive"
 version = "0.31.0"
+source = "git+https://github.com/replghost/polkavm.git?rev=3638e6f#3638e6f10d3bcee3d24067cb57cd4308485911f0"

@@ -26,6 +26,7 @@ blake2 = "0.10"
 zip = { workspace = true }
 ureq = "3"
 str0m = "0.16"
+base64 = "0.22"
 
 [features]
 test-server = []
