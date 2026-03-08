@@ -69,6 +69,8 @@ struct HostState {
     assets: HashMap<String, Vec<u8>>,
     /// Time origin for `host_time_ms`.
     time_origin: std::time::Instant,
+    /// Set by `host_yield` to signal cooperative yield from the guest.
+    yield_requested: bool,
 }
 
 impl Default for HostState {
@@ -81,6 +83,7 @@ impl Default for HostState {
             input_queue: VecDeque::new(),
             assets: HashMap::new(),
             time_origin: std::time::Instant::now(),
+            yield_requested: false,
         }
     }
 }
@@ -111,6 +114,9 @@ pub struct SandboxInstance {
     state: Arc<Mutex<HostState>>,
     /// Gas limit applied before each `call_update()` tick.
     max_gas_per_update: u64,
+    /// True when the guest yielded mid-execution via `host_yield`.
+    /// The next `call_update` will resume execution instead of calling "update".
+    yielded: bool,
 }
 
 impl SandboxInstance {
@@ -287,6 +293,19 @@ impl SandboxInstance {
             )
             .context("Failed to define host_time_ms")?;
 
+        // host_yield()
+        // Cooperative yield: guest calls this to suspend execution and return control to the host.
+        // The host can resume execution later via continue_execution().
+        linker
+            .define_typed(
+                "host_yield",
+                |caller: polkavm::Caller<'_, HostState>| -> Result<(), anyhow::Error> {
+                    caller.user_data.yield_requested = true;
+                    Err(anyhow!("__yield__"))
+                },
+            )
+            .context("Failed to define host_yield")?;
+
         // host_asset_read(name_ptr: u32, name_len: u32, offset: u32, dst_ptr: u32, max_len: u32) -> u32
         // Reads from HostState.assets, writes slice into guest memory, returns bytes read (0 = not found / EOF).
         linker
@@ -325,7 +344,7 @@ impl SandboxInstance {
 
         let state = Arc::new(Mutex::new(HostState::default()));
 
-        Ok(Self { instance, state, max_gas_per_update: config.max_gas_per_update })
+        Ok(Self { instance, state, max_gas_per_update: config.max_gas_per_update, yielded: false })
     }
 
     /// Load a .polkavm file from disk.
@@ -335,33 +354,61 @@ impl SandboxInstance {
         Self::from_bytes(&bytes, config)
     }
 
+    /// Check whether the last PolkaVM call ended with a cooperative yield
+    /// (host_yield). If so, mark `self.yielded` and return Ok. Otherwise
+    /// propagate the real error.
+    fn handle_call_result(
+        &mut self,
+        result: Result<(), CallError<anyhow::Error>>,
+        phase: &str,
+    ) -> Result<()> {
+        match result {
+            Ok(()) => {
+                // Guest function returned normally.
+                Ok(())
+            }
+            Err(CallError::User(_)) => {
+                let mut state = self.state.lock().unwrap();
+                if state.yield_requested {
+                    state.yield_requested = false;
+                    drop(state);
+                    self.yielded = true;
+                    Ok(())
+                } else {
+                    Err(anyhow!("Guest user error during {phase}"))
+                }
+            }
+            Err(CallError::Trap) => {
+                let pc = self.instance.program_counter();
+                Err(anyhow!("Guest trapped during {phase} (pc={pc:?})"))
+            }
+            Err(CallError::NotEnoughGas) => {
+                Err(anyhow!("Guest ran out of gas during {phase}"))
+            }
+            Err(CallError::Error(e)) => Err(e.into()),
+            Err(e) => Err(anyhow!("Unexpected call error during {phase}: {e:?}")),
+        }
+    }
+
     /// Call the guest's `init` function.
     /// Uses 1000x the per-update gas budget (init may load assets, build tables, etc.).
+    /// If the guest calls `host_yield`, init returns successfully and subsequent
+    /// `call_update` calls will resume execution from the yield point.
     pub fn call_init(&mut self) -> Result<()> {
         let init_gas = self.max_gas_per_update.saturating_mul(1000).min(i64::MAX as u64) as i64;
         self.instance.set_gas(init_gas);
         let mut state = self.state.lock().unwrap();
-        self.instance
-            .call_typed_and_get_result::<(), ()>(&mut *state, "init", ())
-            .map_err(|e| match e {
-                CallError::Trap => {
-                    let pc = self.instance.program_counter();
-                    anyhow!("Guest trapped during init (pc={:?})", pc)
-                },
-                CallError::NotEnoughGas => anyhow!("Guest ran out of gas during init"),
-                CallError::Error(e) => e.into(),
-                CallError::User(e) => e,
-                _ => anyhow!("Unexpected call error during init"),
-            })?;
-        Ok(())
+        state.yield_requested = false;
+        let result = self.instance
+            .call_typed_and_get_result::<(), ()>(&mut *state, "init", ());
+        drop(state);
+        self.handle_call_result(result, "init")
     }
 
     /// Call the guest's `update` function (main loop tick).
-    /// Returns `Err` if the guest traps, exceeds its gas budget, or errors.
-    /// A `NotEnoughGas` error should be shown to the user as "app timed out"
-    /// rather than killing the browser — the guest can be restarted.
+    /// If the guest previously yielded via `host_yield`, this resumes execution
+    /// from the yield point instead of calling the "update" entry point.
     pub fn call_update(&mut self) -> Result<()> {
-        // Re-fill gas before each tick so a slow tick doesn't accumulate debt.
         let gas = if self.max_gas_per_update > i64::MAX as u64 {
             i64::MAX
         } else {
@@ -369,19 +416,16 @@ impl SandboxInstance {
         };
         self.instance.set_gas(gas);
         let mut state = self.state.lock().unwrap();
-        self.instance
-            .call_typed_and_get_result::<(), ()>(&mut *state, "update", ())
-            .map_err(|e| match e {
-                CallError::Trap => {
-                    let pc = self.instance.program_counter();
-                    anyhow!("Guest trapped during update (pc={:?})", pc)
-                },
-                CallError::NotEnoughGas => anyhow!("Guest exceeded gas limit during update — possible infinite loop"),
-                CallError::Error(e) => e.into(),
-                CallError::User(e) => e,
-                _ => anyhow!("Unexpected call error during update"),
-            })?;
-        Ok(())
+        state.yield_requested = false;
+        let result = if self.yielded {
+            self.yielded = false;
+            self.instance.continue_execution(&mut *state).map(|_| ())
+        } else {
+            self.instance
+                .call_typed_and_get_result::<(), ()>(&mut *state, "update", ())
+        };
+        drop(state);
+        self.handle_call_result(result, "update")
     }
 
     /// Send an event to the guest (queued for next poll_event call).

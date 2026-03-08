@@ -375,6 +375,9 @@ pub const HOST_API_SCRIPT: &str = r#"
 
         // Data connections — P2P communication via the host.
         data: Object.freeze({
+            getPeerId: function() {
+                return _call('epocaHost', 'dataGetPeerId', {});
+            },
             connect: function(peerAddress) {
                 return _call('epocaHost', 'dataConnect', { peerAddress: peerAddress });
             },

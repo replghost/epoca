@@ -6,14 +6,19 @@
 //!
 //! Transport: str0m (Sans-I/O WebRTC) with SDP signaling over the Statement Store.
 //!
-//! Flow:
+//! Flow (initiator side):
 //! 1. SPA calls `connect(peerAddress)` → conn enters PendingApproval
 //! 2. User approves → conn enters Signaling
-//! 3. Deterministic offerer selection (lower address = offerer)
-//! 4. Offerer creates SDP offer, publishes to statement store
-//! 5. Answerer receives offer, creates SDP answer, publishes to statement store
-//! 6. ICE connectivity checks complete → Connected
-//! 7. Data flows over str0m data channel → events pushed to SPA
+//! 3. Initiator creates SDP offer, publishes to `{app}-offer-to-{peer}`
+//! 4. Waits for answer on `{app}-answer-to-{local}`
+//! 5. ICE completes → Connected
+//!
+//! Flow (receiver side):
+//! 1. Incoming listener detects offer on `{app}-offer-to-{local}`
+//! 2. Creates PendingApproval connection → approval dialog shown
+//! 3. User approves → generates answer from stored offer SDP
+//! 4. Publishes answer to `{app}-answer-to-{initiator}`
+//! 5. ICE completes → Connected
 //!
 //! Connections are namespaced by `app_id` — app A cannot access app B's connections.
 
@@ -47,6 +52,15 @@ pub enum ConnState {
     Closed,
 }
 
+/// Direction of a connection.
+#[derive(Debug, Clone)]
+enum ConnDirection {
+    /// We initiated — we are the offerer.
+    Outgoing,
+    /// They initiated — we received an offer and will answer.
+    Incoming { offer_sdp: String },
+}
+
 /// Events to push to webviews.
 #[derive(Debug)]
 pub struct DataEvent {
@@ -69,6 +83,7 @@ struct PeerConnection {
     webview_ptr: usize,
     peer_address: String,
     state: ConnState,
+    direction: ConnDirection,
     /// Signal to stop the background thread.
     running: Option<Arc<AtomicBool>>,
     /// Channel to send data to the background thread.
@@ -77,62 +92,75 @@ struct PeerConnection {
     signal_sub_ids: Vec<u64>,
 }
 
+/// Tracks a running incoming listener for one (app_id, webview_ptr).
+struct IncomingListener {
+    app_id: String,
+    webview_ptr: usize,
+    running: Arc<AtomicBool>,
+    sub_id: u64,
+}
+
 struct DataState {
     next_conn_id: u64,
+    next_peer_seq: u64,
     connections: HashMap<u64, PeerConnection>,
     pending_events: Vec<DataEvent>,
-    /// Our peer identity for signaling (derived from statement store keypair).
-    local_peer_id: String,
+    /// Per-webview peer IDs. Each SPA tab gets its own identity so two tabs
+    /// in the same process can connect to each other via local delivery.
+    peer_ids: HashMap<usize, String>,
+    /// Active incoming-offer listeners, keyed by (app_id, webview_ptr).
+    listeners: Vec<IncomingListener>,
 }
 
 static STATE: OnceLock<Mutex<DataState>> = OnceLock::new();
 
 fn state() -> &'static Mutex<DataState> {
     STATE.get_or_init(|| {
-        // Derive peer ID from the statement store's ephemeral public key.
-        // Falls back to timestamp if store isn't initialized yet.
-        let peer_id = epoca_chain::statement_store::public_key_hex()
-            .map(|hex| format!("peer-{}", &hex[..16.min(hex.len())]))
-            .unwrap_or_else(|| {
-                format!(
-                    "peer-{:016x}",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_nanos() as u64
-                )
-            });
         Mutex::new(DataState {
             next_conn_id: 1,
+            next_peer_seq: 1,
             connections: HashMap::new(),
             pending_events: Vec::new(),
-            local_peer_id: peer_id,
+            peer_ids: HashMap::new(),
+            listeners: Vec::new(),
         })
     })
 }
 
-// ---------------------------------------------------------------------------
-// Signaling channel naming (matches web3-meet conventions)
-// ---------------------------------------------------------------------------
-
-fn offer_channel(app_id: &str, from: &str, to: &str) -> String {
-    format!("{app_id}-offers-from-{from}-to-{to}")
+/// Get or create a peer ID for a webview. Each tab gets a unique ID based on
+/// the statement store public key + a sequence number.
+fn peer_id_for(st: &mut DataState, webview_ptr: usize) -> String {
+    if let Some(id) = st.peer_ids.get(&webview_ptr) {
+        return id.clone();
+    }
+    let base = epoca_chain::statement_store::public_key_hex()
+        .unwrap_or_else(|| "0000000000000000".to_string());
+    let seq = st.next_peer_seq;
+    st.next_peer_seq += 1;
+    let id = format!("peer-{}-{seq}", &base[..16.min(base.len())]);
+    st.peer_ids.insert(webview_ptr, id.clone());
+    id
 }
 
-fn answer_channel(app_id: &str, from: &str, to: &str) -> String {
-    format!("{app_id}-answers-from-{from}-to-{to}")
+// ---------------------------------------------------------------------------
+// Signaling channel naming
+// ---------------------------------------------------------------------------
+
+/// Channel where initiator publishes their SDP offer, targeted at the receiver.
+fn offer_channel(app_id: &str, target_peer: &str) -> String {
+    format!("{app_id}-offer-to-{target_peer}")
 }
 
-/// Deterministic offerer: lower peer ID is the offerer.
-fn is_offerer(my_id: &str, their_id: &str) -> bool {
-    my_id < their_id
+/// Channel where receiver publishes their SDP answer, targeted at the initiator.
+fn answer_channel(app_id: &str, target_peer: &str) -> String {
+    format!("{app_id}-answer-to-{target_peer}")
 }
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Initiate a data connection to a peer.
+/// Initiate a data connection to a peer (outgoing).
 /// Returns a conn_id on success (connection is in PendingApproval state).
 pub fn connect(
     app_id: &str,
@@ -155,6 +183,7 @@ pub fn connect(
             webview_ptr,
             peer_address: peer_address.to_string(),
             state: ConnState::PendingApproval,
+            direction: ConnDirection::Outgoing,
             running: None,
             data_tx: None,
             signal_sub_ids: Vec::new(),
@@ -162,7 +191,7 @@ pub fn connect(
     );
 
     log::info!(
-        "[data] connect request conn={conn_id} app={app_id} peer={peer_address} (pending approval)"
+        "[data] outgoing connect request conn={conn_id} app={app_id} peer={peer_address}"
     );
 
     Ok(conn_id)
@@ -248,13 +277,19 @@ pub fn close(app_id: &str, conn_id: u64) -> Result<(), String> {
     Ok(())
 }
 
+/// Get the local peer ID for a given webview (creates one if needed).
+pub fn local_peer_id(webview_ptr: usize) -> String {
+    let mut st = state().lock().unwrap();
+    peer_id_for(&mut st, webview_ptr)
+}
+
 /// Drain pending data events (called from workbench render loop).
 pub fn drain_events() -> Vec<DataEvent> {
     let mut st = state().lock().unwrap();
     std::mem::take(&mut st.pending_events)
 }
 
-/// Clean up all connections for a closed webview.
+/// Clean up all connections and listeners for a closed webview.
 pub fn cleanup_for_webview(webview_ptr: usize) {
     let mut st = state().lock().unwrap();
     let mut sub_ids_to_clean = Vec::new();
@@ -270,6 +305,17 @@ pub fn cleanup_for_webview(webview_ptr: usize) {
         .retain(|_, conn| conn.webview_ptr != webview_ptr);
     st.pending_events
         .retain(|e| e.webview_ptr != webview_ptr);
+
+    // Stop incoming listeners for this webview.
+    for listener in &st.listeners {
+        if listener.webview_ptr == webview_ptr {
+            listener.running.store(false, Ordering::Release);
+            sub_ids_to_clean.push(listener.sub_id);
+        }
+    }
+    st.listeners.retain(|l| l.webview_ptr != webview_ptr);
+    st.peer_ids.remove(&webview_ptr);
+
     drop(st);
 
     // Clean up signaling subscriptions outside the lock.
@@ -291,20 +337,20 @@ pub fn pending_approvals() -> Vec<(u64, String, String)> {
 /// Approve a pending connection (called after user approves in dialog).
 pub fn approve_connection(conn_id: u64) -> Result<(), String> {
     let mut st = state().lock().unwrap();
-    let local_peer_id = st.local_peer_id.clone();
-    let conn = st
-        .connections
-        .get_mut(&conn_id)
-        .ok_or_else(|| format!("connection {conn_id} not found"))?;
 
-    if conn.state != ConnState::PendingApproval {
-        return Err(format!("connection {conn_id} not pending approval"));
-    }
+    // Extract info and peer ID before taking a mutable ref to the connection.
+    let (webview_ptr, app_id, peer_address, direction) = {
+        let conn = st.connections.get(&conn_id)
+            .ok_or_else(|| format!("connection {conn_id} not found"))?;
+        if conn.state != ConnState::PendingApproval {
+            return Err(format!("connection {conn_id} not pending approval"));
+        }
+        (conn.webview_ptr, conn.app_id.clone(), conn.peer_address.clone(), conn.direction.clone())
+    };
+    let local_peer_id = peer_id_for(&mut st, webview_ptr);
 
+    let conn = st.connections.get_mut(&conn_id).unwrap();
     conn.state = ConnState::Signaling;
-    let app_id = conn.app_id.clone();
-    let peer_address = conn.peer_address.clone();
-    let webview_ptr = conn.webview_ptr;
 
     let running = Arc::new(AtomicBool::new(true));
     conn.running = Some(running.clone());
@@ -312,62 +358,43 @@ pub fn approve_connection(conn_id: u64) -> Result<(), String> {
     let (data_tx, data_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
     conn.data_tx = Some(data_tx);
 
-    // Set up dedicated signaling channels via subscribe_direct.
-    let offerer = is_offerer(&local_peer_id, &peer_address);
-    let offer_ch = if offerer {
-        offer_channel(&app_id, &local_peer_id, &peer_address)
-    } else {
-        offer_channel(&app_id, &peer_address, &local_peer_id)
-    };
-    let answer_ch = if offerer {
-        answer_channel(&app_id, &peer_address, &local_peer_id)
-    } else {
-        answer_channel(&app_id, &local_peer_id, &peer_address)
-    };
+    match &direction {
+        ConnDirection::Outgoing => {
+            // Outgoing: we are the offerer.
+            // Subscribe to answers targeted at us.
+            let ans_ch = answer_channel(&app_id, &local_peer_id);
+            let (sub_id, signal_rx) = crate::statements_api::subscribe_direct(&app_id, &ans_ch)
+                .map_err(|e| format!("subscribe answer channel: {e}"))?;
+            conn.signal_sub_ids.push(sub_id);
+            drop(st);
 
-    // Subscribe to the channel we need to listen on.
-    let listen_ch = if offerer { &answer_ch } else { &offer_ch };
-    let (sub_id, signal_rx) = crate::statements_api::subscribe_direct(&app_id, listen_ch)
-        .map_err(|e| format!("subscribe signaling: {e}"))?;
-    conn.signal_sub_ids.push(sub_id);
+            log::info!("[data] approved outgoing conn={conn_id}, starting as offerer");
 
-    drop(st);
-
-    log::info!("[data] approved conn={conn_id}, starting signaling (offerer={offerer})");
-
-    std::thread::spawn(move || {
-        let result = run_webrtc(
-            conn_id,
-            &app_id,
-            webview_ptr,
-            &local_peer_id,
-            &peer_address,
-            &running,
-            &data_rx,
-            &signal_rx,
-            sub_id,
-        );
-
-        if let Err(e) = &result {
-            log::warn!("[data] conn={conn_id} failed: {e}");
-            push_event(DataEvent {
-                webview_ptr,
-                event_type: DataEventType::Error {
-                    conn_id,
-                    error: e.clone(),
-                },
+            std::thread::spawn(move || {
+                let result = run_webrtc_offerer(
+                    conn_id, &app_id, webview_ptr, &local_peer_id, &peer_address,
+                    &running, &data_rx, &signal_rx,
+                );
+                finish_connection(conn_id, webview_ptr, sub_id, &result);
             });
         }
+        ConnDirection::Incoming { offer_sdp } => {
+            // Incoming: we have the offer SDP, we are the answerer.
+            let offer_sdp = offer_sdp.clone();
+            // No signaling subscription needed — we already have the offer.
+            drop(st);
 
-        // Clean up signaling subscription.
-        crate::statements_api::unsubscribe(sub_id);
+            log::info!("[data] approved incoming conn={conn_id}, starting as answerer");
 
-        let mut st = state().lock().unwrap();
-        if let Some(conn) = st.connections.get_mut(&conn_id) {
-            conn.state = ConnState::Closed;
-            conn.signal_sub_ids.clear();
+            std::thread::spawn(move || {
+                let result = run_webrtc_answerer(
+                    conn_id, &app_id, webview_ptr, &local_peer_id, &peer_address,
+                    &offer_sdp, &running, &data_rx,
+                );
+                finish_connection(conn_id, webview_ptr, 0, &result);
+            });
         }
-    });
+    }
 
     Ok(())
 }
@@ -395,10 +422,127 @@ pub fn deny_connection(conn_id: u64) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Background WebRTC thread
+// Incoming connection listener
 // ---------------------------------------------------------------------------
 
-fn run_webrtc(
+/// Start listening for incoming data connection offers for a given app/webview.
+/// Call this when a SPA tab with `data = true` permission opens.
+pub fn start_incoming_listener(app_id: &str, webview_ptr: usize) {
+    let mut st = state().lock().unwrap();
+    let local_peer_id = peer_id_for(&mut st, webview_ptr);
+
+    // Don't start a duplicate listener.
+    if st.listeners.iter().any(|l| l.app_id == app_id && l.webview_ptr == webview_ptr) {
+        return;
+    }
+
+    // Subscribe to offers targeted at us.
+    let channel = offer_channel(app_id, &local_peer_id);
+    let (sub_id, signal_rx) = match crate::statements_api::subscribe_direct(app_id, &channel) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[data] failed to start incoming listener: {e}");
+            return;
+        }
+    };
+
+    let running = Arc::new(AtomicBool::new(true));
+    st.listeners.push(IncomingListener {
+        app_id: app_id.to_string(),
+        webview_ptr,
+        running: running.clone(),
+        sub_id,
+    });
+
+    let app_id = app_id.to_string();
+    drop(st);
+
+    log::info!("[data] incoming listener started for app={app_id} on channel={channel}");
+
+    std::thread::spawn(move || {
+        while running.load(Ordering::Acquire) {
+            match signal_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(stmt) => {
+                    let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let sdp_str = json.get("sdp").and_then(|v| v.as_str()).unwrap_or("");
+                    let from_peer = json.get("from").and_then(|v| v.as_str()).unwrap_or("");
+
+                    if msg_type != "offer" || sdp_str.is_empty() || from_peer.is_empty() {
+                        continue;
+                    }
+
+                    log::info!(
+                        "[data] incoming offer from {from_peer} for app={app_id}"
+                    );
+
+                    // Create an incoming PendingApproval connection.
+                    let mut st = state().lock().unwrap();
+                    let conn_id = st.next_conn_id;
+                    st.next_conn_id += 1;
+
+                    st.connections.insert(
+                        conn_id,
+                        PeerConnection {
+                            conn_id,
+                            app_id: app_id.clone(),
+                            webview_ptr,
+                            peer_address: from_peer.to_string(),
+                            state: ConnState::PendingApproval,
+                            direction: ConnDirection::Incoming {
+                                offer_sdp: sdp_str.to_string(),
+                            },
+                            running: None,
+                            data_tx: None,
+                            signal_sub_ids: Vec::new(),
+                        },
+                    );
+
+                    log::info!(
+                        "[data] created incoming conn={conn_id} from {from_peer} (pending approval)"
+                    );
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        log::info!("[data] incoming listener stopped for app={app_id}");
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Background WebRTC threads
+// ---------------------------------------------------------------------------
+
+/// Clean up after a connection thread finishes.
+fn finish_connection(conn_id: u64, webview_ptr: usize, sub_id: u64, result: &Result<(), String>) {
+    if let Err(e) = result {
+        log::warn!("[data] conn={conn_id} failed: {e}");
+        push_event(DataEvent {
+            webview_ptr,
+            event_type: DataEventType::Error {
+                conn_id,
+                error: e.clone(),
+            },
+        });
+    }
+
+    if sub_id > 0 {
+        crate::statements_api::unsubscribe(sub_id);
+    }
+
+    let mut st = state().lock().unwrap();
+    if let Some(conn) = st.connections.get_mut(&conn_id) {
+        conn.state = ConnState::Closed;
+        conn.signal_sub_ids.clear();
+    }
+}
+
+/// Run WebRTC as the offerer (outgoing connection).
+fn run_webrtc_offerer(
     conn_id: u64,
     app_id: &str,
     webview_ptr: usize,
@@ -407,138 +551,172 @@ fn run_webrtc(
     running: &AtomicBool,
     data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     signal_rx: &std::sync::mpsc::Receiver<crate::statements_api::Statement>,
-    _signal_sub_id: u64,
 ) -> Result<(), String> {
-    // Bind a UDP socket for ICE.
-    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("UDP bind: {e}"))?;
-    socket
-        .set_nonblocking(true)
-        .map_err(|e| format!("set_nonblocking: {e}"))?;
-    let local_addr = socket
-        .local_addr()
-        .map_err(|e| format!("local_addr: {e}"))?;
+    let (socket, local_addr) = bind_ice_socket(conn_id)?;
 
-    log::info!("[data] conn={conn_id} bound UDP {local_addr}");
-
-    // Create str0m Rtc.
     let mut rtc = Rtc::builder()
         .set_ice_lite(false)
         .set_stats_interval(None)
         .build(Instant::now());
 
-    // Add local host candidate.
     let candidate =
         Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
     rtc.add_local_candidate(candidate);
 
-    let offerer = is_offerer(local_peer_id, peer_address);
-    log::info!(
-        "[data] conn={conn_id} offerer={offerer} local={local_peer_id} peer={peer_address}"
-    );
+    // Create data channel and generate offer.
+    let mut api = rtc.sdp_api();
+    let ch_id = api.add_channel("epoca-data".to_string());
+    let (offer, pending) = api.apply().ok_or("SDP apply returned None")?;
+    let offer_sdp = offer.to_sdp_string();
 
-    // Channel names for signaling (no '/' — validated by statements_api).
-    let offer_ch = if offerer {
-        offer_channel(app_id, local_peer_id, peer_address)
-    } else {
-        offer_channel(app_id, peer_address, local_peer_id)
-    };
-    let answer_ch = if offerer {
-        answer_channel(app_id, peer_address, local_peer_id)
-    } else {
-        answer_channel(app_id, local_peer_id, peer_address)
-    };
+    log::info!("[data] conn={conn_id} publishing offer ({} bytes)", offer_sdp.len());
+
+    // Publish offer targeted at the peer.
+    let off_ch = offer_channel(app_id, peer_address);
+    let payload = serde_json::json!({
+        "type": "offer",
+        "from": local_peer_id,
+        "sdp": offer_sdp,
+    });
+    crate::statements_api::write(app_id, local_peer_id, &off_ch, &payload.to_string())
+        .map_err(|e| format!("publish offer: {e}"))?;
+
+    // Wait for answer.
+    let mut pending_offer = Some(pending);
+    let mut data_ch_id = Some(ch_id);
+
+    signaling_and_ice_loop(
+        conn_id, app_id, webview_ptr, local_peer_id, peer_address,
+        &socket, local_addr, &mut rtc, running, data_rx,
+        &mut data_ch_id, &mut pending_offer, Some(signal_rx), true,
+    )
+}
+
+/// Run WebRTC as the answerer (incoming connection with pre-received offer).
+fn run_webrtc_answerer(
+    conn_id: u64,
+    app_id: &str,
+    webview_ptr: usize,
+    local_peer_id: &str,
+    peer_address: &str,
+    offer_sdp: &str,
+    running: &AtomicBool,
+    data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<(), String> {
+    let (socket, local_addr) = bind_ice_socket(conn_id)?;
+
+    let mut rtc = Rtc::builder()
+        .set_ice_lite(false)
+        .set_stats_interval(None)
+        .build(Instant::now());
+
+    let candidate =
+        Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
+    rtc.add_local_candidate(candidate);
+
+    // Accept the offer and generate answer.
+    let offer = SdpOffer::from_sdp_string(offer_sdp)
+        .map_err(|e| format!("parse offer SDP: {e}"))?;
+    let answer = rtc
+        .sdp_api()
+        .accept_offer(offer)
+        .map_err(|e| format!("accept offer: {e}"))?;
+
+    let answer_sdp = answer.to_sdp_string();
+    log::info!("[data] conn={conn_id} publishing answer ({} bytes)", answer_sdp.len());
+
+    // Publish answer targeted at the initiator.
+    let ans_ch = answer_channel(app_id, peer_address);
+    let payload = serde_json::json!({
+        "type": "answer",
+        "from": local_peer_id,
+        "sdp": answer_sdp,
+    });
+    crate::statements_api::write(app_id, local_peer_id, &ans_ch, &payload.to_string())
+        .map_err(|e| format!("publish answer: {e}"))?;
 
     let mut data_ch_id: Option<ChannelId> = None;
-    let mut pending_offer = None;
 
-    if offerer {
-        // Create data channel and generate offer.
-        let mut api = rtc.sdp_api();
-        let ch_id = api.add_channel("epoca-data".to_string());
-        data_ch_id = Some(ch_id);
+    signaling_and_ice_loop(
+        conn_id, app_id, webview_ptr, local_peer_id, peer_address,
+        &socket, local_addr, &mut rtc, running, data_rx,
+        &mut data_ch_id, &mut None, None, false,
+    )
+}
 
-        let (offer, p) = api.apply().ok_or("SDP apply returned None")?;
-        let offer_sdp = offer.to_sdp_string();
-        pending_offer = Some(p);
+/// Bind a UDP socket for ICE and return (socket, candidate_addr).
+fn bind_ice_socket(conn_id: u64) -> Result<(UdpSocket, std::net::SocketAddr), String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("UDP bind: {e}"))?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking: {e}"))?;
+    let bound_addr = socket
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?;
 
-        log::info!(
-            "[data] conn={conn_id} publishing offer ({} bytes)",
-            offer_sdp.len()
-        );
+    let local_ip = local_network_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let local_addr = std::net::SocketAddr::new(local_ip, bound_addr.port());
 
-        // Publish offer via statement store.
-        let payload = serde_json::json!({
-            "type": "offer",
-            "from": local_peer_id,
-            "sdp": offer_sdp,
-        });
-        crate::statements_api::write(app_id, local_peer_id, &offer_ch, &payload.to_string())
-            .map_err(|e| format!("publish offer: {e}"))?;
-    }
+    log::info!("[data] conn={conn_id} bound UDP {bound_addr} → candidate {local_addr}");
+    Ok((socket, local_addr))
+}
 
-    // Signaling + ICE loop.
+/// Shared signaling + ICE + data loop used by both offerer and answerer.
+#[allow(clippy::too_many_arguments)]
+fn signaling_and_ice_loop(
+    conn_id: u64,
+    _app_id: &str,
+    webview_ptr: usize,
+    _local_peer_id: &str,
+    peer_address: &str,
+    socket: &UdpSocket,
+    local_addr: std::net::SocketAddr,
+    rtc: &mut Rtc,
+    running: &AtomicBool,
+    data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    data_ch_id: &mut Option<ChannelId>,
+    pending_offer: &mut Option<str0m::change::SdpPendingOffer>,
+    signal_rx: Option<&std::sync::mpsc::Receiver<crate::statements_api::Statement>>,
+    is_offerer: bool,
+) -> Result<(), String> {
     let mut connected = false;
-    let mut signaling_done = false;
+    let mut signaling_done = signal_rx.is_none(); // answerer has no signal_rx — already done
     let mut buf = vec![0u8; 4096];
     let start = Instant::now();
     let timeout = Duration::from_secs(30);
 
+    // Signaling + ICE phase.
     while running.load(Ordering::Acquire) && !connected {
         if start.elapsed() > timeout {
             return Err("signaling timeout (30s)".into());
         }
 
-        // Poll for signaling messages from the dedicated receiver.
+        // Poll signaling (offerer waiting for answer).
         if !signaling_done {
-            while let Ok(stmt) = signal_rx.try_recv() {
-                let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                let sdp_str = json.get("sdp").and_then(|v| v.as_str()).unwrap_or("");
-                if sdp_str.is_empty() {
-                    continue;
-                }
-
-                if !offerer && msg_type == "offer" {
-                    log::info!("[data] conn={conn_id} received offer, generating answer");
-                    let offer = SdpOffer::from_sdp_string(sdp_str)
-                        .map_err(|e| format!("parse offer SDP: {e}"))?;
-                    let answer = rtc
-                        .sdp_api()
-                        .accept_offer(offer)
-                        .map_err(|e| format!("accept offer: {e}"))?;
-
-                    let answer_sdp = answer.to_sdp_string();
-
-                    let payload = serde_json::json!({
-                        "type": "answer",
-                        "from": local_peer_id,
-                        "sdp": answer_sdp,
-                    });
-                    crate::statements_api::write(
-                        app_id,
-                        local_peer_id,
-                        &answer_ch,
-                        &payload.to_string(),
-                    )
-                    .map_err(|e| format!("publish answer: {e}"))?;
-
-                    signaling_done = true;
-                    log::info!("[data] conn={conn_id} answer published, waiting for ICE");
-                } else if offerer && msg_type == "answer" {
-                    log::info!("[data] conn={conn_id} received answer");
-                    let answer = SdpAnswer::from_sdp_string(sdp_str)
-                        .map_err(|e| format!("parse answer SDP: {e}"))?;
-                    if let Some(p) = pending_offer.take() {
-                        rtc.sdp_api()
-                            .accept_answer(p, answer)
-                            .map_err(|e| format!("accept answer: {e}"))?;
+            if let Some(rx) = signal_rx {
+                while let Ok(stmt) = rx.try_recv() {
+                    let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    let sdp_str = json.get("sdp").and_then(|v| v.as_str()).unwrap_or("");
+                    if sdp_str.is_empty() {
+                        continue;
                     }
-                    signaling_done = true;
-                    log::info!("[data] conn={conn_id} answer accepted, waiting for ICE");
+
+                    if is_offerer && msg_type == "answer" {
+                        log::info!("[data] conn={conn_id} received answer");
+                        let answer = SdpAnswer::from_sdp_string(sdp_str)
+                            .map_err(|e| format!("parse answer SDP: {e}"))?;
+                        if let Some(p) = pending_offer.take() {
+                            rtc.sdp_api()
+                                .accept_answer(p, answer)
+                                .map_err(|e| format!("accept answer: {e}"))?;
+                        }
+                        signaling_done = true;
+                        log::info!("[data] conn={conn_id} answer accepted, waiting for ICE");
+                    }
                 }
             }
         }
@@ -563,7 +741,7 @@ fn run_webrtc(
                         "[data] conn={conn_id} data channel open: {label} (id={ch_id:?})"
                     );
                     connected = true;
-                    data_ch_id = Some(ch_id);
+                    *data_ch_id = Some(ch_id);
 
                     {
                         let mut st = state().lock().unwrap();
@@ -583,10 +761,7 @@ fn run_webrtc(
                     if let Ok(text) = String::from_utf8(data.data.to_vec()) {
                         push_event(DataEvent {
                             webview_ptr,
-                            event_type: DataEventType::Data {
-                                conn_id,
-                                data: text,
-                            },
+                            event_type: DataEventType::Data { conn_id, data: text },
                         });
                     }
                 }
@@ -604,32 +779,11 @@ fn run_webrtc(
         }
 
         // Feed incoming UDP packets to str0m.
-        loop {
-            match socket.recv_from(&mut buf) {
-                Ok((n, from)) => {
-                    let now = Instant::now();
-                    if let Some(r) =
-                        Receive::new(str0m::net::Protocol::Udp, from, local_addr, &buf[..n]).ok()
-                    {
-                        let _ = rtc.handle_input(Input::Receive(now, r));
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
+        feed_udp(socket, rtc, local_addr, &mut buf);
 
         // Send queued outgoing data.
         if connected {
-            if let Some(ch_id) = data_ch_id {
-                while let Ok(data) = data_rx.try_recv() {
-                    if let Some(mut ch) = rtc.channel(ch_id) {
-                        if let Err(e) = ch.write(true, &data) {
-                            log::warn!("[data] conn={conn_id} write error: {e}");
-                        }
-                    }
-                }
-            }
+            send_queued(rtc, *data_ch_id, data_rx, conn_id);
         }
     }
 
@@ -653,10 +807,7 @@ fn run_webrtc(
                     if let Ok(text) = String::from_utf8(data.data.to_vec()) {
                         push_event(DataEvent {
                             webview_ptr,
-                            event_type: DataEventType::Data {
-                                conn_id,
-                                data: text,
-                            },
+                            event_type: DataEventType::Data { conn_id, data: text },
                         });
                     }
                 }
@@ -687,39 +838,65 @@ fn run_webrtc(
             }
         }
 
-        // Feed incoming UDP.
-        loop {
-            match socket.recv_from(&mut buf) {
-                Ok((n, from)) => {
-                    let now = Instant::now();
-                    if let Some(r) =
-                        Receive::new(str0m::net::Protocol::Udp, from, local_addr, &buf[..n]).ok()
-                    {
-                        let _ = rtc.handle_input(Input::Receive(now, r));
-                    }
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
-            }
-        }
+        feed_udp(socket, rtc, local_addr, &mut buf);
+        send_queued(rtc, *data_ch_id, data_rx, conn_id);
+    }
 
-        // Send outgoing data.
-        if let Some(ch_id) = data_ch_id {
-            while let Ok(data) = data_rx.try_recv() {
-                if let Some(mut ch) = rtc.channel(ch_id) {
-                    if let Err(e) = ch.write(true, &data) {
-                        log::warn!("[data] conn={conn_id} write error: {e}");
-                    }
+    Ok(())
+}
+
+/// Feed incoming UDP packets into str0m.
+fn feed_udp(
+    socket: &UdpSocket,
+    rtc: &mut Rtc,
+    local_addr: std::net::SocketAddr,
+    buf: &mut [u8],
+) {
+    loop {
+        match socket.recv_from(buf) {
+            Ok((n, from)) => {
+                let now = Instant::now();
+                if let Some(r) =
+                    Receive::new(str0m::net::Protocol::Udp, from, local_addr, &buf[..n]).ok()
+                {
+                    let _ = rtc.handle_input(Input::Receive(now, r));
+                }
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
+        }
+    }
+}
+
+/// Send queued outgoing data through the data channel.
+fn send_queued(
+    rtc: &mut Rtc,
+    data_ch_id: Option<ChannelId>,
+    data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    conn_id: u64,
+) {
+    if let Some(ch_id) = data_ch_id {
+        while let Ok(data) = data_rx.try_recv() {
+            if let Some(mut ch) = rtc.channel(ch_id) {
+                if let Err(e) = ch.write(true, &data) {
+                    log::warn!("[data] conn={conn_id} write error: {e}");
                 }
             }
         }
     }
-
-    Ok(())
 }
 
 /// Push an event to the global pending events queue.
 fn push_event(event: DataEvent) {
     let mut st = state().lock().unwrap();
     st.pending_events.push(event);
+}
+
+/// Discover a local network IP by connecting a UDP socket to a public address.
+/// The socket is never actually sent data — connect() just configures routing.
+fn local_network_ip() -> Option<std::net::IpAddr> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Connect to a public DNS address to let the OS pick the outbound interface.
+    sock.connect("8.8.8.8:80").ok()?;
+    Some(sock.local_addr().ok()?.ip())
 }

@@ -156,9 +156,44 @@ pub(crate) struct PendingChainSubmit {
     pub id: u64,
     pub app_id: String,
     pub chain: epoca_chain::ChainId,
-    /// JSON call data from the app (pallet, call, args).
+    /// Raw call data hex string from the app.
     pub call_data: String,
 }
+
+/// Phase of the post-approval extrinsic construction state machine.
+pub(crate) enum ChainSubmitPhase {
+    /// Waiting for nonce + finalized head hash responses.
+    AwaitingChainMeta {
+        nonce_js_id: u64,
+        head_js_id: u64,
+        nonce: Option<u64>,
+        head_hash: Option<[u8; 32]>,
+    },
+    /// Have nonce + head hash; waiting for block header to extract block number.
+    AwaitingBlockHeader {
+        nonce: u64,
+        head_hash: [u8; 32],
+        header_js_id: u64,
+    },
+}
+
+/// In-flight extrinsic build (post-approval, pre-submission).
+/// Kept separate from `PendingChainSubmit` so the approval dialog clears
+/// immediately when the user clicks Approve.
+pub(crate) struct ChainSubmitBuild {
+    pub webview_ptr: usize,
+    pub js_id: u64,
+    pub chain: epoca_chain::ChainId,
+    /// Raw call data hex string from the app.
+    pub call_data: String,
+    pub phase: ChainSubmitPhase,
+}
+
+// Temporary storage for in-flight runtime version (while we wait for genesis hash).
+static PENDING_SPEC_VERSION: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+static PENDING_TX_VERSION: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 /// A pending data.connect request awaiting user confirmation.
 pub(crate) struct PendingDataConnect {
@@ -181,6 +216,14 @@ pub(crate) struct PendingHostApiSign {
     pub app_id: String,
     /// The raw payload bytes to sign.
     pub payload: Vec<u8>,
+}
+
+/// A pending WSS permission request awaiting user confirmation.
+struct PendingWssPermission {
+    app_id: String,
+    url: String,
+    webview_ptr: usize,
+    call_id: u64,
 }
 
 /// A pending BTC wallet sign request awaiting user confirmation.
@@ -270,8 +313,11 @@ pub struct Workbench {
     pending_btc_wallet_sign: Option<PendingBtcWalletSign>,
     pending_spa_sign: Option<PendingSpaSign>,
     pending_chain_submit: Option<PendingChainSubmit>,
+    /// Active extrinsic build in progress (post-approval, pre-submission).
+    chain_submit_building: Option<ChainSubmitBuild>,
     pending_data_connect: Option<PendingDataConnect>,
     pending_hostapi_sign: Option<PendingHostApiSign>,
+    pending_wss_permission: Option<PendingWssPermission>,
     /// Active dot-loading tab state — holds bundle waiting for user approval.
     pending_dot_load: Option<PendingDotLoad>,
     /// Monotonically increasing counter for dot-load requests; detached DOTNS
@@ -468,8 +514,10 @@ impl Workbench {
             pending_btc_wallet_sign: None,
             pending_spa_sign: None,
             pending_chain_submit: None,
+            chain_submit_building: None,
             pending_data_connect: None,
             pending_hostapi_sign: None,
+            pending_wss_permission: None,
             pending_dot_load: None,
             dot_load_generation: 0,
             approved_dot_apps: crate::session::load_approved_apps(),
@@ -501,6 +549,10 @@ impl Workbench {
     /// Hide the overlay sidebar immediately (no delay).
     fn trigger_sidebar_hide(&mut self, cx: &mut Context<Self>) {
         if self.sidebar_target <= 0.0 {
+            return;
+        }
+        // Keep the sidebar open while an approval dialog is pending.
+        if self.has_pending_approval() {
             return;
         }
         self.sidebar_target = 0.0;
@@ -1193,6 +1245,18 @@ impl Workbench {
                                     );
                                     entity.read(cx).evaluate_script(&resolve_js, cx);
                                 }
+                                crate::js_bridge::BridgeAsyncAction::WssPermission { url } => {
+                                    if self.pending_wss_permission.is_none() {
+                                        self.pending_wss_permission = Some(PendingWssPermission {
+                                            app_id: app_id.clone(),
+                                            url,
+                                            webview_ptr: ev_ptr,
+                                            call_id: id,
+                                        });
+                                        self.trigger_sidebar_show(false, cx);
+                                        cx.notify();
+                                    }
+                                }
                             },
                             crate::js_bridge::BridgeResult::UnknownMethod(m) => {
                                 let msg = format!("method '{m}' not yet implemented")
@@ -1302,6 +1366,32 @@ impl Workbench {
                         entity.read(cx).evaluate_script(&js, cx);
                         break;
                     }
+                }
+            }
+        }
+
+        // Check for incoming data connections that need approval (from the listener).
+        if self.pending_data_connect.is_none() {
+            let approvals = crate::data_api::pending_approvals();
+            // Find the first incoming approval that doesn't already have a pending dialog.
+            for (conn_id, app_id, peer_address) in approvals {
+                // Find the webview_ptr for this app.
+                let wv_ptr = self.tabs.iter().find_map(|t| {
+                    t.entity.clone().downcast::<SpaTab>().ok().and_then(|e| {
+                        let spa = e.read(cx);
+                        if spa.app_id() == app_id { Some(spa.webview_ptr) } else { None }
+                    })
+                });
+                if let Some(webview_ptr) = wv_ptr {
+                    self.pending_data_connect = Some(PendingDataConnect {
+                        webview_ptr,
+                        id: 0, // incoming — no JS promise to resolve
+                        app_id,
+                        peer_address,
+                        conn_id,
+                    });
+                    cx.notify();
+                    break;
                 }
             }
         }
@@ -2860,9 +2950,20 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let id = self.alloc_id();
         let app_id = bundle.manifest.app.id.clone();
         let app_name = bundle.manifest.app.name.clone();
+        let has_data_perm = bundle
+            .manifest
+            .permissions
+            .as_ref()
+            .map(|p| p.data)
+            .unwrap_or(false);
         let entity = cx.new(|cx| {
             SpaTab::new(bundle, window, cx)
         });
+        // Start incoming data connection listener if the app has data permission.
+        if has_data_perm {
+            let wv_ptr = entity.read(cx).webview_ptr;
+            crate::data_api::start_incoming_listener(&app_id, wv_ptr);
+        }
         // Show dot://name.dot if we have verification, otherwise derive from app name.
         let url_display = if let Some(ref dv) = verification {
             format!("dot://{}.dot", dv.name)
@@ -3099,7 +3200,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                                             network: None,
                                             sign: true,
                                             statements: false,
-                                            chain: true,
+                                            chain: false,
                                             data: false,
                                             media: vec![],
                                         }),
@@ -4649,12 +4750,32 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             .into_any_element()
                     );
 
-                // Sandbox section
+                // Sandbox section — read actual permissions from the active SPA tab.
+                let has_chain = active_tab
+                    .and_then(|t| t.entity.clone().downcast::<SpaTab>().ok())
+                    .map(|e| e.read(cx).has_permission_chain())
+                    .unwrap_or(false);
+                let has_sign = active_tab
+                    .and_then(|t| t.entity.clone().downcast::<SpaTab>().ok())
+                    .map(|e| e.read(cx).has_permission_sign())
+                    .unwrap_or(false);
                 panel = panel
                     .child(section_header("SANDBOX"))
-                    .child(perm_row(IconName::Check, green, "Chain (WSS)", "Allowed", green))
+                    .child(perm_row(
+                        if has_chain { IconName::Check } else { IconName::CircleX },
+                        if has_chain { green } else { red },
+                        "Chain (WSS)",
+                        if has_chain { "Allowed" } else { "Blocked" },
+                        if has_chain { green } else { red },
+                    ))
                     .child(perm_row(IconName::CircleX, red, "HTTP / Fetch", "Blocked", red))
-                    .child(perm_row(IconName::Check, amber, "Wallet signing", "With approval", amber))
+                    .child(perm_row(
+                        if has_sign { IconName::Check } else { IconName::CircleX },
+                        if has_sign { amber } else { red },
+                        "Wallet signing",
+                        if has_sign { "With approval" } else { "Blocked" },
+                        if has_sign { amber } else { red },
+                    ))
                     .child(perm_row(IconName::CircleX, red, "iFrames", "Blocked", red));
             } else if let Some(tab) = active_tab {
                 // ── Regular web page info ──────────────────────────────
@@ -5483,13 +5604,23 @@ impl Workbench {
             || self.pending_chain_submit.is_some()
             || self.pending_data_connect.is_some()
             || self.pending_hostapi_sign.is_some()
+            || self.pending_wss_permission.is_some()
     }
 
+    fn is_pending_high_risk(&self) -> bool {
+        self.pending_wallet_sign.is_some()
+            || self.pending_btc_wallet_sign.is_some()
+            || self.pending_spa_sign.is_some()
+            || self.pending_hostapi_sign.is_some()
+            || self.pending_chain_submit.is_some()
+        // data_connect and wss_permission are low-risk
+    }
+
+    /// Renders the approval panel inside the sidebar (replaces the tab list).
+    /// A 3px accent strip on the panel's left edge signals risk level.
     fn render_approval_panel(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        // Color constants matching the design system.
         let amber = rgba(0xf5a623ff_u32);
         let teal = rgba(0x00d4aaff_u32);
-        let border_color = rgba(0xffffff14_u32);
         let text_primary = rgba(0xffffffe0_u32);
         let text_secondary = rgba(0xffffff66_u32);
         let text_muted = rgba(0xffffff44_u32);
@@ -5497,7 +5628,6 @@ impl Workbench {
         let deny_bg = rgba(0xffffff0f_u32);
 
         // Determine which approval to show and extract display data.
-        // Priority: wallet_sign → btc_sign → spa_sign → hostapi_sign → chain_submit → data_connect
         enum ApprovalKind {
             WalletSign,
             BtcSign,
@@ -5505,6 +5635,7 @@ impl Workbench {
             HostApiSign,
             ChainSubmit,
             DataConnect,
+            WssPermission,
         }
 
         let kind;
@@ -5514,15 +5645,13 @@ impl Workbench {
         let payload_text: String;
         let note: &str;
         let approve_label: &str;
-        let is_high_risk: bool; // amber vs teal accent
+        let is_high_risk: bool;
 
         if let Some(req) = &self.pending_wallet_sign {
             kind = ApprovalKind::WalletSign;
             title = "Signature Request";
             app_label = req.origin.clone();
-            detail_rows = vec![
-                ("Method", req.method.clone()),
-            ];
+            detail_rows = vec![("Method", req.method.clone())];
             payload_text = req.display_message.clone();
             note = "This website is requesting a cryptographic signature.";
             approve_label = "Sign";
@@ -5565,16 +5694,14 @@ impl Workbench {
             } else {
                 hex_encode(&req.payload)
             };
-            note = "This app is requesting access to your signing key.";
+            note = "This app is requesting your approval to sign a transaction.";
             approve_label = "Sign";
             is_high_risk = true;
         } else if let Some(req) = &self.pending_chain_submit {
             kind = ApprovalKind::ChainSubmit;
             title = "Transaction Request";
             app_label = req.app_id.clone();
-            detail_rows = vec![
-                ("Chain", req.chain.display_name().to_string()),
-            ];
+            detail_rows = vec![("Chain", req.chain.display_name().to_string())];
             payload_text = if req.call_data.len() > 200 {
                 format!("{}…", &req.call_data[..200])
             } else {
@@ -5593,11 +5720,26 @@ impl Workbench {
             } else {
                 peer.clone()
             };
-            detail_rows = vec![
-                ("Peer", peer_display),
-            ];
+            detail_rows = vec![("Peer", peer_display)];
             payload_text = String::new();
             note = "This app wants to open a peer-to-peer data connection.";
+            approve_label = "Allow";
+            is_high_risk = false;
+        } else if let Some(req) = &self.pending_wss_permission {
+            kind = ApprovalKind::WssPermission;
+            title = "Chain Access (WSS)";
+            app_label = req.app_id.clone();
+            let url_display = if req.url.len() > 50 {
+                format!("{}…", &req.url[..50])
+            } else {
+                req.url.clone()
+            };
+            detail_rows = vec![
+                ("Capability", "WebSocket (WSS)".into()),
+                ("Endpoint", url_display),
+            ];
+            payload_text = String::new();
+            note = "This app wants to connect to a blockchain node via WebSocket. Granting this will reload the page.";
             approve_label = "Allow";
             is_high_risk = false;
         } else {
@@ -5605,16 +5747,10 @@ impl Workbench {
         }
 
         let accent = if is_high_risk { amber } else { teal };
-        let approve_bg = if is_high_risk {
-            rgba(0xf5a62333_u32)
-        } else {
-            rgba(0x00d4aa33_u32)
-        };
 
-        // Choose icon based on approval type.
         let icon_name = match kind {
             ApprovalKind::ChainSubmit => IconName::ExternalLink,
-            ApprovalKind::DataConnect => IconName::Globe,
+            ApprovalKind::DataConnect | ApprovalKind::WssPermission => IconName::Globe,
             _ => IconName::TriangleAlert,
         };
 
@@ -5629,7 +5765,7 @@ impl Workbench {
                     .gap(px(8.0))
                     .child(
                         div()
-                            .w(px(72.0))
+                            .w(px(80.0))
                             .flex_shrink_0()
                             .text_xs()
                             .text_color(text_muted)
@@ -5647,154 +5783,172 @@ impl Workbench {
             })
             .collect();
 
-        // Build the panel.
+        // ── Sidebar panel: flex_row with accent strip + content ─────────
         let panel = div()
             .id("approval-panel")
             .flex()
-            .flex_col()
+            .flex_row()
             .flex_1()
             .overflow_hidden()
-            .px(px(12.0))
-            .py(px(14.0))
-            .gap(px(10.0))
-            // Header: icon + title + app name
+            // Accent strip on the left edge of just this panel
+            .child(
+                div()
+                    .w(px(3.0))
+                    .flex_shrink_0()
+                    .h_full()
+                    .bg(accent),
+            )
+            // Panel content
             .child(
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(Icon::new(icon_name).size(px(16.0)).text_color(accent))
+                    .flex_col()
+                    .flex_1()
+                    .overflow_hidden()
+                    .px(px(12.0))
+                    .py(px(14.0))
+                    .gap(px(10.0))
+                    // Header: icon + title + app name
                     .child(
                         div()
                             .flex()
-                            .flex_col()
-                            .gap(px(2.0))
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(Icon::new(icon_name).size(px(16.0)).text_color(accent))
                             .child(
                                 div()
-                                    .text_sm()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(text_primary)
-                                    .child(title.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(text_muted)
-                                    .truncate()
-                                    .child(app_label),
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(text_primary)
+                                            .child(title.to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(text_muted)
+                                            .truncate()
+                                            .child(app_label),
+                                    ),
                             ),
-                    ),
-            )
-            // Separator
-            .child(
-                div()
-                    .h(px(1.0))
-                    .w_full()
-                    .bg(border_color),
-            )
-            // Detail rows
-            .children(detail_els)
-            // Payload box (only when non-empty)
-            .when(!payload_text.is_empty(), |d| {
-                d.child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(6.0))
-                        .rounded(px(4.0))
-                        .bg(payload_bg)
-                        .max_h(px(120.0))
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .text_xs()
-                                .font_family("monospace")
-                                .text_color(text_secondary)
-                                .child(payload_text),
-                        ),
-                )
-            })
-            // Security note
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(text_muted)
-                    .child(note.to_string()),
-            )
-            // Spacer to push buttons to bottom
-            .child(div().flex_1())
-            // Button row
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .gap(px(6.0))
-                    // Deny button
-                    .child(
-                        div()
-                            .id("approval-deny-btn")
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(32.0))
-                            .rounded(px(6.0))
-                            .bg(deny_bg)
-                            .cursor_pointer()
-                            .hover(|d| d.bg(rgba(0xffffff1a_u32)))
-                            .text_xs()
-                            .text_color(text_secondary)
-                            .child("Deny")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // Deny whichever approval is pending.
-                                if this.pending_wallet_sign.is_some() {
-                                    this.deny_wallet_sign(cx);
-                                } else if this.pending_btc_wallet_sign.is_some() {
-                                    this.deny_btc_wallet_sign(cx);
-                                } else if this.pending_spa_sign.is_some() {
-                                    this.deny_spa_sign(cx);
-                                } else if this.pending_hostapi_sign.is_some() {
-                                    this.deny_hostapi_sign(cx);
-                                } else if this.pending_chain_submit.is_some() {
-                                    this.deny_chain_submit(cx);
-                                } else if this.pending_data_connect.is_some() {
-                                    this.deny_data_connect(cx);
-                                }
-                            })),
                     )
-                    // Approve button
+                    // Separator
                     .child(
                         div()
-                            .id("approval-approve-btn")
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .h(px(32.0))
-                            .rounded(px(6.0))
-                            .bg(approve_bg)
-                            .cursor_pointer()
-                            .hover(|d| d.opacity(0.85))
+                            .h(px(1.0))
+                            .w_full()
+                            .bg(rgba(0xffffff14_u32)),
+                    )
+                    // Detail rows
+                    .children(detail_els)
+                    // Payload box (only when non-empty)
+                    .when(!payload_text.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(6.0))
+                                .rounded(px(4.0))
+                                .bg(payload_bg)
+                                .max_h(px(120.0))
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .font_family("monospace")
+                                        .text_color(text_secondary)
+                                        .child(payload_text),
+                                ),
+                        )
+                    })
+                    // Security note
+                    .child(
+                        div()
                             .text_xs()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(accent)
-                            .child(approve_label.to_string())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                // Approve whichever approval is pending.
-                                if this.pending_wallet_sign.is_some() {
-                                    this.approve_wallet_sign(cx);
-                                } else if this.pending_btc_wallet_sign.is_some() {
-                                    this.approve_btc_wallet_sign(cx);
-                                } else if this.pending_spa_sign.is_some() {
-                                    this.approve_spa_sign(cx);
-                                } else if this.pending_hostapi_sign.is_some() {
-                                    this.approve_hostapi_sign(cx);
-                                } else if this.pending_chain_submit.is_some() {
-                                    this.approve_chain_submit(cx);
-                                } else if this.pending_data_connect.is_some() {
-                                    this.approve_data_connect(cx);
-                                }
-                            })),
+                            .text_color(text_muted)
+                            .child(note.to_string()),
+                    )
+                    // Spacer to push buttons to bottom
+                    .child(div().flex_1())
+                    // Button row
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            // Deny button
+                            .child(
+                                div()
+                                    .id("approval-deny-btn")
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(36.0))
+                                    .rounded(px(8.0))
+                                    .bg(deny_bg)
+                                    .cursor_pointer()
+                                    .hover(|d| d.bg(rgba(0xffffff1a_u32)))
+                                    .text_xs()
+                                    .text_color(text_secondary)
+                                    .child("Deny")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.pending_wallet_sign.is_some() {
+                                            this.deny_wallet_sign(cx);
+                                        } else if this.pending_btc_wallet_sign.is_some() {
+                                            this.deny_btc_wallet_sign(cx);
+                                        } else if this.pending_spa_sign.is_some() {
+                                            this.deny_spa_sign(cx);
+                                        } else if this.pending_hostapi_sign.is_some() {
+                                            this.deny_hostapi_sign(cx);
+                                        } else if this.pending_chain_submit.is_some() {
+                                            this.deny_chain_submit(cx);
+                                        } else if this.pending_data_connect.is_some() {
+                                            this.deny_data_connect(cx);
+                                        } else if this.pending_wss_permission.is_some() {
+                                            this.deny_wss_permission(cx);
+                                        }
+                                    })),
+                            )
+                            // Approve button
+                            .child(
+                                div()
+                                    .id("approval-approve-btn")
+                                    .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .h(px(36.0))
+                                    .rounded(px(8.0))
+                                    .bg(accent)
+                                    .cursor_pointer()
+                                    .hover(|d| d.opacity(0.85))
+                                    .text_xs()
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(rgba(0x000000dd_u32))
+                                    .child(approve_label.to_string())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if this.pending_wallet_sign.is_some() {
+                                            this.approve_wallet_sign(cx);
+                                        } else if this.pending_btc_wallet_sign.is_some() {
+                                            this.approve_btc_wallet_sign(cx);
+                                        } else if this.pending_spa_sign.is_some() {
+                                            this.approve_spa_sign(cx);
+                                        } else if this.pending_hostapi_sign.is_some() {
+                                            this.approve_hostapi_sign(cx);
+                                        } else if this.pending_chain_submit.is_some() {
+                                            this.approve_chain_submit(cx);
+                                        } else if this.pending_data_connect.is_some() {
+                                            this.approve_data_connect(cx);
+                                        } else if this.pending_wss_permission.is_some() {
+                                            this.approve_wss_permission(window, cx);
+                                        }
+                                    })),
+                            ),
                     ),
             );
 
@@ -5884,17 +6038,75 @@ impl Workbench {
     fn approve_chain_submit(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_chain_submit.take() else { return };
 
-        match crate::chain_api::submit_extrinsic(
-            req.chain,
-            req.webview_ptr,
-            req.id,
-            &req.call_data,
-        ) {
-            Ok(()) => {} // Response comes async
-            Err(e) => {
-                self.resolve_spa_js(req.webview_ptr, req.id, Err(&e), cx);
+        // Get the wallet's SS58 address for the nonce query.
+        let address = if cx.has_global::<crate::wallet::WalletGlobal>() {
+            match cx.global::<crate::wallet::WalletGlobal>().manager.root_address() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    self.resolve_spa_js(req.webview_ptr, req.id, Err(&e.to_string()), cx);
+                    cx.notify();
+                    return;
+                }
             }
+        } else {
+            self.resolve_spa_js(req.webview_ptr, req.id, Err("wallet not available"), cx);
+            cx.notify();
+            return;
+        };
+
+        // Allocate internal correlation IDs from a high sentinel range.
+        static INTERNAL_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0xFFFF_0000_0000_0000);
+        let nonce_js_id = INTERNAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let head_js_id = INTERNAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let chain = req.chain;
+
+        // Issue internal queries: nonce + finalized head.
+        let _ = crate::chain_api::submit_internal_query(
+            chain,
+            nonce_js_id,
+            "system_accountNextIndex",
+            &serde_json::json!([address]),
+        );
+        let _ = crate::chain_api::submit_internal_query(
+            chain,
+            head_js_id,
+            "chain_getFinalizedHead",
+            &serde_json::json!([]),
+        );
+
+        // Fire-and-forget cache warmers for runtime version + genesis hash if not cached.
+        if crate::chain_api::get_chain_meta(chain).is_none() {
+            let rv_js_id = INTERNAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let gh_js_id = INTERNAL_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let _ = crate::chain_api::submit_internal_query(
+                chain,
+                rv_js_id,
+                "state_getRuntimeVersion",
+                &serde_json::json!([]),
+            );
+            let _ = crate::chain_api::submit_internal_query(
+                chain,
+                gh_js_id,
+                "chain_getBlockHash",
+                &serde_json::json!([0]), // block 0 = genesis
+            );
         }
+
+        // Move into the build state. The approval dialog clears (pending_chain_submit is None).
+        self.chain_submit_building = Some(ChainSubmitBuild {
+            webview_ptr: req.webview_ptr,
+            js_id: req.id,
+            chain,
+            call_data: req.call_data,
+            phase: ChainSubmitPhase::AwaitingChainMeta {
+                nonce_js_id,
+                head_js_id,
+                nonce: None,
+                head_hash: None,
+            },
+        });
         cx.notify();
     }
 
@@ -5904,18 +6116,355 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Handle an internal chain RPC response (webview_ptr == 0) and advance
+    /// the extrinsic construction state machine in `chain_submit_building`.
+    fn handle_internal_chain_response(
+        &mut self,
+        js_id: u64,
+        result: Result<serde_json::Value, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ref mut build) = self.chain_submit_building else {
+            // Could be a stale response after the build was cancelled.
+            return;
+        };
+
+        match &mut build.phase {
+            ChainSubmitPhase::AwaitingChainMeta {
+                nonce_js_id,
+                head_js_id,
+                nonce,
+                head_hash,
+            } => {
+                if js_id == *nonce_js_id {
+                    match result {
+                        Ok(val) => {
+                            *nonce = val.as_u64();
+                            if nonce.is_none() {
+                                log::warn!("[extrinsic] nonce response was not a number: {val}");
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("[extrinsic] nonce query failed: {e}");
+                            let b = self.chain_submit_building.take().unwrap();
+                            self.resolve_spa_js(
+                                b.webview_ptr,
+                                b.js_id,
+                                Err(&format!("nonce query failed: {e}")),
+                                cx,
+                            );
+                            cx.notify();
+                            return;
+                        }
+                    }
+                } else if js_id == *head_js_id {
+                    match result {
+                        Ok(val) => {
+                            if let Some(hash_str) = val.as_str() {
+                                let hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
+                                if let Ok(bytes) = hex_decode(hex) {
+                                    if bytes.len() == 32 {
+                                        let mut arr = [0u8; 32];
+                                        arr.copy_from_slice(&bytes);
+                                        *head_hash = Some(arr);
+                                    }
+                                }
+                            }
+                            if head_hash.is_none() {
+                                log::warn!("[extrinsic] finalized head not a 32-byte hash: {val}");
+                            }
+                        }
+                        Err(e) => {
+                            log::error!("[extrinsic] finalized head query failed: {e}");
+                            let b = self.chain_submit_building.take().unwrap();
+                            self.resolve_spa_js(
+                                b.webview_ptr,
+                                b.js_id,
+                                Err(&format!("chain query failed: {e}")),
+                                cx,
+                            );
+                            cx.notify();
+                            return;
+                        }
+                    }
+                } else {
+                    // Cache-warmer response (runtime version or genesis hash).
+                    if let Ok(ref val) = result {
+                        if let (Some(sv), Some(tv)) = (
+                            val.get("specVersion").and_then(|v| v.as_u64()),
+                            val.get("transactionVersion").and_then(|v| v.as_u64()),
+                        ) {
+                            // Runtime version — stash until genesis hash arrives.
+                            PENDING_SPEC_VERSION.store(sv as u32, std::sync::atomic::Ordering::Relaxed);
+                            PENDING_TX_VERSION.store(tv as u32, std::sync::atomic::Ordering::Relaxed);
+                            log::debug!("[extrinsic] cached pending spec={sv} tx={tv}");
+                        } else if let Some(hash_str) = val.as_str() {
+                            // Genesis hash from chain_getBlockHash(0).
+                            let hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
+                            if let Ok(bytes) = hex_decode(hex) {
+                                if bytes.len() == 32 {
+                                    let chain = build.chain;
+                                    let sv = PENDING_SPEC_VERSION.load(std::sync::atomic::Ordering::Relaxed);
+                                    let tv = PENDING_TX_VERSION.load(std::sync::atomic::Ordering::Relaxed);
+                                    if sv > 0 && tv > 0 {
+                                        let mut genesis = [0u8; 32];
+                                        genesis.copy_from_slice(&bytes);
+                                        crate::chain_api::cache_chain_meta(
+                                            chain,
+                                            crate::chain_api::ChainMetaCache {
+                                                spec_version: sv,
+                                                tx_version: tv,
+                                                genesis_hash: genesis,
+                                            },
+                                        );
+                                        log::info!("[extrinsic] cached chain meta: spec={sv} tx={tv}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Re-borrow to read the updated values (we may have just set one of them).
+                let (nonce_val, head_val) = if let Some(ChainSubmitPhase::AwaitingChainMeta {
+                    nonce, head_hash, ..
+                }) = self.chain_submit_building.as_ref().map(|b| &b.phase)
+                {
+                    (*nonce, *head_hash)
+                } else {
+                    return;
+                };
+
+                // Advance to AwaitingBlockHeader once both are ready.
+                if let (Some(n), Some(hh)) = (nonce_val, head_val) {
+                    static INTERNAL_COUNTER2: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0xFFFF_8000_0000_0000);
+                    let header_js_id =
+                        INTERNAL_COUNTER2.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let head_hex = format!("0x{}", hex_encode(&hh));
+                    let chain = self.chain_submit_building.as_ref().unwrap().chain;
+                    let _ = crate::chain_api::submit_internal_query(
+                        chain,
+                        header_js_id,
+                        "chain_getHeader",
+                        &serde_json::json!([head_hex]),
+                    );
+                    self.chain_submit_building.as_mut().unwrap().phase =
+                        ChainSubmitPhase::AwaitingBlockHeader {
+                            nonce: n,
+                            head_hash: hh,
+                            header_js_id,
+                        };
+                    log::info!("[extrinsic] nonce={n} head_hash={head_hex}, querying header");
+                }
+            }
+
+            ChainSubmitPhase::AwaitingBlockHeader {
+                nonce,
+                head_hash,
+                header_js_id,
+            } => {
+                if js_id != *header_js_id {
+                    // Could be a late cache-warmer response — apply caching and ignore.
+                    if let Ok(ref val) = result {
+                        if let (Some(sv), Some(tv)) = (
+                            val.get("specVersion").and_then(|v| v.as_u64()),
+                            val.get("transactionVersion").and_then(|v| v.as_u64()),
+                        ) {
+                            PENDING_SPEC_VERSION.store(sv as u32, std::sync::atomic::Ordering::Relaxed);
+                            PENDING_TX_VERSION.store(tv as u32, std::sync::atomic::Ordering::Relaxed);
+                        } else if let Some(hash_str) = val.as_str() {
+                            let hex = hash_str.strip_prefix("0x").unwrap_or(hash_str);
+                            if let Ok(bytes) = hex_decode(hex) {
+                                if bytes.len() == 32 {
+                                    let chain = build.chain;
+                                    let sv = PENDING_SPEC_VERSION.load(std::sync::atomic::Ordering::Relaxed);
+                                    let tv = PENDING_TX_VERSION.load(std::sync::atomic::Ordering::Relaxed);
+                                    if sv > 0 && tv > 0 {
+                                        let mut genesis = [0u8; 32];
+                                        genesis.copy_from_slice(&bytes);
+                                        crate::chain_api::cache_chain_meta(
+                                            chain,
+                                            crate::chain_api::ChainMetaCache {
+                                                spec_version: sv,
+                                                tx_version: tv,
+                                                genesis_hash: genesis,
+                                            },
+                                        );
+                                        log::info!("[extrinsic] late-cached chain meta: spec={sv} tx={tv}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                let block_number = match result {
+                    Ok(ref val) => {
+                        // chain_getHeader returns {"number": "0x...", ...}
+                        val.get("number")
+                            .and_then(|n| n.as_str())
+                            .and_then(|s| {
+                                let hex = s.strip_prefix("0x").unwrap_or(s);
+                                u64::from_str_radix(hex, 16).ok()
+                            })
+                            .unwrap_or(0)
+                    }
+                    Err(e) => {
+                        log::error!("[extrinsic] header query failed: {e}");
+                        let b = self.chain_submit_building.take().unwrap();
+                        self.resolve_spa_js(
+                            b.webview_ptr,
+                            b.js_id,
+                            Err(&format!("header query failed: {e}")),
+                            cx,
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                let nonce_val = *nonce;
+                let head_hash_val = *head_hash;
+                let chain = build.chain;
+
+                // Require chain meta to be cached (from the warmers fired earlier).
+                let meta = match crate::chain_api::get_chain_meta(chain) {
+                    Some(m) => m,
+                    None => {
+                        log::error!("[extrinsic] chain meta not cached");
+                        let b = self.chain_submit_building.take().unwrap();
+                        self.resolve_spa_js(
+                            b.webview_ptr,
+                            b.js_id,
+                            Err("chain metadata not available — please retry"),
+                            cx,
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                // Decode call_data from hex.
+                let call_data_hex = build
+                    .call_data
+                    .strip_prefix("0x")
+                    .unwrap_or(&build.call_data);
+                let call_data_bytes = match hex_decode(call_data_hex) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let b = self.chain_submit_building.take().unwrap();
+                        self.resolve_spa_js(
+                            b.webview_ptr,
+                            b.js_id,
+                            Err(&format!("invalid call data hex: {e}")),
+                            cx,
+                        );
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                let params = crate::extrinsic::ExtrinsicParams {
+                    spec_version: meta.spec_version,
+                    tx_version: meta.tx_version,
+                    genesis_hash: meta.genesis_hash,
+                    mortality_checkpoint: head_hash_val,
+                    block_number,
+                    nonce: nonce_val,
+                    tip: 0,
+                };
+
+                // Build signing payload.
+                let signing_payload =
+                    crate::extrinsic::build_signing_payload(&call_data_bytes, &params);
+
+                // Sign with the root wallet key.
+                let (pubkey, sig_bytes) = if cx.has_global::<crate::wallet::WalletGlobal>() {
+                    let pk = match cx
+                        .global::<crate::wallet::WalletGlobal>()
+                        .manager
+                        .root_public_key()
+                    {
+                        Some(pk) => pk,
+                        None => {
+                            let b = self.chain_submit_building.take().unwrap();
+                            self.resolve_spa_js(b.webview_ptr, b.js_id, Err("wallet is locked"), cx);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    let sig = match cx
+                        .global_mut::<crate::wallet::WalletGlobal>()
+                        .manager
+                        .sign_root(&signing_payload)
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let b = self.chain_submit_building.take().unwrap();
+                            self.resolve_spa_js(b.webview_ptr, b.js_id, Err(&e.to_string()), cx);
+                            cx.notify();
+                            return;
+                        }
+                    };
+                    (pk, sig)
+                } else {
+                    let b = self.chain_submit_building.take().unwrap();
+                    self.resolve_spa_js(b.webview_ptr, b.js_id, Err("wallet not available"), cx);
+                    cx.notify();
+                    return;
+                };
+
+                if sig_bytes.len() < 64 {
+                    let b = self.chain_submit_building.take().unwrap();
+                    self.resolve_spa_js(b.webview_ptr, b.js_id, Err("signature too short"), cx);
+                    cx.notify();
+                    return;
+                }
+                let mut sig_arr = [0u8; 64];
+                sig_arr.copy_from_slice(&sig_bytes[..64]);
+
+                // Encode signed extrinsic as a 0x-prefixed hex string.
+                let hex_xt = crate::extrinsic::encode_signed_extrinsic(
+                    &call_data_bytes,
+                    &pubkey,
+                    &sig_arr,
+                    &params,
+                );
+                log::info!("[extrinsic] built signed extrinsic ({} hex chars)", hex_xt.len());
+
+                // Submit via author_submitExtrinsic.
+                let b = self.chain_submit_building.take().unwrap();
+                match crate::chain_api::submit_extrinsic(chain, b.webview_ptr, b.js_id, &hex_xt) {
+                    Ok(()) => {} // Response arrives async via drain_responses.
+                    Err(e) => {
+                        self.resolve_spa_js(b.webview_ptr, b.js_id, Err(&e), cx);
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
     fn approve_data_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_data_connect.take() else { return };
 
         match crate::data_api::approve_connection(req.conn_id) {
             Ok(()) => {
-                // Connection approved — resolve with conn_id.
-                // The actual WebRTC handshake will push events asynchronously.
-                let js = format!("window.__epocaResolve({}, null, {})", req.id, req.conn_id);
-                self.evaluate_on_spa(req.webview_ptr, &js, cx);
+                if req.id > 0 {
+                    // Outgoing — resolve the JS promise with conn_id.
+                    let js = format!("window.__epocaResolve({}, null, {})", req.id, req.conn_id);
+                    self.evaluate_on_spa(req.webview_ptr, &js, cx);
+                }
+                // Incoming connections (id == 0) have no promise to resolve;
+                // the SPA will receive a dataConnected push event when ICE completes.
             }
             Err(e) => {
-                self.resolve_spa_js(req.webview_ptr, req.id, Err(&e), cx);
+                if req.id > 0 {
+                    self.resolve_spa_js(req.webview_ptr, req.id, Err(&e), cx);
+                }
             }
         }
         cx.notify();
@@ -5924,7 +6473,9 @@ impl Workbench {
     fn deny_data_connect(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_data_connect.take() else { return };
         let _ = crate::data_api::deny_connection(req.conn_id);
-        self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected connection"), cx);
+        if req.id > 0 {
+            self.resolve_spa_js(req.webview_ptr, req.id, Err("user rejected connection"), cx);
+        }
         cx.notify();
     }
 
@@ -5970,6 +6521,92 @@ impl Workbench {
         let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
         let response = epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw);
         crate::host::send_response(req.webview_ptr, &response);
+        cx.notify();
+    }
+
+    fn approve_wss_permission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_wss_permission.take() else { return };
+        log::info!("[wss-perm] approved WSS for app={}, url={}", req.app_id, req.url);
+
+        // Find the SPA tab matching this webview pointer.
+        let tab_idx = self.tabs.iter().position(|t| {
+            t.entity.clone().downcast::<SpaTab>().ok()
+                .map(|e| e.read(cx).webview_ptr == req.webview_ptr)
+                .unwrap_or(false)
+        });
+
+        if let Some(idx) = tab_idx {
+            let old_tab_id = self.tabs[idx].id;
+            let was_active = self.active_tab_id == Some(old_tab_id);
+            let verification = self.tabs[idx].dot_verification.clone();
+
+            // Build a manifest clone with chain permission granted.
+            let spa_entity = self.tabs[idx].entity.clone().downcast::<SpaTab>().unwrap();
+            let mut manifest = spa_entity.read(cx).manifest_snapshot().clone();
+            let ipfs_cid = spa_entity.read(cx).ipfs_cid_snapshot().map(|s| s.to_string());
+            if let Some(ref mut perms) = manifest.permissions {
+                perms.chain = true;
+            } else {
+                manifest.permissions = Some(epoca_sandbox::bundle::PermissionsMeta {
+                    network: None,
+                    sign: false,
+                    statements: false,
+                    chain: true,
+                    data: false,
+                    media: Vec::new(),
+                });
+            }
+
+            // Build a new bundle with updated manifest (empty assets — they are already registered).
+            let bundle = ProdBundle {
+                manifest,
+                program_bytes: None,
+                assets: std::collections::HashMap::new(),
+                ipfs_cid,
+            };
+
+            // Remove old tab.
+            self.tabs.remove(idx);
+
+            // Open a new SPA tab with the updated permissions.
+            let new_id = self.alloc_id();
+            let app_name = bundle.manifest.app.name.clone();
+            let app_id = bundle.manifest.app.id.clone();
+            let new_entity = cx.new(|cx| SpaTab::new(bundle, window, cx));
+            let url_display = if let Some(ref dv) = verification {
+                format!("dot://{}.dot", dv.name)
+            } else {
+                format!("dot://{}.dot", app_name)
+            };
+            self.tabs.push(TabEntry {
+                id: new_id,
+                kind: TabKind::Spa { app_id: app_id.clone() },
+                title: app_name,
+                icon: IconName::Globe,
+                entity: new_entity.into(),
+                pinned: false,
+                nav: None,
+                favicon_url: None,
+                context_id: None,
+                loading_progress: 0.0,
+                reader_active: false,
+                readerable: false,
+                dot_verification: verification,
+            });
+            if was_active {
+                self.active_tab_id = Some(new_id);
+                self.url_input.update(cx, |s, inner_cx| {
+                    s.set_value(url_display, window, inner_cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_wss_permission(&mut self, cx: &mut Context<Self>) {
+        if let Some(req) = self.pending_wss_permission.take() {
+            log::info!("[wss-perm] denied WSS for app={}", req.app_id);
+        }
         cx.notify();
     }
 
@@ -6706,6 +7343,8 @@ impl Render for Workbench {
             SidebarMode::Pinned => {
                 // In pinned mode the overlay inset is zero.
                 cx.set_global(OverlayLeftInset(0.0));
+                // Dim the webview when an approval dialog is pending.
+                cx.set_global(crate::WebViewDimmed(self.has_pending_approval()));
 
                 let find_bar_pinned = if self.find_open {
                     Some(self.render_find_bar(window, cx).into_any_element())
@@ -6845,12 +7484,11 @@ impl Render for Workbench {
                 let anim = self.sidebar_anim;
 
                 // Publish the sidebar inset so WebViewTab can apply a CALayer mask
-                // that clips the WKWebView away from the sidebar area. This keeps
-                // the WKWebView's frame (and thus page viewport) unchanged — no
-                // content reflow — while making the GPUI sidebar visible through
-                // the unmasked region. See design.md §Overlay.
+                // that clips the WKWebView away from the sidebar area.
                 let webview_inset = (SIDEBAR_W * anim - CHROME).max(0.0);
                 cx.set_global(OverlayLeftInset(webview_inset));
+                // Dim the webview when an approval dialog is pending.
+                cx.set_global(crate::WebViewDimmed(self.has_pending_approval()));
 
                 let find_bar_overlay = if self.find_open {
                     Some(self.render_find_bar(window, cx).into_any_element())
@@ -7140,6 +7778,81 @@ fn url_to_title(url: &str) -> String {
         .next()
         .unwrap_or(url)
         .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Test server helpers (feature-gated)
+// ---------------------------------------------------------------------------
+#[cfg(feature = "test-server")]
+impl Workbench {
+    /// Returns (kind, high_risk) if an approval dialog is pending.
+    pub(crate) fn test_pending_approval_info(&self) -> Option<(&'static str, bool)> {
+        if self.pending_wallet_sign.is_some() {
+            Some(("wallet_sign", true))
+        } else if self.pending_btc_wallet_sign.is_some() {
+            Some(("btc_wallet_sign", true))
+        } else if self.pending_spa_sign.is_some() {
+            Some(("spa_sign", true))
+        } else if self.pending_hostapi_sign.is_some() {
+            Some(("hostapi_sign", true))
+        } else if self.pending_chain_submit.is_some() {
+            Some(("chain_submit", true))
+        } else if self.pending_data_connect.is_some() {
+            Some(("data_connect", false))
+        } else if self.pending_wss_permission.is_some() {
+            Some(("wss_permission", false))
+        } else {
+            None
+        }
+    }
+
+    /// Approve the currently pending approval dialog. Returns true if there was one.
+    pub(crate) fn test_approve_pending(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.pending_wallet_sign.is_some() {
+            self.approve_wallet_sign(cx);
+        } else if self.pending_btc_wallet_sign.is_some() {
+            self.approve_btc_wallet_sign(cx);
+        } else if self.pending_spa_sign.is_some() {
+            self.approve_spa_sign(cx);
+        } else if self.pending_hostapi_sign.is_some() {
+            self.approve_hostapi_sign(cx);
+        } else if self.pending_chain_submit.is_some() {
+            self.approve_chain_submit(cx);
+        } else if self.pending_data_connect.is_some() {
+            self.approve_data_connect(cx);
+        } else if self.pending_wss_permission.is_some() {
+            self.approve_wss_permission(window, cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Deny the currently pending approval dialog. Returns true if there was one.
+    pub(crate) fn test_deny_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.pending_wallet_sign.is_some() {
+            self.deny_wallet_sign(cx);
+        } else if self.pending_btc_wallet_sign.is_some() {
+            self.deny_btc_wallet_sign(cx);
+        } else if self.pending_spa_sign.is_some() {
+            self.deny_spa_sign(cx);
+        } else if self.pending_hostapi_sign.is_some() {
+            self.deny_hostapi_sign(cx);
+        } else if self.pending_chain_submit.is_some() {
+            self.deny_chain_submit(cx);
+        } else if self.pending_data_connect.is_some() {
+            self.deny_data_connect(cx);
+        } else if self.pending_wss_permission.is_some() {
+            self.deny_wss_permission(cx);
+        } else {
+            return false;
+        }
+        true
+    }
 }
 
 /// Parse a "#rrggbb" hex color string to an Rgba value.

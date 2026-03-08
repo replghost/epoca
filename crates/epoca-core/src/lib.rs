@@ -21,6 +21,7 @@ pub mod statements_api;
 pub mod data_api;
 pub mod media_api;
 pub mod bookmarks;
+pub mod extrinsic;
 
 #[cfg(feature = "test-server")]
 pub mod test_server;
@@ -38,3 +39,9 @@ impl gpui::Global for OverlayLeftInset {}
 #[derive(Clone, Default)]
 pub struct OmniboxOpen(pub bool);
 impl gpui::Global for OmniboxOpen {}
+
+/// Published by `Workbench` when an approval dialog is pending.
+/// `WebViewTab` observes this to dim the WKWebView (alpha) and block clicks.
+#[derive(Clone, Default)]
+pub struct WebViewDimmed(pub bool);
+impl gpui::Global for WebViewDimmed {}

@@ -15,12 +15,14 @@ pub enum BridgeRequest {
     DataConnect { peer_address: String },
     DataSend { conn_id: u64, data: String },
     DataClose { conn_id: u64 },
+    DataGetPeerId,
     MediaGetUserMedia { audio: bool, video: bool },
     MediaConnect { peer_address: String, track_ids: Vec<u64> },
     MediaClose { session_id: u64 },
     MediaAttachTrack { track_id: u64, element_id: String },
     MediaSignal { session_id: u64, signal_type: String, data: String },
     MediaGetPeerId,
+    RequestWssPermission { url: String },
 }
 
 /// Permission context needed for dispatch decisions.
@@ -80,6 +82,7 @@ pub enum BridgeAsyncAction {
         webview_ptr: usize,
         session_id: u64,
     },
+    WssPermission { url: String },
 }
 
 /// Format a JS resolve call for success.
@@ -169,6 +172,7 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
             let conn_id = params.get("connId").and_then(|v| v.as_u64()).unwrap_or(0);
             Ok(BridgeRequest::DataClose { conn_id })
         }
+        "dataGetPeerId" => Ok(BridgeRequest::DataGetPeerId),
         "mediaGetUserMedia" => {
             let audio = params.get("audio").and_then(|v| v.as_bool()).unwrap_or(false);
             let video = params.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -199,6 +203,10 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
                 .unwrap_or("")
                 .to_string();
             Ok(BridgeRequest::MediaAttachTrack { track_id, element_id })
+        }
+        "requestWssPermission" => {
+            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::RequestWssPermission { url })
         }
         "mediaGetPeerId" => Ok(BridgeRequest::MediaGetPeerId),
         "mediaSignal" => {
@@ -296,6 +304,14 @@ pub fn dispatch(
             })
         }
 
+        BridgeRequest::RequestWssPermission { url } => {
+            if perms.chain {
+                // Already has chain permission — shouldn't happen but resolve OK
+                return BridgeResult::Js(resolve_ok(id, "true"));
+            }
+            BridgeResult::Async(BridgeAsyncAction::WssPermission { url: url.clone() })
+        }
+
         BridgeRequest::StatementsWrite { channel, data } => {
             if !perms.statements {
                 return BridgeResult::Js(resolve_err(
@@ -359,6 +375,14 @@ pub fn dispatch(
                 Ok(()) => BridgeResult::Js(resolve_ok(id, "true")),
                 Err(e) => BridgeResult::Js(resolve_err(id, &e)),
             }
+        }
+
+        BridgeRequest::DataGetPeerId => {
+            if !perms.data {
+                return BridgeResult::Js(resolve_err(id, "data permission not granted"));
+            }
+            let peer_id = crate::data_api::local_peer_id(webview_ptr);
+            BridgeResult::Js(resolve_ok(id, &format!("'{peer_id}'")))
         }
 
         BridgeRequest::MediaGetUserMedia { audio, video } => {

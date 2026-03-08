@@ -18,6 +18,12 @@ use std::time::Duration;
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
+pub struct ApprovalSnapshot {
+    pub kind: String,
+    pub high_risk: bool,
+}
+
+#[derive(Serialize)]
 pub struct AppSnapshot {
     pub active_tab_id: Option<u64>,
     pub tab_count: usize,
@@ -28,6 +34,7 @@ pub struct AppSnapshot {
     pub url_bar_value: String,
     pub isolated_tabs: bool,
     pub active_context: Option<String>,
+    pub pending_approval: Option<ApprovalSnapshot>,
 }
 
 #[derive(Serialize)]
@@ -81,6 +88,64 @@ static PENDING_EVALS: OnceLock<Mutex<HashMap<String, SyncSender<String>>>> = Onc
 
 fn pending_evals() -> &'static Mutex<HashMap<String, SyncSender<String>>> {
     PENDING_EVALS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+// ---------------------------------------------------------------------------
+// Console log ring buffer (captures JS console output for test assertions)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+pub struct ConsoleEntry {
+    pub seq: u64,
+    pub level: String,
+    pub message: String,
+    pub timestamp_ms: u64,
+}
+
+struct ConsoleRing {
+    entries: std::collections::VecDeque<ConsoleEntry>,
+    next_seq: u64,
+}
+
+static CONSOLE_BUFFER: OnceLock<Mutex<ConsoleRing>> = OnceLock::new();
+
+fn console_buffer() -> &'static Mutex<ConsoleRing> {
+    CONSOLE_BUFFER.get_or_init(|| {
+        Mutex::new(ConsoleRing {
+            entries: std::collections::VecDeque::new(),
+            next_seq: 0,
+        })
+    })
+}
+
+/// Push a console log entry into the ring buffer. Called from the epocaConsole
+/// WKScriptMessageHandler when the `test-server` feature is active.
+pub fn push_console_log(level: String, message: String) {
+    let mut ring = console_buffer().lock().unwrap();
+    let seq = ring.next_seq;
+    ring.next_seq += 1;
+    ring.entries.push_back(ConsoleEntry {
+        seq,
+        level,
+        message,
+        timestamp_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+    });
+    // Keep max 1000 entries
+    while ring.entries.len() > 1000 {
+        ring.entries.pop_front();
+    }
+}
+
+fn get_console_since(since_seq: u64) -> Vec<ConsoleEntry> {
+    let ring = console_buffer().lock().unwrap();
+    ring.entries
+        .iter()
+        .filter(|e| e.seq >= since_seq)
+        .cloned()
+        .collect()
 }
 
 /// Called from the `epocaTestResult` WKScriptMessageHandler when JS posts
@@ -381,6 +446,86 @@ fn handle_connection(mut stream: TcpStream) {
                 Err(_) => write_response(&mut stream, 504, r#"{"error":"eval timeout"}"#),
             }
         }
+        ("POST", "/webview/wait") => {
+            let parsed: serde_json::Value = match serde_json::from_str(&body) {
+                Ok(v) => v,
+                Err(e) => {
+                    write_response(&mut stream, 400, &format!(r#"{{"error":"bad json: {e}"}}"#));
+                    return;
+                }
+            };
+            let js = parsed
+                .get("js")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let timeout_ms = parsed
+                .get("timeout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(5000);
+
+            if js.is_empty() {
+                write_response(&mut stream, 400, r#"{"error":"missing js"}"#);
+                return;
+            }
+
+            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            let poll_interval = Duration::from_millis(100);
+
+            loop {
+                let eval_id = format!(
+                    "wait_{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                );
+
+                let (rsp_tx, rsp_rx) = mpsc::sync_channel(1);
+                let cmd = TestCommand::EvalJs {
+                    js: js.clone(),
+                    eval_id,
+                    rsp: rsp_tx,
+                };
+
+                if test_channel().0.try_send(cmd).is_err() {
+                    write_response(&mut stream, 503, r#"{"error":"channel full"}"#);
+                    return;
+                }
+
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                match rsp_rx.recv_timeout(remaining.min(Duration::from_secs(2))) {
+                    Ok(result) => {
+                        if is_truthy(&result) {
+                            let json = format!(r#"{{"ok":true,"value":{}}}"#, serde_json::json!(result));
+                            write_json_response(&mut stream, 200, &json);
+                            return;
+                        }
+                    }
+                    Err(_) => {}
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    write_response(
+                        &mut stream,
+                        504,
+                        r#"{"error":"wait timeout","value":null}"#,
+                    );
+                    return;
+                }
+
+                std::thread::sleep(poll_interval);
+            }
+        }
+        ("GET", "/console") => {
+            let since = parse_query_param(query, "since")
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let entries = get_console_since(since);
+            let json = serde_json::to_string(&entries)
+                .unwrap_or_else(|e| format!(r#"{{"error":"serialize: {e}"}}"#));
+            write_json_response(&mut stream, 200, &json);
+        }
         _ => {
             write_response(&mut stream, 404, r#"{"error":"not found"}"#);
         }
@@ -422,6 +567,16 @@ fn url_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&result).to_string()
+}
+
+/// Check if a JS eval result represents a truthy value.
+fn is_truthy(result: &str) -> bool {
+    !result.is_empty()
+        && result != "false"
+        && result != "null"
+        && result != "undefined"
+        && result != "0"
+        && !result.starts_with("ERROR:")
 }
 
 fn write_response(stream: &mut TcpStream, status: u16, body: &str) {
@@ -516,6 +671,10 @@ fn build_snapshot(wb: &Workbench, cx: &App) -> AppSnapshot {
                 crate::tabs::TabKind::DeclarativeApp { .. } => "declarative_app".to_string(),
                 crate::tabs::TabKind::WebView { .. } => "webview".to_string(),
                 crate::tabs::TabKind::FramebufferApp { .. } => "framebuffer_app".to_string(),
+                crate::tabs::TabKind::AppLibrary => "app_library".to_string(),
+                crate::tabs::TabKind::Spa { .. } => "spa".to_string(),
+                crate::tabs::TabKind::DotLoading { .. } => "dot_loading".to_string(),
+                crate::tabs::TabKind::Bookmarks => "bookmarks".to_string(),
             };
             TabSnapshot {
                 id: tab.id,
@@ -532,6 +691,13 @@ fn build_snapshot(wb: &Workbench, cx: &App) -> AppSnapshot {
         })
         .collect();
 
+    let pending_approval = wb.test_pending_approval_info().map(|(kind, high_risk)| {
+        ApprovalSnapshot {
+            kind: kind.to_string(),
+            high_risk,
+        }
+    });
+
     AppSnapshot {
         active_tab_id: wb.active_tab_id,
         tab_count: tabs.len(),
@@ -542,6 +708,7 @@ fn build_snapshot(wb: &Workbench, cx: &App) -> AppSnapshot {
         url_bar_value,
         isolated_tabs: wb.isolated_tabs,
         active_context: wb.active_context.clone(),
+        pending_approval,
     }
 }
 
@@ -569,6 +736,16 @@ fn handle_action(
                 .to_string();
             if url.is_empty() {
                 return r#"{"error":"missing url"}"#.to_string();
+            }
+            // Handle .dot URLs through DOTNS resolution (same as URL bar)
+            if url.starts_with("dot://") {
+                wb.resolve_dot_url(&url, window, cx);
+                return r#"{"ok":true}"#.to_string();
+            }
+            if url.ends_with(".dot") && !url.contains('/') && !url.contains(' ') {
+                let dot_url = format!("dot://{}", url);
+                wb.resolve_dot_url(&dot_url, window, cx);
+                return r#"{"ok":true}"#.to_string();
             }
             // Navigate active tab or open new one
             if let Some(id) = wb.active_tab_id {
@@ -622,6 +799,20 @@ fn handle_action(
             cx.notify();
             r#"{"ok":true}"#.to_string()
         }
+        "approve" => {
+            if wb.test_approve_pending(window, cx) {
+                r#"{"ok":true}"#.to_string()
+            } else {
+                r#"{"error":"no pending approval"}"#.to_string()
+            }
+        }
+        "deny" => {
+            if wb.test_deny_pending(cx) {
+                r#"{"ok":true}"#.to_string()
+            } else {
+                r#"{"error":"no pending approval"}"#.to_string()
+            }
+        }
         _ => {
             format!(r#"{{"error":"unknown action: {action}"}}"#)
         }
@@ -635,17 +826,24 @@ fn handle_eval_js(
     rsp: SyncSender<String>,
     cx: &App,
 ) {
-    // Find the active WebViewTab
-    let active_wv = wb.active_tab_id.and_then(|id| {
-        wb.tabs.iter().find(|t| t.id == id).and_then(|tab| {
-            tab.entity.clone().downcast::<WebViewTab>().ok()
-        })
+    // Find the active tab
+    let active_tab = wb.active_tab_id.and_then(|id| {
+        wb.tabs.iter().find(|t| t.id == id)
     });
 
-    let Some(wv_entity) = active_wv else {
-        let _ = rsp.send(r#"{"error":"no active webview"}"#.to_string());
+    let Some(tab) = active_tab else {
+        let _ = rsp.send(r#"{"error":"no active tab"}"#.to_string());
         return;
     };
+
+    // Check if the tab supports JS eval before registering
+    let can_eval = tab.entity.clone().downcast::<WebViewTab>().is_ok()
+        || tab.entity.clone().downcast::<crate::tabs::SpaTab>().is_ok();
+
+    if !can_eval {
+        let _ = rsp.send(r#"{"error":"active tab does not support JS eval"}"#.to_string());
+        return;
+    }
 
     // Register the pending eval before injecting JS.
     pending_evals()
@@ -660,5 +858,9 @@ fn handle_eval_js(
         id = eval_id,
     );
 
-    wv_entity.read(cx).evaluate_script(&wrapped, cx);
+    if let Ok(entity) = tab.entity.clone().downcast::<WebViewTab>() {
+        entity.read(cx).evaluate_script(&wrapped, cx);
+    } else if let Ok(entity) = tab.entity.clone().downcast::<crate::tabs::SpaTab>() {
+        entity.read(cx).evaluate_script(&wrapped, cx);
+    }
 }

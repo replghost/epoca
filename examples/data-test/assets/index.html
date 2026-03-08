@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Data Connection Test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', monospace;
+    background: #1c1c1e; color: #e0e0e0;
+    padding: 24px; font-size: 13px;
+  }
+  h1 { font-size: 16px; color: #00d4aa; margin-bottom: 16px; }
+  .section { margin-bottom: 20px; }
+  .section h2 { font-size: 12px; text-transform: uppercase; color: #888; margin-bottom: 8px; letter-spacing: 0.5px; }
+  .peer-id {
+    background: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 6px;
+    padding: 10px 14px; font-family: 'SF Mono', monospace; font-size: 13px;
+    color: #00d4aa; cursor: pointer; user-select: all; word-break: break-all;
+  }
+  .peer-id:hover { border-color: #00d4aa; }
+  input {
+    width: 100%; background: #2b2b2b; border: 1px solid #3a3a3a; border-radius: 6px;
+    padding: 10px 14px; color: #e0e0e0; font-family: inherit; font-size: 13px;
+    outline: none;
+  }
+  input:focus { border-color: #00d4aa; }
+  button {
+    background: #00d4aa; color: #1c1c1e; border: none; border-radius: 6px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { background: #00e8bb; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.danger { background: #e5534b; color: #fff; }
+  button.danger:hover { background: #f06860; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  #log {
+    background: #111; border: 1px solid #2a2a2a; border-radius: 6px;
+    padding: 12px; height: 240px; overflow-y: auto; font-family: 'SF Mono', monospace;
+    font-size: 12px; line-height: 1.6;
+  }
+  .log-info { color: #888; }
+  .log-ok { color: #00d4aa; }
+  .log-err { color: #e5534b; }
+  .log-msg { color: #f5a623; }
+  .log-recv { color: #7cb3ff; }
+  .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status.off { background: #555; }
+  .status.pending { background: #f5a623; }
+  .status.on { background: #00d4aa; }
+</style>
+</head>
+<body>
+
+<h1>P2P Data Connection Test</h1>
+
+<div class="section">
+  <h2>Your Peer ID</h2>
+  <div class="peer-id" id="myPeerId" title="Click to copy">loading...</div>
+</div>
+
+<div class="section">
+  <h2><span class="status off" id="connStatus"></span>Connect to Peer</h2>
+  <div class="row">
+    <input id="peerInput" placeholder="Paste remote peer ID" />
+    <button id="connectBtn" onclick="doConnect()">Connect</button>
+    <button id="closeBtn" class="danger" onclick="doClose()" disabled>Close</button>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Send Message</h2>
+  <div class="row">
+    <input id="msgInput" placeholder="Type a message..." onkeydown="if(event.key==='Enter')doSend()" />
+    <button id="sendBtn" onclick="doSend()" disabled>Send</button>
+  </div>
+</div>
+
+<div class="section">
+  <h2>Log</h2>
+  <div id="log"></div>
+</div>
+
+<script>
+  let connId = null;
+
+  const logEl = document.getElementById('log');
+  const peerEl = document.getElementById('myPeerId');
+  const peerInput = document.getElementById('peerInput');
+  const msgInput = document.getElementById('msgInput');
+  const connectBtn = document.getElementById('connectBtn');
+  const closeBtn = document.getElementById('closeBtn');
+  const sendBtn = document.getElementById('sendBtn');
+  const connStatus = document.getElementById('connStatus');
+
+  function log(msg, cls) {
+    const line = document.createElement('div');
+    line.className = cls || 'log-info';
+    line.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setStatus(s) {
+    connStatus.className = 'status ' + s;
+  }
+
+  // Copy peer ID on click
+  peerEl.addEventListener('click', function() {
+    navigator.clipboard.writeText(peerEl.textContent).then(function() {
+      log('Peer ID copied to clipboard', 'log-ok');
+    }).catch(function() {
+      // clipboard might be blocked in sandbox
+    });
+  });
+
+  // Get our peer ID
+  async function init() {
+    try {
+      const id = await window.epoca.data.getPeerId();
+      peerEl.textContent = id;
+      log('Local peer ID: ' + id, 'log-ok');
+    } catch (e) {
+      peerEl.textContent = 'error';
+      log('Failed to get peer ID: ' + e.message, 'log-err');
+    }
+  }
+
+  // Connect
+  async function doConnect() {
+    const peer = peerInput.value.trim();
+    if (!peer) { log('Enter a peer ID first', 'log-err'); return; }
+    if (connId !== null) { log('Already connected', 'log-err'); return; }
+
+    log('Connecting to ' + peer + '...', 'log-info');
+    setStatus('pending');
+    connectBtn.disabled = true;
+
+    try {
+      const result = await window.epoca.data.connect(peer);
+      connId = result;
+      log('Connect initiated, conn_id=' + connId + ' (awaiting approval & signaling)', 'log-ok');
+    } catch (e) {
+      log('Connect failed: ' + e.message, 'log-err');
+      setStatus('off');
+      connectBtn.disabled = false;
+    }
+  }
+
+  // Send
+  async function doSend() {
+    const msg = msgInput.value.trim();
+    if (!msg) return;
+    if (connId === null) { log('Not connected', 'log-err'); return; }
+
+    try {
+      await window.epoca.data.send(connId, msg);
+      log('Sent: ' + msg, 'log-msg');
+      msgInput.value = '';
+    } catch (e) {
+      log('Send failed: ' + e.message, 'log-err');
+    }
+  }
+
+  // Close
+  async function doClose() {
+    if (connId === null) return;
+    try {
+      await window.epoca.data.close(connId);
+      log('Connection closed', 'log-info');
+    } catch (e) {
+      log('Close failed: ' + e.message, 'log-err');
+    }
+    connId = null;
+    setStatus('off');
+    connectBtn.disabled = false;
+    closeBtn.disabled = true;
+    sendBtn.disabled = true;
+  }
+
+  // Listen for data events
+  window.epoca.on('dataConnected', function(data) {
+    log('Connected to peer: ' + data.peerAddress, 'log-ok');
+    connId = data.connId;
+    setStatus('on');
+    connectBtn.disabled = true;
+    closeBtn.disabled = false;
+    sendBtn.disabled = false;
+  });
+
+  window.epoca.on('dataMessage', function(data) {
+    log('Received: ' + data.data, 'log-recv');
+  });
+
+  window.epoca.on('dataClosed', function(data) {
+    log('Connection closed: ' + (data.reason || 'unknown'), 'log-info');
+    connId = null;
+    setStatus('off');
+    connectBtn.disabled = false;
+    closeBtn.disabled = true;
+    sendBtn.disabled = true;
+  });
+
+  window.epoca.on('dataError', function(data) {
+    log('Error: ' + data.error, 'log-err');
+  });
+
+  init();
+</script>
+</body>
+</html>

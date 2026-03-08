@@ -2457,6 +2457,21 @@ fn set_webview_hidden(wv: &gpui_component::wry::WebView, hidden: bool) {
     }
 }
 
+/// On macOS: dim or restore the WKWebView by setting its alphaValue.
+/// Used during approval dialogs so the web content is visually dimmed but
+/// still visible underneath (unlike hiding, which makes it fully black).
+#[cfg(target_os = "macos")]
+fn set_webview_alpha(wv: &gpui_component::wry::WebView, alpha: f64) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+    use gpui_component::wry::WebViewExtMacOS;
+    let wk = wv.webview();
+    unsafe {
+        let obj = &*wk as *const _ as *mut AnyObject;
+        let _: () = msg_send![obj, setAlphaValue: alpha];
+    }
+}
+
 /// On macOS: set WKWebView's CALayer corner radius and masksToBounds so the
 /// web content (including the scrollbar) is hardware-clipped to a rounded rect
 /// at the OS compositor level — exactly what Arc does.
@@ -2680,6 +2695,8 @@ unsafe fn register_console_handler(uc: *mut objc2::runtime::AnyObject) {
                         "warn"  => log::warn!("[js] {msg}"),
                         _       => log::info!("[js] {msg}"),
                     }
+                    #[cfg(feature = "test-server")]
+                    crate::test_server::push_console_log(level, msg);
                 }));
             }
 
@@ -2715,6 +2732,9 @@ pub struct WebViewTab {
     /// Keeps the OmniboxOpen observation alive so the WKWebView is hidden
     /// while the omnibox modal is open (NSView z-order puts it above GPUI).
     _omnibox_subscription: gpui::Subscription,
+    /// Keeps the WebViewDimmed observation alive so the WKWebView is dimmed
+    /// and clicks are blocked while an approval dialog is pending.
+    _dimmed_subscription: gpui::Subscription,
     /// Transparent NSView placed above the WKWebView in the window's NSView
     /// hierarchy to intercept mouse events in the sidebar overlay region.
     /// CALayer masks clip rendering but NOT hit-testing, so without this
@@ -2784,6 +2804,32 @@ impl WebViewTab {
                         .map(|g| g.0)
                         .unwrap_or(0.0);
                     #[cfg(target_os = "macos")]
+                    update_sidebar_blocker(this.sidebar_blocker_ptr, inset);
+                }
+                cx.notify();
+            });
+
+        let _dimmed_subscription =
+            cx.observe_global::<crate::WebViewDimmed>(|this: &mut Self, cx| {
+                let dimmed = cx
+                    .try_global::<crate::WebViewDimmed>()
+                    .map(|g| g.0)
+                    .unwrap_or(false);
+                if let Some(wv_entity) = &this.webview {
+                    let raw = wv_entity.read(cx).raw();
+                    #[cfg(target_os = "macos")]
+                    set_webview_alpha(&raw, if dimmed { 0.15 } else { 1.0 });
+                }
+                // When dimmed, expand the blocker to cover the full webview
+                // so clicks are blocked. When restored, shrink back to sidebar.
+                #[cfg(target_os = "macos")]
+                if dimmed {
+                    update_sidebar_blocker(this.sidebar_blocker_ptr, 10_000.0);
+                } else {
+                    let inset = cx
+                        .try_global::<crate::OverlayLeftInset>()
+                        .map(|g| g.0)
+                        .unwrap_or(0.0);
                     update_sidebar_blocker(this.sidebar_blocker_ptr, inset);
                 }
                 cx.notify();
@@ -2868,6 +2914,7 @@ impl WebViewTab {
             error,
             _inset_subscription,
             _omnibox_subscription,
+            _dimmed_subscription,
             sidebar_blocker_ptr,
             webview_ptr,
             blocked_count: 0,
@@ -3070,10 +3117,15 @@ pub struct SpaTab {
     error: Option<String>,
     _inset_subscription: gpui::Subscription,
     _omnibox_subscription: gpui::Subscription,
+    _dimmed_subscription: gpui::Subscription,
     sidebar_blocker_ptr: u64,
     pub webview_ptr: usize,
     /// Drives cursor hand/arrow via GPUI's window-level cursor override.
     pub cursor_pointer: bool,
+    /// Snapshot of the manifest at construction time, used to rebuild tab on permission grant.
+    manifest_snapshot: epoca_sandbox::bundle::ProdManifest,
+    /// IPFS CID at construction time (for lazy-loaded bundles).
+    ipfs_cid: Option<String>,
 }
 
 impl SpaTab {
@@ -3097,6 +3149,9 @@ impl SpaTab {
             .as_ref()
             .map(|w| w.chain.clone())
             .unwrap_or_else(|| "paseo-asset-hub".into());
+
+        let manifest_snapshot = bundle.manifest.clone();
+        let ipfs_cid_snapshot = bundle.ipfs_cid.clone();
 
         // Register assets so the custom protocol handler can serve them.
         // IPFS-loaded bundles use lazy fetching; local bundles are eager.
@@ -3149,6 +3204,30 @@ impl SpaTab {
                 cx.notify();
             });
 
+        let _dimmed_subscription =
+            cx.observe_global::<crate::WebViewDimmed>(|this: &mut Self, cx| {
+                let dimmed = cx
+                    .try_global::<crate::WebViewDimmed>()
+                    .map(|g| g.0)
+                    .unwrap_or(false);
+                if let Some(wv_entity) = &this.webview {
+                    let raw = wv_entity.read(cx).raw();
+                    #[cfg(target_os = "macos")]
+                    set_webview_alpha(&raw, if dimmed { 0.15 } else { 1.0 });
+                }
+                #[cfg(target_os = "macos")]
+                if dimmed {
+                    update_sidebar_blocker(this.sidebar_blocker_ptr, 10_000.0);
+                } else {
+                    let inset = cx
+                        .try_global::<crate::OverlayLeftInset>()
+                        .map(|g| g.0)
+                        .unwrap_or(0.0);
+                    update_sidebar_blocker(this.sidebar_blocker_ptr, inset);
+                }
+                cx.notify();
+            });
+
         let has_chain_perm = permissions.as_ref().map(|p| p.chain).unwrap_or(false);
         let entry_url = format!("epocaapp://{}/{}", app_id, entry);
         let mut error = None;
@@ -3161,29 +3240,13 @@ impl SpaTab {
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&entry_url)
             .with_incognito(true) // non-persistent data store — fully isolated
-            .with_initialization_script(r#"
-                window.onerror = function(msg, url, line, col, err) {
-                    console.log('[EPOCA-ERR] ' + msg + ' at ' + url + ':' + line + ':' + col);
-                };
-                window.addEventListener('unhandledrejection', function(e) {
-                    console.log('[EPOCA-ERR] unhandled rejection: ' + e.reason);
-                });
-                document.addEventListener('click', function(e) {
-                    var el = e.target;
-                    var tag = el ? el.tagName : '?';
-                    var href = '';
-                    var a = el;
-                    while (a && a.tagName !== 'A') a = a.parentElement;
-                    if (a) href = a.href || '';
-                    console.log('[EPOCA-CLICK] tag=' + tag + ' href=' + href + ' defaultPrevented=' + e.defaultPrevented);
-                }, true);
-            "#)
             .with_initialization_script(CONSOLE_RELAY_SCRIPT)
             .with_initialization_script(crate::spa::HOST_API_SCRIPT)
             .with_initialization_script(epoca_hostapi::HOST_API_BRIDGE_SCRIPT)
             .with_initialization_script(CURSOR_TRACKER_SCRIPT)
             .with_custom_protocol("epocaapp".to_string(), {
                 let app_id_inner = app_id.clone();
+                let chain_perm = has_chain_perm;
                 move |_wv, request| {
                     let uri = request.uri().to_string();
                     log::info!("[spa-proto] request URI: {uri}");
@@ -3197,7 +3260,8 @@ impl SpaTab {
                     let path = if path.is_empty() { "index.html" } else { path };
 
                     log::info!("[spa-proto] app_id={app_id_inner} path={path}");
-                    let csp = "default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' epocaapp: data: blob:; font-src 'self' epocaapp: data:; connect-src 'self' epocaapp:; object-src 'none'; frame-src 'none'";
+                    let connect_src = if chain_perm { "connect-src 'self' epocaapp: wss:" } else { "connect-src 'self' epocaapp:" };
+                    let csp = format!("default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' epocaapp: data: blob:; font-src 'self' epocaapp: data:; {connect_src}; object-src 'none'; frame-src 'none'");
                     // Look up the asset; if not found and the path looks like
                     // an HTML route (no file extension), fall back to index.html
                     // so that client-side routers (Next.js, React Router, etc.)
@@ -3232,15 +3296,26 @@ impl SpaTab {
                                     // Error handlers + click tracker must also be
                                     // inline — with_initialization_script runs in
                                     // an isolated content world on WKWebView.
-                                    let error_handlers = r#"
-window.onerror=function(msg,url,line,col){console.log('[EPOCA-ERR] '+msg+' at '+url+':'+line+':'+col);};
-window.addEventListener('unhandledrejection',function(e){console.log('[EPOCA-ERR] unhandled rejection: '+e.reason);});
-document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagName:'?';console.log('[EPOCA-CLICK] tag='+tag+' href='+(el&&el.href||'')+' defaultPrevented='+e.defaultPrevented);},true);
+                                    let wss_interceptor = r#"
+(function(){
+  var OrigWS=window.WebSocket;
+  window.WebSocket=function(url,protocols){
+    if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaHost){
+      window.webkit.messageHandlers.epocaHost.postMessage({id:0,method:'requestWssPermission',params:{url:String(url)}});
+    }
+    return protocols?new OrigWS(url,protocols):new OrigWS(url);
+  };
+  window.WebSocket.prototype=OrigWS.prototype;
+  window.WebSocket.CONNECTING=OrigWS.CONNECTING;
+  window.WebSocket.OPEN=OrigWS.OPEN;
+  window.WebSocket.CLOSING=OrigWS.CLOSING;
+  window.WebSocket.CLOSED=OrigWS.CLOSED;
+})();
 "#;
                                     let inject = format!(
                                         "<script>{}</script><script>{}</script><script>{}</script><script>{}</script>",
                                         CONSOLE_RELAY_SCRIPT,
-                                        error_handlers,
+                                        wss_interceptor,
                                         crate::spa::HOST_API_SCRIPT,
                                         epoca_hostapi::HOST_API_BRIDGE_SCRIPT,
                                     );
@@ -3276,7 +3351,7 @@ document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagN
                             gpui_component::wry::http::Response::builder()
                                 .status(404)
                                 .header("Content-Type", "text/plain")
-                                .header("Content-Security-Policy", csp)
+                                .header("Content-Security-Policy", csp.clone())
                                 .header("Access-Control-Allow-Origin", "*")
                                 .body(std::borrow::Cow::Borrowed(b"404 Not Found" as &[u8]))
                                 .unwrap()
@@ -3317,6 +3392,8 @@ document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagN
                                 crate::host::register_hostapi_handler(uc, webview_ptr);
                                 crate::shield::register_cursor_handler(uc, webview_ptr);
                                 register_console_handler(uc);
+                                #[cfg(feature = "test-server")]
+                                crate::test_server::register_test_result_handler(uc, webview_ptr);
                             }
                         }
                     }
@@ -3346,9 +3423,12 @@ document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagN
             error,
             _inset_subscription,
             _omnibox_subscription,
+            _dimmed_subscription,
             sidebar_blocker_ptr,
             webview_ptr,
             cursor_pointer: false,
+            manifest_snapshot,
+            ipfs_cid: ipfs_cid_snapshot,
         }
     }
 
@@ -3374,6 +3454,18 @@ document.addEventListener('click',function(e){var el=e.target;var tag=el?el.tagN
 
     pub fn has_permission_data(&self) -> bool {
         self.permissions.as_ref().map(|p| p.data).unwrap_or(false)
+    }
+
+    pub fn has_permission_sign(&self) -> bool {
+        self.permissions.as_ref().map(|p| p.sign).unwrap_or(false)
+    }
+
+    pub fn manifest_snapshot(&self) -> &epoca_sandbox::bundle::ProdManifest {
+        &self.manifest_snapshot
+    }
+
+    pub fn ipfs_cid_snapshot(&self) -> Option<&str> {
+        self.ipfs_cid.as_deref()
     }
 
     /// Returns the list of granted media capabilities (e.g. ["camera", "audio"]).

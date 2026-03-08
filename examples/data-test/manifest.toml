@@ -1,0 +1,14 @@
+[app]
+id = "com.epoca.data-test"
+name = "Data Connection Test"
+version = "0.1.0"
+app_type = "spa"
+
+[webapp]
+entry = "index.html"
+sandbox = "strict"
+chain = "paseo-asset-hub"
+
+[permissions]
+statements = true
+data = true

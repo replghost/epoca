@@ -6,8 +6,59 @@
 //! chain client threads via `epoca_chain::rpc_bridge`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::collections::HashMap;
 
 use epoca_chain::ChainId;
+
+/// Cached chain metadata (populated lazily from runtime version + genesis hash queries).
+#[derive(Clone)]
+pub struct ChainMetaCache {
+    pub spec_version: u32,
+    pub tx_version: u32,
+    pub genesis_hash: [u8; 32],
+}
+
+static CHAIN_META: OnceLock<Mutex<HashMap<ChainId, ChainMetaCache>>> = OnceLock::new();
+
+fn chain_meta_map() -> &'static Mutex<HashMap<ChainId, ChainMetaCache>> {
+    CHAIN_META.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Store (or update) cached chain metadata for the given chain.
+pub fn cache_chain_meta(chain: ChainId, meta: ChainMetaCache) {
+    chain_meta_map().lock().unwrap().insert(chain, meta);
+}
+
+/// Retrieve cached chain metadata for the given chain, if available.
+pub fn get_chain_meta(chain: ChainId) -> Option<ChainMetaCache> {
+    chain_meta_map().lock().unwrap().get(&chain).cloned()
+}
+
+/// Issue an internal query that is NOT routed back to a JS promise.
+/// Uses `webview_ptr = 0` as a sentinel so the drain loop can distinguish
+/// internal responses from app-originated responses.
+pub fn submit_internal_query(
+    chain: ChainId,
+    js_id: u64,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<(), String> {
+    let corr_id = NEXT_CORR_ID.fetch_add(1, Ordering::Relaxed);
+    let json_rpc = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": corr_id,
+        "method": method,
+        "params": params,
+    })
+    .to_string();
+
+    // webview_ptr = 0 is the internal sentinel.
+    epoca_chain::rpc_bridge::register_correlation(corr_id, 0, js_id);
+    epoca_chain::rpc_bridge::enqueue_request(chain, corr_id, json_rpc);
+    log::info!("[chain-api] internal query {method} corr={corr_id} js_id={js_id}");
+    Ok(())
+}
 
 /// Monotonic correlation ID for tracking requests across threads.
 static NEXT_CORR_ID: AtomicU64 = AtomicU64::new(1);
