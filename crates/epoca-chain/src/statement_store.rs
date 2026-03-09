@@ -521,14 +521,21 @@ pub fn shutdown() {
 /// Quick connectivity check — tries to reach any statement store endpoint.
 /// Returns Ok(endpoint) on success, Err(message) if all endpoints are unreachable.
 pub fn ping() -> Result<String, String> {
+    use std::net::ToSocketAddrs;
     use std::net::TcpStream;
     use std::time::Duration;
     use tungstenite::client::IntoClientRequest;
 
+    let mut last_err = String::new();
+
     for endpoint in SS_ENDPOINTS {
         let request = match endpoint.into_client_request() {
             Ok(r) => r,
-            Err(_) => continue,
+            Err(e) => {
+                last_err = format!("{endpoint}: bad URL: {e}");
+                log::warn!("[ss] ping: {last_err}");
+                continue;
+            }
         };
         let host = match request.uri().host() {
             Some(h) => h.to_string(),
@@ -536,24 +543,37 @@ pub fn ping() -> Result<String, String> {
         };
         let port = request.uri().port_u16().unwrap_or(443);
 
-        // TCP connect with 3s timeout — just checks reachability
-        let addr: std::net::SocketAddr = match format!("{host}:{port}").parse() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
-            Ok(_) => return Ok(endpoint.to_string()),
+        // Resolve hostname to IP, then TCP connect with timeout
+        let addr = match format!("{host}:{port}").to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => a,
+                None => {
+                    last_err = format!("{endpoint}: DNS returned no addresses");
+                    log::warn!("[ss] ping: {last_err}");
+                    continue;
+                }
+            },
             Err(e) => {
-                log::warn!("[ss] ping failed for {endpoint}: {e}");
+                last_err = format!("{endpoint}: DNS failed: {e}");
+                log::warn!("[ss] ping: {last_err}");
+                continue;
+            }
+        };
+
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            Ok(_) => {
+                log::info!("[ss] ping: {endpoint} reachable");
+                return Ok(endpoint.to_string());
+            }
+            Err(e) => {
+                last_err = format!("{endpoint}: {e}");
+                log::warn!("[ss] ping: {last_err}");
                 continue;
             }
         }
     }
 
-    Err(format!(
-        "statement store unreachable — tried {} endpoints",
-        SS_ENDPOINTS.len()
-    ))
+    Err(format!("statement store unreachable: {last_err}"))
 }
 
 /// Statement store status for the settings status panel.
