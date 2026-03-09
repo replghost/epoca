@@ -890,10 +890,10 @@ pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
             if let Ok(s) = std::str::from_utf8(raw) {
                 // Detect SPA: not an explicit framebuffer type and no legacy framebuffer=true flag.
                 let is_spa = !s.contains("app_type = \"framebuffer\"") && !s.contains("framebuffer = true");
-                if !is_spa {
+                if is_spa {
                     log::info!("[dotns] SPA bundle, skipping eager file fetch");
                 } else {
-                    log::info!("[dotns] non-SPA bundle, fetching all files...");
+                    log::info!("[dotns] framebuffer/application bundle, fetching all files...");
                     match fetch_ipfs(&cid) {
                         Ok(files) => {
                             log::info!("[dotns] fetched {} files from IPFS", files.len());
