@@ -565,6 +565,10 @@ fn run_webrtc_offerer(
     data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     signal_rx: &std::sync::mpsc::Receiver<crate::statements_api::Statement>,
 ) -> Result<(), String> {
+    // Health check: verify statement store is reachable before signaling.
+    epoca_chain::statement_store::ping()
+        .map_err(|e| format!("signaling unavailable: {e}"))?;
+
     let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
     let mut rtc = Rtc::builder()
@@ -623,6 +627,10 @@ fn run_webrtc_answerer(
     running: &AtomicBool,
     data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), String> {
+    // Health check: verify statement store is reachable before signaling.
+    epoca_chain::statement_store::ping()
+        .map_err(|e| format!("signaling unavailable: {e}"))?;
+
     let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
     let mut rtc = Rtc::builder()
@@ -1006,7 +1014,8 @@ fn signaling_and_ice_loop(
             }
         }
 
-        // Drive str0m.
+        // Drive str0m — must feed timeout before polling.
+        let _ = rtc.handle_input(Input::Timeout(Instant::now()));
         match rtc.poll_output() {
             Ok(Output::Transmit(tx)) => {
                 let _ = socket.send_to(&tx.contents, tx.destination);
@@ -1079,6 +1088,7 @@ fn signaling_and_ice_loop(
     // Connected — run data loop until closed.
     log::info!("[data] conn={conn_id} entering data loop");
     while running.load(Ordering::Acquire) {
+        let _ = rtc.handle_input(Input::Timeout(Instant::now()));
         match rtc.poll_output() {
             Ok(Output::Transmit(tx)) => {
                 let _ = socket.send_to(&tx.contents, tx.destination);

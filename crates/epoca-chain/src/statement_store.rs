@@ -519,6 +519,44 @@ pub fn shutdown() {
     *st = None;
 }
 
+/// Quick connectivity check — tries to reach any statement store endpoint.
+/// Returns Ok(endpoint) on success, Err(message) if all endpoints are unreachable.
+pub fn ping() -> Result<String, String> {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    use tungstenite::client::IntoClientRequest;
+
+    for endpoint in SS_ENDPOINTS {
+        let request = match endpoint.into_client_request() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let host = match request.uri().host() {
+            Some(h) => h.to_string(),
+            None => continue,
+        };
+        let port = request.uri().port_u16().unwrap_or(443);
+
+        // TCP connect with 3s timeout — just checks reachability
+        let addr: std::net::SocketAddr = match format!("{host}:{port}").parse() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+            Ok(_) => return Ok(endpoint.to_string()),
+            Err(e) => {
+                log::warn!("[ss] ping failed for {endpoint}: {e}");
+                continue;
+            }
+        }
+    }
+
+    Err(format!(
+        "statement store unreachable — tried {} endpoints",
+        SS_ENDPOINTS.len()
+    ))
+}
+
 /// Statement store status for the settings status panel.
 #[derive(Debug, Clone)]
 pub enum StoreStatus {
