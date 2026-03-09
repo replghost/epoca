@@ -23,10 +23,9 @@ use std::sync::{
 /// Topic = 32-byte blake2b hash.
 pub type Topic = [u8; 32];
 
-/// WebSocket endpoints for PoP testnet (statement store enabled).
+/// WebSocket endpoints with statement store pallet.
 const SS_ENDPOINTS: &[&str] = &[
-    "wss://pop-testnet.parity-lab.parity.io:443/9910",
-    "wss://pop3-testnet.parity-lab.parity.io:443/7910",
+    "wss://previewnet.substrate.dev/people",
 ];
 
 /// Hash a string into a 32-byte Topic (blake2b-256).
@@ -286,7 +285,7 @@ pub fn rpc_submit(encoded_statement: &[u8]) -> Result<(), String> {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "statement_store_submit",
+        "method": "statement_submit",
         "params": [hex_encode(encoded_statement)]
     });
     let payload_str = payload.to_string();
@@ -325,7 +324,7 @@ pub fn rpc_get_broadcasts(topics: &[Topic]) -> Result<Vec<Statement>, String> {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
-        "method": "statement_store_broadcasts",
+        "method": "statement_broadcastsStatement",
         "params": [topic_hexes]
     });
     let payload_str = payload.to_string();
