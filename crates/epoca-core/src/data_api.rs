@@ -161,12 +161,14 @@ fn peer_id_for(st: &mut DataState, webview_ptr: usize) -> String {
 
 /// Channel where initiator publishes their SDP offer, targeted at the receiver.
 fn offer_channel(app_id: &str, target_peer: &str) -> String {
-    format!("{app_id}-offer-to-{target_peer}")
+    // Normalize to lowercase — peer IDs are generated lowercase but may be
+    // entered with different casing from the UI.
+    format!("{app_id}-offer-to-{}", target_peer.to_lowercase())
 }
 
 /// Channel where receiver publishes their SDP answer, targeted at the initiator.
 fn answer_channel(app_id: &str, target_peer: &str) -> String {
-    format!("{app_id}-answer-to-{target_peer}")
+    format!("{app_id}-answer-to-{}", target_peer.to_lowercase())
 }
 
 // ---------------------------------------------------------------------------
