@@ -608,14 +608,54 @@ fn run_webrtc_offerer(
     crate::statements_api::write(app_id, local_peer_id, &off_ch, &payload.to_string())
         .map_err(|e| format!("publish offer: {e}"))?;
 
-    // Wait for answer.
-    let mut pending_offer = Some(pending);
+    // Block-wait for the SDP answer BEFORE entering the ICE loop.
+    // DTLS is only initialized when accept_answer() calls set_active(), so calling
+    // poll_output() before that causes a dimpl panic ("need handle_timeout before
+    // poll_output").  We solve this by receiving the answer in a simple blocking
+    // loop that never touches poll_output.
+    let answer_timeout = Duration::from_secs(30);
+    let wait_start = Instant::now();
+    let answer_sdp = loop {
+        if !running.load(Ordering::Acquire) {
+            return Err("connection stopped while waiting for answer".into());
+        }
+        if wait_start.elapsed() > answer_timeout {
+            return Err("signaling timeout: no answer received (30s)".into());
+        }
+        match signal_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(stmt) => {
+                let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let sdp_str = json.get("sdp").and_then(|v| v.as_str()).unwrap_or("");
+                if msg_type == "answer" && !sdp_str.is_empty() {
+                    break sdp_str.to_string();
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("signaling channel disconnected".into());
+            }
+        }
+    };
+
+    log::info!("[data] conn={conn_id} received answer, accepting");
+    let answer = SdpAnswer::from_sdp_string(&answer_sdp)
+        .map_err(|e| format!("parse answer SDP: {e}"))?;
+    rtc.sdp_api()
+        .accept_answer(pending, answer)
+        .map_err(|e| format!("accept answer: {e}"))?;
+    log::info!("[data] conn={conn_id} answer accepted, starting ICE");
+
+    // Now DTLS is initialized — safe to enter the poll_output loop.
     let mut data_ch_id = Some(ch_id);
 
     signaling_and_ice_loop(
         conn_id, app_id, webview_ptr, local_peer_id, peer_address,
         &socket, local_addr, &mut rtc, running, data_rx,
-        &mut data_ch_id, &mut pending_offer, Some(signal_rx), true,
+        &mut data_ch_id, &mut None, None, true,
     )
 }
 
