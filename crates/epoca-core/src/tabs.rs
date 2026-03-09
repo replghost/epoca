@@ -3578,6 +3578,34 @@ impl SpaTab {
                         let config: *mut objc2::runtime::AnyObject =
                             objc2::msg_send![obj, configuration];
                         if !config.is_null() {
+                            // Enable media capture (camera/mic) on WKPreferences.
+                            // Without this, navigator.mediaDevices is undefined on
+                            // custom URL schemes (epocaapp://).
+                            let prefs: *mut objc2::runtime::AnyObject =
+                                objc2::msg_send![config, preferences];
+                            if !prefs.is_null() {
+                                let yes: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                    objc2::runtime::AnyClass::get("NSNumber").unwrap(),
+                                    numberWithBool: true
+                                ];
+                                let key: *mut objc2::runtime::AnyObject = {
+                                    let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
+                                    let alloc: *mut objc2::runtime::AnyObject =
+                                        objc2::msg_send![cls, alloc];
+                                    let s = b"_mediaCaptureEnabled";
+                                    objc2::msg_send![
+                                        alloc,
+                                        initWithBytes: s.as_ptr() as *const std::ffi::c_void
+                                        length: s.len()
+                                        encoding: 4u64
+                                    ]
+                                };
+                                let _: () = objc2::msg_send![
+                                    prefs, setValue: yes forKey: key
+                                ];
+                                log::info!("[spa] enabled _mediaCaptureEnabled on WKPreferences");
+                            }
+
                             let uc: *mut objc2::runtime::AnyObject =
                                 objc2::msg_send![config, userContentController];
                             if !uc.is_null() {
