@@ -40,17 +40,14 @@ pub fn string_to_topic(s: &str) -> Topic {
 
 // ---------------------------------------------------------------------------
 // Statement binary encoding (sp-statement-store compatible)
+//
+// Substrate format: Compact<u32> field count, then tagged fields in order.
+// Field tags: 0=Proof, 1=DecryptionKey, 2=Expiry, 3=Channel, 4-7=Topics, 8=Data
+// Each field: u8 tag + SCALE-encoded payload.
+// Proof::Sr25519 = tag 0, variant 0, sig[64], signer[32].
+// Data = tag 8, Compact<u32> length, bytes.
+// Signing payload: same fields without Compact prefix and without Proof field.
 // ---------------------------------------------------------------------------
-
-const PROOF_MASK: u8 = 0x01;
-const DECRYPTION_KEY_MASK: u8 = 0x02;
-const CHANNEL_MASK: u8 = 0x04;
-const PRIORITY_MASK: u8 = 0x08;
-const TOPIC_MASK: u8 = 0x10;
-const DATA_MASK: u8 = 0x20;
-
-/// Proof type bytes.
-const PROOF_SR25519: u8 = 1;
 
 /// A decoded statement from the statement store.
 #[derive(Debug, Clone)]
@@ -63,11 +60,61 @@ pub struct Statement {
     pub data: Vec<u8>,
 }
 
-/// Encode a statement into the sp-statement-store binary format.
+/// Encode SCALE Compact<u32>.
+fn encode_compact_u32(val: u32) -> Vec<u8> {
+    if val < 0x40 {
+        vec![(val as u8) << 2]
+    } else if val < 0x4000 {
+        let v = (val << 2) | 0x01;
+        vec![v as u8, (v >> 8) as u8]
+    } else if val < 0x4000_0000 {
+        let v = (val << 2) | 0x02;
+        v.to_le_bytes().to_vec()
+    } else {
+        let mut out = vec![0x03];
+        out.extend_from_slice(&val.to_le_bytes());
+        out
+    }
+}
+
+/// Decode SCALE Compact<u32>, returns (value, bytes_consumed).
+fn decode_compact_u32(data: &[u8]) -> Result<(u32, usize), String> {
+    if data.is_empty() {
+        return Err("compact: empty".into());
+    }
+    let mode = data[0] & 0x03;
+    match mode {
+        0 => Ok(((data[0] >> 2) as u32, 1)),
+        1 => {
+            if data.len() < 2 {
+                return Err("compact: truncated 2-byte".into());
+            }
+            let v = u16::from_le_bytes([data[0], data[1]]) >> 2;
+            Ok((v as u32, 2))
+        }
+        2 => {
+            if data.len() < 4 {
+                return Err("compact: truncated 4-byte".into());
+            }
+            let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) >> 2;
+            Ok((v, 4))
+        }
+        3 => {
+            if data.len() < 5 {
+                return Err("compact: truncated big".into());
+            }
+            let v = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+            Ok((v, 5))
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Encode a statement into the sp-statement-store SCALE binary format.
 ///
-/// The `sr25519_pubkey` and `sr25519_sign` callback are used to produce
-/// the proof. The signature is over `blake2b_256(plain_data)` where
-/// `plain_data` is all encoded fields except the mask byte and proof.
+/// Format: Compact<u32> field_count, then each field as (u8 tag, SCALE payload).
+/// The signature is over blake2b_256 of the signing payload (fields without
+/// the Compact prefix and without the Proof field).
 pub fn encode_statement(
     decryption_key: Option<&Topic>,
     channel: Option<&Topic>,
@@ -77,163 +124,201 @@ pub fn encode_statement(
     sr25519_pubkey: &[u8; 32],
     sr25519_sign: &dyn Fn(&[u8]) -> [u8; 64],
 ) -> Vec<u8> {
-    // Build mask.
-    let mut mask: u8 = PROOF_MASK; // always include proof
+    assert!(topics.len() <= 4, "max 4 topics");
+
+    // Expiry: upper 32 bits = timestamp (seconds), lower 32 bits = priority.
+    // Use a timestamp far in the future to avoid "alreadyExpired".
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expiry_ts = (now_secs + 3600) as u32; // 1 hour from now
+    let expiry: u64 = ((expiry_ts as u64) << 32) | (priority as u64);
+
+    // Count fields (excluding proof, which is added separately).
+    let mut num_fields: u32 = 1; // proof always present
     if decryption_key.is_some() {
-        mask |= DECRYPTION_KEY_MASK;
+        num_fields += 1;
     }
+    num_fields += 1; // expiry always present
     if channel.is_some() {
-        mask |= CHANNEL_MASK;
+        num_fields += 1;
     }
-    if priority != 0 {
-        mask |= PRIORITY_MASK;
-    }
-    if !topics.is_empty() {
-        mask |= TOPIC_MASK;
-    }
+    num_fields += topics.len() as u32;
     if !data.is_empty() {
-        mask |= DATA_MASK;
+        num_fields += 1;
     }
 
-    // Encode plain_data (everything except mask and proof).
-    let mut plain = Vec::new();
+    // Build signing payload (fields without Compact prefix and without Proof).
+    let mut sign_payload = Vec::new();
     if let Some(dk) = decryption_key {
-        plain.extend_from_slice(dk);
+        sign_payload.push(1u8); // tag: DecryptionKey
+        sign_payload.extend_from_slice(dk);
     }
+    sign_payload.push(2u8); // tag: Expiry
+    sign_payload.extend_from_slice(&expiry.to_le_bytes());
     if let Some(ch) = channel {
-        plain.extend_from_slice(ch);
+        sign_payload.push(3u8); // tag: Channel
+        sign_payload.extend_from_slice(ch);
     }
-    if priority != 0 {
-        plain.extend_from_slice(&priority.to_le_bytes());
-    }
-    if !topics.is_empty() {
-        assert!(topics.len() <= 255, "too many topics (max 255)");
-        plain.push(topics.len() as u8);
-        for t in topics {
-            plain.extend_from_slice(t);
-        }
+    for (i, t) in topics.iter().enumerate() {
+        sign_payload.push(4u8 + i as u8); // tag: Topic1..4
+        sign_payload.extend_from_slice(t);
     }
     if !data.is_empty() {
-        plain.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        plain.extend_from_slice(data);
+        sign_payload.push(8u8); // tag: Data
+        sign_payload.extend_from_slice(&encode_compact_u32(data.len() as u32));
+        sign_payload.extend_from_slice(data);
     }
 
-    // Sign blake2b_256(plain_data).
-    let hash = blake2b_256(&plain);
+    // Sign blake2b_256(signing_payload).
+    let hash = blake2b_256(&sign_payload);
     let signature = sr25519_sign(&hash);
 
-    // Assemble: mask || proof || plain_data.
-    let mut out = Vec::with_capacity(1 + 1 + 32 + 64 + plain.len());
-    out.push(mask);
-    // Proof: type(1) + pubkey(32) + sig(64) = 97 bytes
-    out.push(PROOF_SR25519);
-    out.extend_from_slice(sr25519_pubkey);
-    out.extend_from_slice(&signature);
-    out.extend_from_slice(&plain);
+    // Assemble full encoded statement.
+    let mut out = Vec::new();
+
+    // Compact<u32> field count prefix.
+    out.extend_from_slice(&encode_compact_u32(num_fields));
+
+    // Field 0: AuthenticityProof (Proof::Sr25519 = variant 0)
+    out.push(0u8); // tag: AuthenticityProof
+    out.push(0u8); // Proof variant 0 = Sr25519
+    out.extend_from_slice(&signature); // signature first in Sr25519 struct
+    out.extend_from_slice(sr25519_pubkey); // then signer
+
+    // Remaining fields (same as sign_payload).
+    out.extend_from_slice(&sign_payload);
 
     out
 }
 
-/// Decode a statement from its binary encoding.
+/// Decode a statement from SCALE binary encoding (sp-statement-store format).
 pub fn decode_statement(encoded: &[u8]) -> Result<Statement, String> {
     if encoded.is_empty() {
         return Err("empty statement".into());
     }
 
-    let mask = encoded[0];
-    let mut pos = 1;
+    let (num_fields, mut pos) = decode_compact_u32(encoded)?;
 
-    // Skip proof.
     let mut proof_pubkey = None;
-    if mask & PROOF_MASK != 0 {
-        if pos >= encoded.len() {
-            return Err("truncated proof type".into());
-        }
-        let proof_type = encoded[pos];
-        pos += 1;
-        let key_sig_len = match proof_type {
-            PROOF_SR25519 | 2 => 32 + 64, // sr25519 or ed25519
-            _ => return Err(format!("unknown proof type: {proof_type}")),
-        };
-        if pos + key_sig_len > encoded.len() {
-            return Err("truncated proof".into());
-        }
-        let mut pk = [0u8; 32];
-        pk.copy_from_slice(&encoded[pos..pos + 32]);
-        proof_pubkey = Some(pk);
-        pos += key_sig_len;
-    }
-
     let mut decryption_key = None;
-    if mask & DECRYPTION_KEY_MASK != 0 {
-        if pos + 32 > encoded.len() {
-            return Err("truncated decryption_key".into());
-        }
-        let mut dk = [0u8; 32];
-        dk.copy_from_slice(&encoded[pos..pos + 32]);
-        decryption_key = Some(dk);
-        pos += 32;
-    }
-
     let mut channel = None;
-    if mask & CHANNEL_MASK != 0 {
-        if pos + 32 > encoded.len() {
-            return Err("truncated channel".into());
-        }
-        let mut ch = [0u8; 32];
-        ch.copy_from_slice(&encoded[pos..pos + 32]);
-        channel = Some(ch);
-        pos += 32;
-    }
-
     let mut priority = 0u32;
-    if mask & PRIORITY_MASK != 0 {
-        if pos + 4 > encoded.len() {
-            return Err("truncated priority".into());
-        }
-        priority = u32::from_le_bytes([
-            encoded[pos],
-            encoded[pos + 1],
-            encoded[pos + 2],
-            encoded[pos + 3],
-        ]);
-        pos += 4;
-    }
-
     let mut topics = Vec::new();
-    if mask & TOPIC_MASK != 0 {
-        if pos >= encoded.len() {
-            return Err("truncated topic count".into());
-        }
-        let count = encoded[pos] as usize;
-        pos += 1;
-        for _ in 0..count {
-            if pos + 32 > encoded.len() {
-                return Err("truncated topic".into());
-            }
-            let mut t = [0u8; 32];
-            t.copy_from_slice(&encoded[pos..pos + 32]);
-            topics.push(t);
-            pos += 32;
-        }
-    }
-
     let mut data = Vec::new();
-    if mask & DATA_MASK != 0 {
-        if pos + 4 > encoded.len() {
-            return Err("truncated data length".into());
+
+    for _ in 0..num_fields {
+        if pos >= encoded.len() {
+            return Err("truncated field tag".into());
         }
-        let data_len = u32::from_le_bytes([
-            encoded[pos],
-            encoded[pos + 1],
-            encoded[pos + 2],
-            encoded[pos + 3],
-        ]) as usize;
-        pos += 4;
-        if pos + data_len > encoded.len() {
-            return Err("truncated data".into());
+        let tag = encoded[pos];
+        pos += 1;
+
+        match tag {
+            0 => {
+                // AuthenticityProof
+                if pos >= encoded.len() {
+                    return Err("truncated proof variant".into());
+                }
+                let variant = encoded[pos];
+                pos += 1;
+                match variant {
+                    0 | 1 => {
+                        // Sr25519 or Ed25519: sig[64] + signer[32]
+                        if pos + 96 > encoded.len() {
+                            return Err("truncated proof".into());
+                        }
+                        let mut pk = [0u8; 32];
+                        pk.copy_from_slice(&encoded[pos + 64..pos + 96]);
+                        proof_pubkey = Some(pk);
+                        pos += 96;
+                    }
+                    2 => {
+                        // Secp256k1: sig[65] + signer[33]
+                        if pos + 98 > encoded.len() {
+                            return Err("truncated secp proof".into());
+                        }
+                        pos += 98;
+                    }
+                    3 => {
+                        // OnChain: who[32] + block_hash[32] + u64
+                        if pos + 72 > encoded.len() {
+                            return Err("truncated onchain proof".into());
+                        }
+                        let mut pk = [0u8; 32];
+                        pk.copy_from_slice(&encoded[pos..pos + 32]);
+                        proof_pubkey = Some(pk);
+                        pos += 72;
+                    }
+                    _ => return Err(format!("unknown proof variant: {variant}")),
+                }
+            }
+            1 => {
+                // DecryptionKey [32]
+                if pos + 32 > encoded.len() {
+                    return Err("truncated decryption_key".into());
+                }
+                let mut dk = [0u8; 32];
+                dk.copy_from_slice(&encoded[pos..pos + 32]);
+                decryption_key = Some(dk);
+                pos += 32;
+            }
+            2 => {
+                // Expiry u64 — upper 32 = timestamp, lower 32 = priority
+                if pos + 8 > encoded.len() {
+                    return Err("truncated expiry".into());
+                }
+                let expiry = u64::from_le_bytes([
+                    encoded[pos],
+                    encoded[pos + 1],
+                    encoded[pos + 2],
+                    encoded[pos + 3],
+                    encoded[pos + 4],
+                    encoded[pos + 5],
+                    encoded[pos + 6],
+                    encoded[pos + 7],
+                ]);
+                priority = expiry as u32; // lower 32 bits
+                pos += 8;
+            }
+            3 => {
+                // Channel [32]
+                if pos + 32 > encoded.len() {
+                    return Err("truncated channel".into());
+                }
+                let mut ch = [0u8; 32];
+                ch.copy_from_slice(&encoded[pos..pos + 32]);
+                channel = Some(ch);
+                pos += 32;
+            }
+            4..=7 => {
+                // Topic [32]
+                if pos + 32 > encoded.len() {
+                    return Err("truncated topic".into());
+                }
+                let mut t = [0u8; 32];
+                t.copy_from_slice(&encoded[pos..pos + 32]);
+                topics.push(t);
+                pos += 32;
+            }
+            8 => {
+                // Data: Compact<u32> length + bytes
+                let (data_len, consumed) =
+                    decode_compact_u32(&encoded[pos..]).map_err(|e| format!("data len: {e}"))?;
+                pos += consumed;
+                let data_len = data_len as usize;
+                if pos + data_len > encoded.len() {
+                    return Err("truncated data".into());
+                }
+                data = encoded[pos..pos + data_len].to_vec();
+                pos += data_len;
+            }
+            _ => {
+                // Unknown field — can't decode further without knowing size.
+                return Err(format!("unknown field tag: {tag}"));
+            }
         }
-        data = encoded[pos..pos + data_len].to_vec();
     }
 
     Ok(Statement {
