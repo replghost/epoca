@@ -3414,43 +3414,6 @@ impl SpaTab {
 
         log::info!("[spa] entry_url={entry_url} app_id={app_id} chain_perm={has_chain_perm} network={network_origins:?}");
 
-        // Register epocaapp:// as a secure URL scheme (once) so that
-        // navigator.mediaDevices and other secure-context APIs are available.
-        #[cfg(target_os = "macos")]
-        {
-            static ONCE: std::sync::Once = std::sync::Once::new();
-            ONCE.call_once(|| {
-                use objc2::msg_send;
-                use objc2::runtime::{AnyClass, AnyObject};
-                unsafe {
-                    // Create a temporary WKWebViewConfiguration to access the
-                    // default shared WKProcessPool.
-                    let cfg_cls = AnyClass::get("WKWebViewConfiguration").unwrap();
-                    let cfg: *mut AnyObject = msg_send![cfg_cls, new];
-                    let pool: *mut AnyObject = msg_send![cfg, processPool];
-                    if !pool.is_null() {
-                        let sel = objc2::sel!(_registerURLSchemeAsSecure:);
-                        let responds: bool = msg_send![pool, respondsToSelector: sel];
-                        if responds {
-                            let cls = AnyClass::get("NSString").unwrap();
-                            let alloc: *mut AnyObject = msg_send![cls, alloc];
-                            let s = b"epocaapp";
-                            let scheme: *mut AnyObject = msg_send![
-                                alloc,
-                                initWithBytes: s.as_ptr() as *const std::ffi::c_void
-                                length: s.len()
-                                encoding: 4u64
-                            ];
-                            let _: () = msg_send![pool, _registerURLSchemeAsSecure: scheme];
-                            log::info!("[spa] registered epocaapp:// as secure scheme");
-                        } else {
-                            log::warn!("[spa] WKProcessPool does not respond to _registerURLSchemeAsSecure:");
-                        }
-                    }
-                }
-            });
-        }
-
         // Build the SPA WebView with custom protocol + host API injection.
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&entry_url)
@@ -3616,19 +3579,56 @@ impl SpaTab {
                         let config: *mut objc2::runtime::AnyObject =
                             objc2::msg_send![obj, configuration];
                         if !config.is_null() {
-                            // Enable media capture on WKPreferences (private API).
-                            // Use respondsToSelector to avoid crash if API is absent.
-                            let prefs: *mut objc2::runtime::AnyObject =
-                                objc2::msg_send![config, preferences];
-                            if !prefs.is_null() {
-                                let sel = objc2::sel!(_setMediaCaptureEnabled:);
-                                let responds: bool =
-                                    objc2::msg_send![prefs, respondsToSelector: sel];
-                                if responds {
-                                    let _: () = objc2::msg_send![prefs, _setMediaCaptureEnabled: true];
-                                    log::info!("[spa] enabled _mediaCaptureEnabled on WKPreferences");
-                                } else {
-                                    log::warn!("[spa] WKPreferences does not respond to _setMediaCaptureEnabled:");
+                            // Register epocaapp:// as secure on the ACTUAL
+                            // process pool so navigator.mediaDevices is available.
+                            {
+                                static ONCE: std::sync::Once = std::sync::Once::new();
+                                let pool: *mut objc2::runtime::AnyObject =
+                                    objc2::msg_send![config, processPool];
+                                if !pool.is_null() {
+                                    ONCE.call_once(|| {
+                                        // _registerURLSchemeAsSecure:
+                                        let sel = objc2::sel!(_registerURLSchemeAsSecure:);
+                                        let responds: bool =
+                                            objc2::msg_send![pool, respondsToSelector: sel];
+                                        if responds {
+                                            let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
+                                            let alloc: *mut objc2::runtime::AnyObject =
+                                                objc2::msg_send![cls, alloc];
+                                            let s = b"epocaapp";
+                                            let scheme: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                                alloc,
+                                                initWithBytes: s.as_ptr() as *const std::ffi::c_void
+                                                length: s.len()
+                                                encoding: 4u64
+                                            ];
+                                            let _: () = objc2::msg_send![pool, _registerURLSchemeAsSecure: scheme];
+                                            log::info!("[spa] registered epocaapp:// as secure on actual pool");
+                                        } else {
+                                            log::warn!("[spa] WKProcessPool missing _registerURLSchemeAsSecure:");
+                                        }
+                                        // _registerURLSchemeAsCORSEnabled:
+                                        let sel2 = objc2::sel!(_registerURLSchemeAsCORSEnabled:);
+                                        let responds2: bool =
+                                            objc2::msg_send![pool, respondsToSelector: sel2];
+                                        if responds2 {
+                                            let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
+                                            let alloc: *mut objc2::runtime::AnyObject =
+                                                objc2::msg_send![cls, alloc];
+                                            let s = b"epocaapp";
+                                            let scheme: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                                alloc,
+                                                initWithBytes: s.as_ptr() as *const std::ffi::c_void
+                                                length: s.len()
+                                                encoding: 4u64
+                                            ];
+                                            let _: () = objc2::msg_send![pool, _registerURLSchemeAsCORSEnabled: scheme];
+                                            log::info!("[spa] registered epocaapp:// as CORS-enabled");
+                                        }
+                                    });
+                                    // Reload to apply the secure context registration.
+                                    let _: () = objc2::msg_send![obj, reload];
+                                    log::info!("[spa] reloaded webview after scheme registration");
                                 }
                             }
 
