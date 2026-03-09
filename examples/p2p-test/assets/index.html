@@ -290,8 +290,17 @@
       }
     });
 
+    window.epoca.on('mediaIncomingCall', function(data) {
+      log('incoming call from ' + data.peer + ' session=' + data.sessionId);
+      currentSessionId = data.sessionId;
+      setVideoStatus('Incoming call from ' + data.peer);
+      document.getElementById('hangup-btn').style.display = '';
+      document.getElementById('call-btn').disabled = true;
+    });
+
     window.epoca.on('mediaConnected', function(data) {
       log('connected! session=' + data.sessionId + ' peer=' + data.peer);
+      currentSessionId = data.sessionId;
       setVideoStatus('Connected to ' + data.peer);
       document.getElementById('hangup-btn').style.display = '';
       document.getElementById('call-btn').disabled = true;

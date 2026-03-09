@@ -73,6 +73,10 @@ struct MediaState {
     tracks: HashMap<u64, MediaTrack>,
     sessions: HashMap<u64, MediaSession>,
     pending_events: Vec<MediaEvent>,
+    /// Local track IDs per webview (set by getUserMedia, used by ring listener).
+    local_tracks: HashMap<usize, Vec<u64>>,
+    /// Webviews that already have a ring listener running.
+    ring_listeners: std::collections::HashSet<usize>,
 }
 
 static STATE: OnceLock<Mutex<MediaState>> = OnceLock::new();
@@ -83,6 +87,8 @@ fn state() -> &'static Mutex<MediaState> {
             tracks: HashMap::new(),
             sessions: HashMap::new(),
             pending_events: Vec::new(),
+            local_tracks: HashMap::new(),
+            ring_listeners: std::collections::HashSet::new(),
         })
     })
 }
@@ -162,6 +168,12 @@ pub fn request_get_user_media(
     } else {
         None
     };
+
+    // Store local track IDs for this webview (used by ring listener for incoming calls).
+    let mut ids = Vec::new();
+    if let Some(id) = audio_track_id { ids.push(id); }
+    if let Some(id) = video_track_id { ids.push(id); }
+    st.local_tracks.insert(webview_ptr, ids);
 
     (audio_track_id, video_track_id)
 }
@@ -598,6 +610,120 @@ pub fn close_session_js(session_id: u64) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Incoming call ring (auto-accept)
+// ---------------------------------------------------------------------------
+
+/// Ring channel name for incoming calls to a specific peer.
+fn ring_channel(app_id: &str, peer_id: &str) -> String {
+    format!("{app_id}-media-ring-{peer_id}")
+}
+
+/// Publish a "ring" to a remote peer so they auto-create a session.
+pub fn publish_ring(
+    app_id: &str,
+    local_peer_id: &str,
+    remote_peer_id: &str,
+) -> Result<(), String> {
+    let ch = ring_channel(app_id, remote_peer_id);
+    let payload = serde_json::json!({
+        "type": "ring",
+        "from": local_peer_id,
+    });
+    log::info!("[media] publishing ring to {remote_peer_id} on channel {ch}");
+    crate::statements_api::write(app_id, local_peer_id, &ch, &payload.to_string())
+        .map_err(|e| format!("publish ring: {e}"))
+}
+
+/// Start listening for incoming calls on this peer's ring channel.
+/// Only starts once per webview. When a ring arrives, auto-creates a session
+/// as the answerer, starts signaling, and pushes EvalJs to set up WebRTC.
+pub fn start_ring_listener(
+    app_id: &str,
+    local_peer_id: &str,
+    webview_ptr: usize,
+) -> Result<(), String> {
+    // Only start once per webview.
+    {
+        let mut st = state().lock().unwrap();
+        if !st.ring_listeners.insert(webview_ptr) {
+            return Ok(()); // already listening
+        }
+    }
+
+    let ch = ring_channel(app_id, local_peer_id);
+    let (sub_id, ring_rx) = crate::statements_api::subscribe_direct(app_id, &ch)
+        .map_err(|e| format!("subscribe ring: {e}"))?;
+
+    let app_id = app_id.to_string();
+    let local_id = local_peer_id.to_string();
+
+    std::thread::spawn(move || {
+        log::info!("[media] ring listener started on {ch}");
+        loop {
+            match ring_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(stmt) => {
+                    let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if json.get("type").and_then(|v| v.as_str()) != Some("ring") {
+                        continue;
+                    }
+                    let caller_id = match json.get("from").and_then(|v| v.as_str()) {
+                        Some(id) => id.to_string(),
+                        None => continue,
+                    };
+                    // Don't ring ourselves.
+                    if caller_id == local_id {
+                        continue;
+                    }
+                    log::info!("[media] incoming call from {caller_id}");
+
+                    // Get local tracks for this webview.
+                    let track_ids = {
+                        let st = state().lock().unwrap();
+                        st.local_tracks.get(&webview_ptr).cloned().unwrap_or_default()
+                    };
+
+                    // Create session as answerer.
+                    let session_id = create_session(
+                        webview_ptr, &app_id, &caller_id, track_ids.clone(), &local_id,
+                    );
+
+                    // Start signaling relay.
+                    match start_signaling(session_id, &app_id, &caller_id, &local_id) {
+                        Ok(handle) => set_signaling_handle(session_id, handle),
+                        Err(e) => {
+                            log::warn!("[media] ring: signaling failed for {caller_id}: {e}");
+                            close_session(session_id, &format!("signaling failed: {e}"));
+                            continue;
+                        }
+                    }
+
+                    // Push JS to set up RTCPeerConnection as answerer (not offerer).
+                    let setup_js = setup_session_js(session_id, &track_ids, false);
+                    push_eval_js(webview_ptr, setup_js);
+
+                    // Notify JS about the incoming call.
+                    let notify_js = format!(
+                        "window.__epocaPush('mediaIncomingCall', {{sessionId: {}, peer: '{}'}})",
+                        session_id, caller_id,
+                    );
+                    push_eval_js(webview_ptr, notify_js);
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        crate::statements_api::unsubscribe(sub_id);
+        log::info!("[media] ring listener stopped on {ch}");
+    });
+
+    log::info!("[media] ring listener registered for {}", local_peer_id);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Event drain & cleanup
 // ---------------------------------------------------------------------------
 
@@ -623,6 +749,8 @@ pub fn cleanup_for_webview(webview_ptr: usize) {
     st.tracks.retain(|_, t| t.webview_ptr != webview_ptr);
     st.sessions.retain(|_, s| s.webview_ptr != webview_ptr);
     st.pending_events.retain(|e| e.webview_ptr != webview_ptr);
+    st.local_tracks.remove(&webview_ptr);
+    st.ring_listeners.remove(&webview_ptr);
 }
 
 /// Returns JS to stop all tracks belonging to a webview.

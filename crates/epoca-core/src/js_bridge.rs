@@ -414,6 +414,10 @@ pub fn dispatch(
             // promise with the IDs, (2) evaluate the getUserMedia JS.
             let (audio_tid, video_tid) =
                 crate::media_api::request_get_user_media(webview_ptr, *audio, *video);
+            // Start ring listener so this peer can receive incoming calls.
+            if let Ok(addr) = &wallet_address {
+                let _ = crate::media_api::start_ring_listener(app_id, addr, webview_ptr);
+            }
             BridgeResult::Async(BridgeAsyncAction::MediaGetUserMedia {
                 call_id: id,
                 webview_ptr,
@@ -442,6 +446,10 @@ pub fn dispatch(
             let session_id = crate::media_api::create_session(
                 webview_ptr, app_id, peer_address, track_ids.clone(), author,
             );
+            // Publish ring to the remote peer so they auto-create a session.
+            if let Err(e) = crate::media_api::publish_ring(app_id, author, peer_address) {
+                log::warn!("[media] publish ring failed: {e}");
+            }
             // Start signaling relay thread.
             match crate::media_api::start_signaling(session_id, app_id, peer_address, author) {
                 Ok(handle) => {
