@@ -11,5 +11,9 @@
     <string>0.0.1</string>
     <key>CFBundleIconFile</key>
     <string>Epoca</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Epoca needs camera access for video calls.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Epoca needs microphone access for audio calls.</string>
 </dict>
 </plist>
