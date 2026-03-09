@@ -175,7 +175,20 @@ pub fn get_user_media_js(
         r#"(async function() {{
     try {{
         if (!window.__epocaMediaTracks) window.__epocaMediaTracks = {{}};
-        var stream = await navigator.mediaDevices.getUserMedia({{ audio: {audio_bool}, video: {video_bool} }});
+        // Recover navigator.mediaDevices from a blank iframe if unavailable
+        // (custom URL schemes like epocaapp:// may not be secure contexts).
+        var _md = navigator.mediaDevices;
+        if (!_md || !_md.getUserMedia) {{
+            var _f = document.createElement('iframe');
+            _f.style.display = 'none';
+            document.documentElement.appendChild(_f);
+            _md = _f.contentWindow.navigator.mediaDevices;
+            _f.remove();
+        }}
+        if (!_md || !_md.getUserMedia) {{
+            throw new Error('getUserMedia not available (not a secure context?)');
+        }}
+        var stream = await _md.getUserMedia({{ audio: {audio_bool}, video: {video_bool} }});
         var tracks = stream.getTracks();
         for (var i = 0; i < tracks.length; i++) {{
             var t = tracks[i];
