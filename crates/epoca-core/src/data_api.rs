@@ -39,6 +39,19 @@ const MAX_DATA_SIZE: usize = 256 * 1024;
 /// Signaling poll interval.
 const SIGNAL_POLL_MS: u64 = 500;
 
+/// Google's public STUN servers for NAT traversal.
+const STUN_SERVERS: &[&str] = &[
+    "stun.l.google.com:19302",
+    "stun1.l.google.com:19302",
+    "stun2.l.google.com:19302",
+];
+
+/// STUN magic cookie (RFC 5389).
+const STUN_MAGIC: u32 = 0x2112_A442;
+
+/// Timeout per STUN server attempt.
+const STUN_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Connection states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnState {
@@ -552,7 +565,7 @@ fn run_webrtc_offerer(
     data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
     signal_rx: &std::sync::mpsc::Receiver<crate::statements_api::Statement>,
 ) -> Result<(), String> {
-    let (socket, local_addr) = bind_ice_socket(conn_id)?;
+    let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
     let mut rtc = Rtc::builder()
         .set_ice_lite(false)
@@ -562,6 +575,13 @@ fn run_webrtc_offerer(
     let candidate =
         Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
     rtc.add_local_candidate(candidate);
+
+    if let Some(srflx) = srflx_addr {
+        match Candidate::server_reflexive(srflx, local_addr, "udp") {
+            Ok(c) => { rtc.add_local_candidate(c); }
+            Err(e) => log::warn!("[data] conn={conn_id} srflx candidate error: {e}"),
+        }
+    }
 
     // Create data channel and generate offer.
     let mut api = rtc.sdp_api();
@@ -603,7 +623,7 @@ fn run_webrtc_answerer(
     running: &AtomicBool,
     data_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<(), String> {
-    let (socket, local_addr) = bind_ice_socket(conn_id)?;
+    let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
     let mut rtc = Rtc::builder()
         .set_ice_lite(false)
@@ -613,6 +633,13 @@ fn run_webrtc_answerer(
     let candidate =
         Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
     rtc.add_local_candidate(candidate);
+
+    if let Some(srflx) = srflx_addr {
+        match Candidate::server_reflexive(srflx, local_addr, "udp") {
+            Ok(c) => { rtc.add_local_candidate(c); }
+            Err(e) => log::warn!("[data] conn={conn_id} srflx candidate error: {e}"),
+        }
+    }
 
     // Accept the offer and generate answer.
     let offer = SdpOffer::from_sdp_string(offer_sdp)
@@ -644,12 +671,261 @@ fn run_webrtc_answerer(
     )
 }
 
-/// Bind a UDP socket for ICE and return (socket, candidate_addr).
-fn bind_ice_socket(conn_id: u64) -> Result<(UdpSocket, std::net::SocketAddr), String> {
+// ---------------------------------------------------------------------------
+// STUN NAT traversal
+// ---------------------------------------------------------------------------
+
+/// Build a minimal STUN Binding Request (20 bytes, no attributes).
+fn build_stun_binding_request() -> ([u8; 20], [u8; 12]) {
+    let mut pkt = [0u8; 20];
+    // Message type: Binding Request (0x0001)
+    pkt[0] = 0x00;
+    pkt[1] = 0x01;
+    // Message length: 0 (no attributes)
+    pkt[2] = 0x00;
+    pkt[3] = 0x00;
+    // Magic cookie
+    pkt[4..8].copy_from_slice(&STUN_MAGIC.to_be_bytes());
+    // Transaction ID: timestamp nanos + process ID for uniqueness
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut txn_id = [0u8; 12];
+    txn_id[0..8].copy_from_slice(&(nanos as u64).to_be_bytes());
+    txn_id[8..12].copy_from_slice(&std::process::id().to_be_bytes());
+    pkt[8..20].copy_from_slice(&txn_id);
+    (pkt, txn_id)
+}
+
+/// Parse a STUN Binding Success Response to extract the mapped address.
+fn parse_stun_response(buf: &[u8], expected_txn: &[u8; 12]) -> Option<std::net::SocketAddr> {
+    if buf.len() < 20 {
+        return None;
+    }
+
+    // Check message type: Binding Success Response (0x0101)
+    let msg_type = u16::from_be_bytes([buf[0], buf[1]]);
+    if msg_type != 0x0101 {
+        return None;
+    }
+
+    // Check magic cookie
+    if buf[4..8] != STUN_MAGIC.to_be_bytes() {
+        return None;
+    }
+
+    // Check transaction ID matches our request
+    if buf[8..20] != *expected_txn {
+        return None;
+    }
+
+    let attr_len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+    if buf.len() < 20 + attr_len {
+        return None;
+    }
+
+    // Walk attributes looking for XOR-MAPPED-ADDRESS (0x0020) or MAPPED-ADDRESS (0x0001)
+    let mut pos = 20;
+    let end = 20 + attr_len;
+    let mut mapped_fallback: Option<std::net::SocketAddr> = None;
+
+    while pos + 4 <= end {
+        let attr_type = u16::from_be_bytes([buf[pos], buf[pos + 1]]);
+        let alen = u16::from_be_bytes([buf[pos + 2], buf[pos + 3]]) as usize;
+        let attr_start = pos + 4;
+
+        if attr_start + alen > end {
+            break;
+        }
+
+        let attr_data = &buf[attr_start..attr_start + alen];
+        match attr_type {
+            0x0020 => {
+                // XOR-MAPPED-ADDRESS — preferred, return immediately
+                if let Some(addr) = parse_xor_mapped(attr_data, expected_txn) {
+                    return Some(addr);
+                }
+            }
+            0x0001 => {
+                // MAPPED-ADDRESS — fallback
+                mapped_fallback = parse_mapped(attr_data);
+            }
+            _ => {}
+        }
+
+        // Advance to next attribute (padded to 4-byte boundary)
+        pos = attr_start + ((alen + 3) & !3);
+    }
+
+    mapped_fallback
+}
+
+fn parse_xor_mapped(data: &[u8], txn_id: &[u8; 12]) -> Option<std::net::SocketAddr> {
+    if data.len() < 8 {
+        return None;
+    }
+    let family = data[1];
+    let xor_port = u16::from_be_bytes([data[2], data[3]]);
+    let port = xor_port ^ (STUN_MAGIC >> 16) as u16;
+
+    match family {
+        0x01 => {
+            // IPv4: XOR with magic cookie
+            let magic = STUN_MAGIC.to_be_bytes();
+            let ip = std::net::Ipv4Addr::new(
+                data[4] ^ magic[0],
+                data[5] ^ magic[1],
+                data[6] ^ magic[2],
+                data[7] ^ magic[3],
+            );
+            Some(std::net::SocketAddr::new(ip.into(), port))
+        }
+        0x02 if data.len() >= 20 => {
+            // IPv6: XOR with magic cookie + transaction ID
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&data[4..20]);
+            let magic = STUN_MAGIC.to_be_bytes();
+            for i in 0..4 {
+                addr[i] ^= magic[i];
+            }
+            for i in 0..12 {
+                addr[4 + i] ^= txn_id[i];
+            }
+            let ip = std::net::Ipv6Addr::from(addr);
+            Some(std::net::SocketAddr::new(ip.into(), port))
+        }
+        _ => None,
+    }
+}
+
+fn parse_mapped(data: &[u8]) -> Option<std::net::SocketAddr> {
+    if data.len() < 8 {
+        return None;
+    }
+    let family = data[1];
+    let port = u16::from_be_bytes([data[2], data[3]]);
+
+    match family {
+        0x01 => {
+            let ip = std::net::Ipv4Addr::new(data[4], data[5], data[6], data[7]);
+            Some(std::net::SocketAddr::new(ip.into(), port))
+        }
+        0x02 if data.len() >= 20 => {
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&data[4..20]);
+            let ip = std::net::Ipv6Addr::from(addr);
+            Some(std::net::SocketAddr::new(ip.into(), port))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve public IP:port via STUN binding requests.
+///
+/// Tries Google STUN servers in sequence, returns the first successful result.
+/// The socket must be in **blocking** mode (read timeout will be set internally).
+fn resolve_stun(
+    socket: &UdpSocket,
+    local_addr: std::net::SocketAddr,
+    conn_id: u64,
+) -> Option<std::net::SocketAddr> {
+    use std::net::ToSocketAddrs;
+
+    let start = Instant::now();
+    let (request, txn_id) = build_stun_binding_request();
+
+    log::info!(
+        "[data] conn={conn_id} STUN: resolving public address ({} servers)",
+        STUN_SERVERS.len()
+    );
+
+    // Set read timeout for blocking recv
+    if socket.set_read_timeout(Some(Duration::from_secs(1))).is_err() {
+        log::warn!("[data] conn={conn_id} STUN: failed to set read timeout");
+        return None;
+    }
+
+    let mut buf = [0u8; 512];
+
+    for server in STUN_SERVERS {
+        // Resolve STUN server DNS
+        let server_addr = match server.to_socket_addrs() {
+            Ok(mut addrs) => match addrs.next() {
+                Some(a) => a,
+                None => {
+                    log::warn!("[data] conn={conn_id} STUN: no addresses for {server}");
+                    continue;
+                }
+            },
+            Err(e) => {
+                log::warn!("[data] conn={conn_id} STUN: DNS failed for {server}: {e}");
+                continue;
+            }
+        };
+
+        let attempt_start = Instant::now();
+
+        // Try twice per server (initial + one retransmit)
+        for attempt in 0..2u8 {
+            if let Err(e) = socket.send_to(&request, server_addr) {
+                log::warn!("[data] conn={conn_id} STUN: send to {server} failed: {e}");
+                break;
+            }
+
+            // Read responses until timeout
+            let deadline = Instant::now() + STUN_TIMEOUT;
+            while Instant::now() < deadline {
+                match socket.recv_from(&mut buf) {
+                    Ok((n, from)) if from.ip() == server_addr.ip() => {
+                        if let Some(mapped) = parse_stun_response(&buf[..n], &txn_id) {
+                            log::info!(
+                                "[data] conn={conn_id} STUN: {server} → {mapped} ({}ms, attempt {})",
+                                attempt_start.elapsed().as_millis(),
+                                attempt + 1,
+                            );
+                            log::info!(
+                                "[data] conn={conn_id} STUN: local={local_addr} public={mapped} (total {}ms)",
+                                start.elapsed().as_millis(),
+                            );
+                            return Some(mapped);
+                        }
+                    }
+                    Ok(_) => {
+                        // Response from unexpected source, keep waiting
+                    }
+                    Err(ref e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        // Read timeout expired, try next attempt/server
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            log::info!(
+                "[data] conn={conn_id} STUN: {server} attempt {} timed out ({}ms)",
+                attempt + 1,
+                attempt_start.elapsed().as_millis(),
+            );
+        }
+    }
+
+    log::warn!(
+        "[data] conn={conn_id} STUN: all {} servers failed ({}ms) — host candidate only",
+        STUN_SERVERS.len(),
+        start.elapsed().as_millis(),
+    );
+    None
+}
+
+/// Bind a UDP socket for ICE, resolve STUN, and return (socket, host_addr, optional srflx_addr).
+fn bind_ice_socket(
+    conn_id: u64,
+) -> Result<(UdpSocket, std::net::SocketAddr, Option<std::net::SocketAddr>), String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("UDP bind: {e}"))?;
-    socket
-        .set_nonblocking(true)
-        .map_err(|e| format!("set_nonblocking: {e}"))?;
     let bound_addr = socket
         .local_addr()
         .map_err(|e| format!("local_addr: {e}"))?;
@@ -657,8 +933,17 @@ fn bind_ice_socket(conn_id: u64) -> Result<(UdpSocket, std::net::SocketAddr), St
     let local_ip = local_network_ip().unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let local_addr = std::net::SocketAddr::new(local_ip, bound_addr.port());
 
-    log::info!("[data] conn={conn_id} bound UDP {bound_addr} → candidate {local_addr}");
-    Ok((socket, local_addr))
+    log::info!("[data] conn={conn_id} bound UDP {bound_addr} → host candidate {local_addr}");
+
+    // Resolve public address via STUN (blocking, before ICE starts)
+    let srflx_addr = resolve_stun(&socket, local_addr, conn_id);
+
+    // Switch to non-blocking for ICE
+    socket
+        .set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking: {e}"))?;
+
+    Ok((socket, local_addr, srflx_addr))
 }
 
 /// Shared signaling + ICE + data loop used by both offerer and answerer.
