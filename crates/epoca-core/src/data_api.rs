@@ -903,12 +903,12 @@ fn resolve_stun(
     let mut buf = [0u8; 512];
 
     for server in STUN_SERVERS {
-        // Resolve STUN server DNS
+        // Resolve STUN server DNS (IPv4 only — socket is bound to 0.0.0.0)
         let server_addr = match server.to_socket_addrs() {
-            Ok(mut addrs) => match addrs.next() {
+            Ok(addrs) => match addrs.filter(|a| a.is_ipv4()).next() {
                 Some(a) => a,
                 None => {
-                    log::warn!("[data] conn={conn_id} STUN: no addresses for {server}");
+                    log::warn!("[data] conn={conn_id} STUN: no IPv4 addresses for {server}");
                     continue;
                 }
             },
