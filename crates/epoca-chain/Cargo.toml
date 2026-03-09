@@ -25,3 +25,5 @@ helios-ethereum = { git = "https://github.com/a16z/helios", rev = "204c998a" }
 
 [dev-dependencies]
 env_logger = "0.11"
+bip39 = { version = "2", features = ["rand"] }
+bs58 = "0.5"

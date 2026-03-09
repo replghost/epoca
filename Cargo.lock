@@ -4234,7 +4234,9 @@ name = "epoca-chain"
 version = "0.0.1"
 dependencies = [
  "bip157",
+ "bip39",
  "blake2",
+ "bs58",
  "env_logger",
  "epoca-sandbox",
  "helios-ethereum",

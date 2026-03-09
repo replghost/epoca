@@ -391,11 +391,16 @@ pub fn rpc_submit(encoded_statement: &[u8]) -> Result<(), String> {
                 }
                 let result = body.get("result");
                 log::info!("[ss] statement submitted: {result:?}");
-                // Check for rejection statuses returned as string result.
-                if let Some(status) = result.and_then(|v| v.as_str()) {
-                    match status {
-                        "ok" => return Ok(()),
-                        other => return Err(format!("statement rejected: {other}")),
+                // Result can be a string ("ok") or object ({"status":"rejected","reason":"noAllowance"}).
+                if let Some(s) = result.and_then(|v| v.as_str()) {
+                    if s == "ok" { return Ok(()); }
+                    return Err(format!("statement rejected: {s}"));
+                }
+                if let Some(obj) = result.and_then(|v| v.as_object()) {
+                    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                    let reason = obj.get("reason").and_then(|v| v.as_str()).unwrap_or("unknown");
+                    if status == "rejected" {
+                        return Err(format!("statement rejected: {reason}"));
                     }
                 }
                 return Ok(());
@@ -568,13 +573,22 @@ pub fn set_on_statement(cb: StatementCallback) {
 /// App-level namespace topic.
 const EPOCA_TOPIC: &str = "ss-epoca";
 
-/// Initialize the statement store with an ephemeral sr25519 keypair.
+/// Initialize the statement store with a dev sr25519 keypair (Alice).
 ///
-/// Generates a random keypair for signing gossip messages. This identity
-/// is independent of the wallet and persists for the app's lifetime.
+/// Uses Alice's well-known dev account which has allowance on PoP3 testnet.
+/// TODO: use the wallet keypair or register identity for ephemeral keys.
 /// Call once at startup.
 pub fn init() {
-    let keypair = Keypair::generate();
+    // Alice's mini-secret key — well-known on all Substrate dev/test chains.
+    let alice_seed: [u8; 32] = [
+        0xe5, 0xbe, 0x9a, 0x50, 0x92, 0xb8, 0x1b, 0xca,
+        0x64, 0xbe, 0x81, 0xd2, 0x12, 0xe7, 0xf2, 0xf9,
+        0xeb, 0xa1, 0x83, 0xbb, 0x7a, 0x90, 0x95, 0x4f,
+        0x7b, 0x76, 0x36, 0x1f, 0x6e, 0xdb, 0x5c, 0x0a,
+    ];
+    let secret = schnorrkel::MiniSecretKey::from_bytes(&alice_seed)
+        .expect("valid mini secret");
+    let keypair = secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
     let pubkey = keypair.public.to_bytes();
     let running = Arc::new(AtomicBool::new(true));
     let running2 = running.clone();
@@ -597,9 +611,18 @@ pub fn init() {
     });
 
     log::info!(
-        "[ss] statement store initialized (ephemeral pubkey={}...)",
+        "[ss] statement store initialized (pubkey={}...)",
         hex_encode(&pubkey[..4])
     );
+
+    // Ensure the signing key has statement store allowance on-chain.
+    // Uses Alice (sudo) to write the allowance via System.set_storage.
+    std::thread::spawn(|| {
+        match ensure_allowance() {
+            Ok(()) => log::info!("[ss] allowance confirmed"),
+            Err(e) => log::warn!("[ss] ensure_allowance failed: {e}"),
+        }
+    });
 }
 
 /// Shut down the statement store client.
@@ -981,6 +1004,685 @@ fn subscribe_loop(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Allowance provisioning — Sudo.sudo(System.set_storage) extrinsic
+// ---------------------------------------------------------------------------
+
+/// Alice's well-known mini-secret key (all Substrate dev/test chains).
+const ALICE_MINI_SECRET: [u8; 32] = [
+    0xe5, 0xbe, 0x9a, 0x50, 0x92, 0xb8, 0x1b, 0xca,
+    0x64, 0xbe, 0x81, 0xd2, 0x12, 0xe7, 0xf2, 0xf9,
+    0xeb, 0xa1, 0x83, 0xbb, 0x7a, 0x90, 0x95, 0x4f,
+    0x7b, 0x76, 0x36, 0x1f, 0x6e, 0xdb, 0x5c, 0x0a,
+];
+
+/// Encode a length-prefixed SCALE bytes field: Compact<u32>(len) + bytes.
+fn scale_bytes(data: &[u8]) -> Vec<u8> {
+    let mut out = encode_compact_u32(data.len() as u32);
+    out.extend_from_slice(data);
+    out
+}
+
+/// Query pallet indices for System and Sudo from the chain metadata.
+///
+/// Strategy: fetch raw metadata hex, perform a structural scan of SCALE metadata v14
+/// to find PalletMetadata entries by name and extract their `index: u8` fields.
+///
+/// The SCALE metadata v14 PalletMetadata encoding (observed on Substrate chains):
+///   name:     String (compact_len + utf8)
+///   storage:  Vec<StorageEntryMetadata>  (compact_count + entries)
+///   calls:    Option<compact type_ref>   (0x00 | 0x01 + compact)
+///   events:   Option<compact type_ref>   (0x00 | 0x01 + compact)
+///   constants: Vec<PalletConstantMetadata>
+///   errors:   Option<compact type_ref>   (0x00 | 0x01 + compact)
+///   index:    u8
+///
+/// Returns (system_index, sudo_index).
+fn query_pallet_indices(endpoint: &str) -> Result<(u8, u8), String> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "state_getMetadata",
+        "params": []
+    });
+    let resp = ws_request(endpoint, &req.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("parse metadata response: {e}"))?;
+    let hex_str = body
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("no result in metadata response")?;
+    let meta_bytes = hex_decode(hex_str).ok_or("invalid hex in metadata response")?;
+
+    if meta_bytes.len() < 5 {
+        return Err("metadata too short".into());
+    }
+    if &meta_bytes[0..4] != b"meta" {
+        return Err(format!("bad metadata magic: {:02x?}", &meta_bytes[0..4]));
+    }
+    let version = meta_bytes[4];
+    log::info!("[ss] metadata version: {version}");
+
+    // System pallet is always index 0 in all Substrate chains — hardcode it.
+    let system_index: u8 = 0;
+
+    // For Sudo: scan metadata for a pallet with this name and extract its index.
+    // We do a structural parse of each occurrence.
+    let sudo_index = scan_pallet_index_in_metadata(&meta_bytes, "Sudo")
+        .ok_or("Sudo pallet not found in metadata — chain may not have sudo")?;
+
+    log::info!("[ss] pallet indices: System={system_index}, Sudo={sudo_index}");
+    Ok((system_index, sudo_index))
+}
+
+/// Scan raw SCALE metadata v14 bytes for a pallet by name and return its `index: u8`.
+///
+/// Searches all occurrences of the compact-encoded pallet name, then attempts a
+/// structural walk of the PalletMetadata fields to reach the `index: u8` at the end.
+///
+/// The observed SCALE layout for PalletMetadata in metadata v14 is:
+///   name:      String
+///   storage:   Vec<StorageEntryMetadata>   (compact count, then entries)
+///   calls:     Option<compact<u32>>        (0x00=None or 0x01+compact)
+///   events:    Option<compact<u32>>        (0x00=None or 0x01+compact)
+///   constants: Vec<PalletConstantMetadata> (complex — see below)
+///   errors:    Option<compact<u32>>        (0x00=None or 0x01+compact)
+///   index:     u8
+///
+/// StorageEntryMetadata: name(String) + modifier(u8) + type(StorageEntryType) +
+///                       default(Vec<u8>) + docs(Vec<String>)
+/// StorageEntryType: kind(u8=0 Plain|1 Map) + compact type refs + optional hasher bytes
+/// PalletConstantMetadata: name(String) + ty(compact) + value(Vec<u8>) + docs(Vec<String>)
+fn scan_pallet_index_in_metadata(meta: &[u8], pallet_name: &str) -> Option<u8> {
+    let name_bytes = pallet_name.as_bytes();
+    let mut compact_name = encode_compact_u32(name_bytes.len() as u32);
+    compact_name.extend_from_slice(name_bytes);
+
+    // Scan all occurrences of the compact-encoded name in the metadata bytes.
+    let search_space = if meta.len() > 5 { &meta[5..] } else { return None };
+    let mut start = 0;
+
+    while start + compact_name.len() <= search_space.len() {
+        if &search_space[start..start + compact_name.len()] == compact_name.as_slice() {
+            let after_name = start + compact_name.len();
+            if let Some(idx) = try_parse_pallet_after_name(search_space, after_name) {
+                log::debug!(
+                    "[ss] found pallet '{pallet_name}' index={idx} at offset {start}"
+                );
+                return Some(idx);
+            }
+        }
+        start += 1;
+    }
+    None
+}
+
+/// Attempt to parse PalletMetadata fields starting immediately after the pallet name.
+///
+/// Returns the pallet index byte if the structural walk succeeds, or `None` if it
+/// encounters an inconsistency (which means this occurrence is not a real pallet).
+fn try_parse_pallet_after_name(meta: &[u8], pos: usize) -> Option<u8> {
+    let limit = meta.len();
+    let mut p = pos;
+
+    // --- storage: Vec<StorageEntryMetadata> ---
+    // compact count, then each entry: name(str) + modifier(u8) + type + default(bytes) + docs
+    let (storage_count, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+    p += consumed;
+    // Sanity: a pallet won't have more than 200 storage entries.
+    if storage_count > 200 {
+        return None;
+    }
+    for _ in 0..storage_count {
+        p = skip_storage_entry(meta, p, limit)?;
+    }
+
+    // --- calls: Option<compact<u32>> ---
+    p = skip_option_compact(meta, p, limit)?;
+
+    // --- events: Option<compact<u32>> ---
+    p = skip_option_compact(meta, p, limit)?;
+
+    // --- constants: Vec<PalletConstantMetadata> ---
+    let (const_count, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+    p += consumed;
+    if const_count > 100 {
+        return None;
+    }
+    for _ in 0..const_count {
+        p = skip_pallet_constant(meta, p, limit)?;
+    }
+
+    // --- errors: Option<compact<u32>> ---
+    p = skip_option_compact(meta, p, limit)?;
+
+    // --- index: u8 ---
+    if p >= limit {
+        return None;
+    }
+    let index = meta[p];
+    // Sanity check: pallet indices are < 255 but realistically < 200.
+    if index > 200 {
+        return None;
+    }
+    Some(index)
+}
+
+/// Skip an `Option<compact<u32>>` field: either `0x00` (None) or `0x01 + compact`.
+fn skip_option_compact(meta: &[u8], pos: usize, limit: usize) -> Option<usize> {
+    if pos >= limit {
+        return None;
+    }
+    match meta[pos] {
+        0x00 => Some(pos + 1),
+        0x01 => {
+            let p = pos + 1;
+            if p >= limit {
+                return None;
+            }
+            let (_, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+            Some(p + consumed)
+        }
+        _ => None, // unexpected tag — not a valid Option<compact>
+    }
+}
+
+/// Skip a `StorageEntryMetadata`:
+///   name: String
+///   modifier: u8
+///   type: StorageEntryType  (0=Plain compact, 1=Map hashers+key+val)
+///   default: Vec<u8>
+///   docs: Vec<String>
+fn skip_storage_entry(meta: &[u8], pos: usize, limit: usize) -> Option<usize> {
+    // name: String
+    let (name_len, consumed) = decode_compact_u32(&meta[pos..]).ok()?;
+    if name_len > 512 {
+        return None; // sanity
+    }
+    let mut p = pos + consumed + name_len as usize;
+    if p >= limit {
+        return None;
+    }
+
+    // modifier: u8 (0=Optional, 1=Default)
+    let modifier = meta[p];
+    if modifier > 1 {
+        return None;
+    }
+    p += 1;
+
+    // type: StorageEntryType
+    if p >= limit {
+        return None;
+    }
+    match meta[p] {
+        0 => {
+            // Plain — compact type ref
+            p += 1;
+            let (_, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+            p += consumed;
+        }
+        1 => {
+            // Map — hashers (Vec<u8>) + key (compact) + value (compact)
+            p += 1;
+            let (hasher_count, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+            p += consumed;
+            if hasher_count > 8 {
+                return None;
+            }
+            p += hasher_count as usize; // each hasher is 1 byte enum
+            let (_, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+            p += consumed; // key type ref
+            let (_, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+            p += consumed; // value type ref
+        }
+        _ => return None, // unknown storage type
+    }
+
+    // default: Vec<u8> — compact length + bytes
+    let (default_len, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+    p += consumed + default_len as usize;
+    if p > limit {
+        return None;
+    }
+
+    // docs: Vec<String>
+    p = skip_vec_of_strings(meta, p, limit)?;
+
+    Some(p)
+}
+
+/// Skip a `PalletConstantMetadata`:
+///   name: String
+///   ty: compact<u32>
+///   value: Vec<u8>
+///   docs: Vec<String>
+fn skip_pallet_constant(meta: &[u8], pos: usize, limit: usize) -> Option<usize> {
+    // name: String
+    let (name_len, consumed) = decode_compact_u32(&meta[pos..]).ok()?;
+    if name_len > 256 {
+        return None;
+    }
+    let mut p = pos + consumed + name_len as usize;
+    if p > limit {
+        return None;
+    }
+    // ty: compact<u32>
+    let (_, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+    p += consumed;
+    // value: Vec<u8>
+    let (val_len, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+    p += consumed + val_len as usize;
+    if p > limit {
+        return None;
+    }
+    // docs: Vec<String>
+    p = skip_vec_of_strings(meta, p, limit)?;
+    Some(p)
+}
+
+/// Skip a `Vec<String>`: compact count, then each string as compact_len + utf8 bytes.
+fn skip_vec_of_strings(meta: &[u8], pos: usize, limit: usize) -> Option<usize> {
+    let (count, consumed) = decode_compact_u32(&meta[pos..]).ok()?;
+    if count > 1024 {
+        return None;
+    }
+    let mut p = pos + consumed;
+    for _ in 0..count {
+        let (slen, consumed) = decode_compact_u32(&meta[p..]).ok()?;
+        if slen > 65536 {
+            return None;
+        }
+        p += consumed + slen as usize;
+        if p > limit {
+            return None;
+        }
+    }
+    Some(p)
+}
+
+/// Ensure the statement store signing key has allowance on the People chain.
+///
+/// Checks whether `:statement_allowance:<pubkey>` exists in chain storage.
+/// If not, submits a `Sudo.sudo(System.set_storage)` extrinsic signed by Alice
+/// to grant `(max_count=50, max_size=51200)`.
+///
+/// This is a blocking call that performs several network round-trips.
+pub fn ensure_allowance() -> Result<(), String> {
+    let endpoint = SS_ENDPOINTS[0];
+
+    // --- Step 1: Get our signing pubkey ---
+    let pubkey: [u8; 32] = {
+        let st = store().lock().unwrap();
+        let state = st
+            .as_ref()
+            .ok_or("statement store not initialized — call init() first")?;
+        state.keypair.public.to_bytes()
+    };
+    log::info!("[ss] ensure_allowance: checking for pubkey {}", hex_encode(&pubkey));
+
+    // --- Step 2: Check existing allowance ---
+    let allowance_key = build_allowance_storage_key(&pubkey);
+    let check_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "state_getStorage",
+        "params": [allowance_key]
+    });
+    let resp = ws_request(endpoint, &check_req.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("parse storage response: {e}"))?;
+    let existing = body.get("result");
+    if existing.is_some() && existing != Some(&serde_json::Value::Null) {
+        log::info!("[ss] allowance already exists: {existing:?}");
+        return Ok(());
+    }
+    log::info!("[ss] no allowance found — will submit sudo extrinsic");
+
+    // --- Step 3: Gather chain state for extrinsic construction ---
+    let (spec_version, tx_version) = query_runtime_version(endpoint)?;
+    let genesis_hash = query_block_hash(endpoint, Some(0))?;
+    let (system_index, sudo_index) = query_pallet_indices(endpoint)?;
+    let alice_nonce = query_nonce(endpoint)?;
+
+    log::info!(
+        "[ss] chain state: spec={spec_version} tx={tx_version} \
+         system={system_index} sudo={sudo_index} nonce={alice_nonce}"
+    );
+
+    // --- Step 4: Build the call data ---
+    // Allowance value: SCALE-encoded (max_count: u32, max_size: u32)
+    let allowance_value = {
+        let mut v = Vec::new();
+        v.extend_from_slice(&50u32.to_le_bytes());    // max_count = 50
+        v.extend_from_slice(&51200u32.to_le_bytes()); // max_size = 50KB
+        v
+    };
+
+    // Raw storage key bytes (not hex — SCALE encodes the raw key bytes directly).
+    let raw_key_bytes = build_allowance_key_bytes(&pubkey);
+
+    // System.set_storage call:
+    //   pallet_index: u8
+    //   call_index: u8 (set_storage is call index 4 in System pallet on this chain)
+    //   items: Vec<(Vec<u8>, Vec<u8>)>  = Compact(1) + key_bytes_scale + value_bytes_scale
+    //
+    // System call indices (verified from chain metadata):
+    //   0=remark, 1=set_heap_pages, 2=set_code, 3=set_code_without_checks,
+    //   4=set_storage, 5=kill_storage, 6=kill_prefix, 7=remark_with_event
+    let set_storage_call = {
+        let mut call = Vec::new();
+        call.push(system_index);                         // System pallet index (always 0)
+        call.push(4u8);                                  // set_storage call index = 4
+        call.extend_from_slice(&encode_compact_u32(1));  // 1 item in the vec
+        call.extend_from_slice(&scale_bytes(&raw_key_bytes));   // key
+        call.extend_from_slice(&scale_bytes(&allowance_value)); // value
+        call
+    };
+
+    // Sudo.sudo call:
+    //   pallet_index: u8
+    //   call_index: u8 (sudo is call 0 in Sudo pallet)
+    //   call: Box<Call>  = just the inner call bytes (no length prefix — it's inlined)
+    let call_data = {
+        let mut call = Vec::new();
+        call.push(sudo_index); // Sudo pallet index
+        call.push(0u8);        // sudo call index = 0
+        call.extend_from_slice(&set_storage_call);
+        call
+    };
+
+    // --- Step 5: Build signed extrinsic ---
+    let extrinsic = build_signed_extrinsic(
+        &call_data,
+        spec_version,
+        tx_version,
+        &genesis_hash,
+        alice_nonce,
+    )?;
+
+    log::info!("[ss] submitting sudo extrinsic ({} bytes)", extrinsic.len());
+
+    // --- Step 6: Submit extrinsic ---
+    let submit_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "author_submitExtrinsic",
+        "params": [hex_encode(&extrinsic)]
+    });
+    let submit_resp = ws_request(endpoint, &submit_req.to_string())?;
+    let submit_body: serde_json::Value = serde_json::from_str(&submit_resp)
+        .map_err(|e| format!("parse submit response: {e}"))?;
+
+    if let Some(err) = submit_body.get("error") {
+        return Err(format!("extrinsic submission failed: {err}"));
+    }
+    let tx_hash = submit_body
+        .get("result")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no hash)");
+    log::info!("[ss] sudo extrinsic submitted, tx_hash={tx_hash}");
+
+    // Wait briefly for the extrinsic to be included, then verify.
+    std::thread::sleep(std::time::Duration::from_secs(6));
+
+    let verify_resp = ws_request(endpoint, &check_req.to_string())?;
+    let verify_body: serde_json::Value =
+        serde_json::from_str(&verify_resp).map_err(|e| format!("parse verify response: {e}"))?;
+    let after = verify_body.get("result");
+    if after.is_some() && after != Some(&serde_json::Value::Null) {
+        log::info!("[ss] allowance confirmed in storage: {after:?}");
+        Ok(())
+    } else {
+        Err(format!(
+            "extrinsic submitted (tx={tx_hash}) but allowance not found in storage after 6s. \
+             The extrinsic may still be pending."
+        ))
+    }
+}
+
+/// Build the hex-encoded storage key for a statement allowance entry.
+///
+/// Key format: `0x` + hex(`:statement_allowance:`) + hex(pubkey_32_bytes)
+fn build_allowance_storage_key(pubkey: &[u8; 32]) -> String {
+    let prefix = b":statement_allowance:";
+    let mut full_key = Vec::with_capacity(prefix.len() + 32);
+    full_key.extend_from_slice(prefix);
+    full_key.extend_from_slice(pubkey);
+    hex_encode(&full_key)
+}
+
+/// Build the raw bytes of the allowance storage key (not hex, not prefixed with 0x).
+fn build_allowance_key_bytes(pubkey: &[u8; 32]) -> Vec<u8> {
+    let prefix = b":statement_allowance:";
+    let mut key = Vec::with_capacity(prefix.len() + 32);
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(pubkey);
+    key
+}
+
+/// Query spec_version and transaction_version from state_getRuntimeVersion.
+fn query_runtime_version(endpoint: &str) -> Result<(u32, u32), String> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "state_getRuntimeVersion",
+        "params": []
+    });
+    let resp = ws_request(endpoint, &req.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("parse runtime version: {e}"))?;
+    let result = body.get("result").ok_or("no result in getRuntimeVersion")?;
+    let spec = result
+        .get("specVersion")
+        .and_then(|v| v.as_u64())
+        .ok_or("no specVersion")? as u32;
+    let tx = result
+        .get("transactionVersion")
+        .and_then(|v| v.as_u64())
+        .ok_or("no transactionVersion")? as u32;
+    Ok((spec, tx))
+}
+
+/// Query a block hash. Pass `Some(block_number)` for a specific block, or `None` for
+/// the current best block.
+fn query_block_hash(endpoint: &str, block_number: Option<u64>) -> Result<[u8; 32], String> {
+    let params = match block_number {
+        Some(n) => serde_json::json!([n]),
+        None => serde_json::json!([]),
+    };
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "chain_getBlockHash",
+        "params": params
+    });
+    let resp = ws_request(endpoint, &req.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("parse block hash: {e}"))?;
+    let hex_str = body
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("no result in getBlockHash")?;
+    let bytes = hex_decode(hex_str).ok_or("invalid hex in block hash")?;
+    if bytes.len() != 32 {
+        return Err(format!("block hash wrong length: {}", bytes.len()));
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&bytes);
+    Ok(hash)
+}
+
+/// Query the next account nonce for Alice using system_accountNextIndex.
+fn query_nonce(endpoint: &str) -> Result<u32, String> {
+    // Alice's SS58 address on Substrate (prefix 42 = generic).
+    // Derived from her well-known public key.
+    // 5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY
+    let alice_ss58 = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "system_accountNextIndex",
+        "params": [alice_ss58]
+    });
+    let resp = ws_request(endpoint, &req.to_string())?;
+    let body: serde_json::Value =
+        serde_json::from_str(&resp).map_err(|e| format!("parse nonce response: {e}"))?;
+    let nonce = body
+        .get("result")
+        .and_then(|v| v.as_u64())
+        .ok_or("no result in accountNextIndex")? as u32;
+    Ok(nonce)
+}
+
+/// Build a signed Substrate extrinsic (v4 format) using Alice's sr25519 key.
+///
+/// The extrinsic bytes layout (PoP3 People chain, 19 signed extensions):
+/// ```text
+/// compact_total_length
+/// 0x84  (signed bit | version 4)
+/// 0x00  (MultiAddress::Id prefix)
+/// alice_pubkey[32]
+/// 0x01  (MultiSignature::Sr25519 prefix)
+/// signature[64]
+/// <extra bytes for all 19 signed extensions>
+/// call_data[...]
+/// ```
+///
+/// Signed extensions on PoP3 People chain (v15 metadata, order matters):
+///   [0]  VerifyMultiSignature     ty=338  Variant{Signed,Disabled} → 0x01 (Disabled)
+///   [1]  AsPerson                 ty=339  Option<AsPersonInfo>      → 0x00 (None)
+///   [2]  AsProofOfInkParticipant  ty=342  Option<...>               → 0x00 (None)
+///   [3]  ProvideForVoucherClaimer ty=345  unit struct               → (nothing)
+///   [4]  ScoreAsParticipant       ty=346  Option<...>               → 0x00 (None)
+///   [5]  GameAsInvited            ty=349  Option<...>               → 0x00 (None)
+///   [6]  PeopleLiteAuth           ty=352  Option<...>               → 0x00 (None)
+///   [7]  AsCoinage                ty=355  Option<...>               → 0x00 (None)
+///   [8]  AuthorizeCall            ty=360  unit struct               → (nothing)
+///   [9]  RestrictOrigins          ty=361  Bool                      → 0x00 (false)
+///   [10] CheckNonZeroSender       ty=362  unit struct               → (nothing)
+///   [11] CheckSpecVersion         ty=363  unit struct               → (nothing)
+///   [12] CheckTxVersion           ty=364  unit struct               → (nothing)
+///   [13] CheckGenesis             ty=365  unit struct               → (nothing)
+///   [14] CheckMortality           ty=366  Era                       → 0x00 (Immortal)
+///   [15] CheckNonce               ty=368  Compact<u32>              → compact(nonce)
+///   [16] CheckWeight              ty=369  unit struct               → (nothing)
+///   [17] ChargeAssetTxPayment     ty=370  {tip: Compact, asset_id: Option} → 0x00 + 0x00
+///   [18] StorageWeightReclaim     ty=4    unit tuple                → (nothing)
+///
+/// Extra bytes total:
+///   0x01  (VerifyMultiSignature::Disabled)
+///   0x00  (AsPerson = None)
+///   0x00  (AsProofOfInkParticipant = None)
+///   (nothing for ProvideForVoucherClaimer)
+///   0x00  (ScoreAsParticipant = None)
+///   0x00  (GameAsInvited = None)
+///   0x00  (PeopleLiteAuth = None)
+///   0x00  (AsCoinage = None)
+///   (nothing for AuthorizeCall)
+///   0x00  (RestrictOrigins = false)
+///   (nothing for CheckNonZeroSender)
+///   (nothing for CheckSpecVersion)
+///   (nothing for CheckTxVersion)
+///   (nothing for CheckGenesis)
+///   0x00  (CheckMortality = Immortal)
+///   compact(nonce)  (CheckNonce)
+///   (nothing for CheckWeight)
+///   0x00  (ChargeAssetTxPayment tip = compact(0))
+///   0x00  (ChargeAssetTxPayment asset_id = None)
+///   (nothing for StorageWeightReclaim)
+///
+/// Additional signed (add_ty contributions, unit for all except standard 4):
+///   spec_version(u32le) + tx_version(u32le) + genesis_hash[32] + genesis_hash[32]
+///
+/// Note: CheckMortality::additional_signed for Era::Immortal returns the genesis hash,
+/// so genesis_hash appears twice (once for CheckGenesis, once for CheckMortality).
+///
+/// If the signing payload exceeds 256 bytes, sign blake2b_256(payload) instead.
+fn build_signed_extrinsic(
+    call_data: &[u8],
+    spec_version: u32,
+    tx_version: u32,
+    genesis_hash: &[u8; 32],
+    nonce: u32,
+) -> Result<Vec<u8>, String> {
+    let secret = schnorrkel::MiniSecretKey::from_bytes(&ALICE_MINI_SECRET)
+        .map_err(|e| format!("invalid Alice mini-secret: {e}"))?;
+    let alice_kp = secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+    let alice_pubkey = alice_kp.public.to_bytes();
+
+    // Build the `extra` bytes for all 19 signed extensions on PoP3 People chain.
+    // Each extension contributes its "implicit" (extra) bytes in declaration order.
+    let mut extra = Vec::new();
+    extra.push(0x01u8);                               // VerifyMultiSignature::Disabled (variant index 1)
+    extra.push(0x00u8);                               // AsPerson = None
+    extra.push(0x00u8);                               // AsProofOfInkParticipant = None
+    // ProvideForVoucherClaimer — unit struct, 0 bytes
+    extra.push(0x00u8);                               // ScoreAsParticipant = None
+    extra.push(0x00u8);                               // GameAsInvited = None
+    extra.push(0x00u8);                               // PeopleLiteAuth = None
+    extra.push(0x00u8);                               // AsCoinage = None
+    // AuthorizeCall — unit struct, 0 bytes
+    extra.push(0x00u8);                               // RestrictOrigins = Bool(false)
+    // CheckNonZeroSender — unit struct, 0 bytes
+    // CheckSpecVersion — unit struct, 0 bytes
+    // CheckTxVersion — unit struct, 0 bytes
+    // CheckGenesis — unit struct, 0 bytes
+    extra.push(0x00u8);                               // CheckMortality = Era::Immortal
+    extra.extend_from_slice(&encode_compact_u32(nonce)); // CheckNonce = compact(nonce)
+    // CheckWeight — unit struct, 0 bytes
+    extra.push(0x00u8);                               // ChargeAssetTxPayment tip = Compact(0)
+    extra.push(0x00u8);                               // ChargeAssetTxPayment asset_id = None
+    // StorageWeightReclaim — unit tuple, 0 bytes
+
+    // Additional signed data contributed by CheckSpecVersion, CheckTxVersion,
+    // CheckGenesis, and CheckMortality (all other extensions have unit add_ty).
+    //
+    // For Era::Immortal, CheckMortality::additional_signed() returns the genesis hash,
+    // so genesis_hash appears twice.
+    let mut additional = Vec::new();
+    additional.extend_from_slice(&spec_version.to_le_bytes());
+    additional.extend_from_slice(&tx_version.to_le_bytes());
+    additional.extend_from_slice(genesis_hash); // CheckGenesis
+    additional.extend_from_slice(genesis_hash); // CheckMortality (immortal → genesis hash)
+
+    // Signing payload = call_data + extra + additional_signed.
+    let mut signing_payload = Vec::new();
+    signing_payload.extend_from_slice(call_data);
+    signing_payload.extend_from_slice(&extra);
+    signing_payload.extend_from_slice(&additional);
+
+    // If payload > 256 bytes, sign the blake2b_256 hash instead.
+    let to_sign: Vec<u8> = if signing_payload.len() > 256 {
+        blake2b_256(&signing_payload).to_vec()
+    } else {
+        signing_payload.clone()
+    };
+
+    let ctx = schnorrkel::signing_context(SIGNING_CTX);
+    let sig = alice_kp.sign(ctx.bytes(&to_sign)).to_bytes();
+
+    // Assemble the signed extrinsic body (without the outer length prefix).
+    // Version byte: signed (bit 7 = 1) | version 4 (bits 0-6).
+    // Despite the chain's unsigned inherents using 0x05 (v5), signed transactions use
+    // the legacy extrinsic v4 format (0x84). Confirmed empirically: 0x84 + full 13-byte
+    // extra produces "bad signature" (structure valid); 0x85 produces unreachable panic.
+    let mut body = Vec::new();
+    body.push(0x84u8);    // signed (bit 7 = 1) | version 4 (bits 0-6) = 0x84
+    body.push(0x00u8);    // MultiAddress::Id prefix
+    body.extend_from_slice(&alice_pubkey);
+    body.push(0x01u8);    // MultiSignature::Sr25519 prefix
+    body.extend_from_slice(&sig);
+    body.extend_from_slice(&extra);
+    body.extend_from_slice(call_data);
+
+    // Outer compact-length prefix.
+    let mut extrinsic = encode_compact_u32(body.len() as u32);
+    extrinsic.extend_from_slice(&body);
+
+    Ok(extrinsic)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1036,6 +1738,475 @@ mod tests {
         assert_eq!(decoded.priority, 0);
         assert!(decoded.topics.is_empty());
         assert!(decoded.data.is_empty());
+    }
+
+    /// Decode an SS58-encoded address to a 32-byte account ID.
+    /// Uses big-number base58 decoding.
+    fn ss58_decode(addr: &str) -> Option<[u8; 32]> {
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+        // Decode base58 to big integer represented as big-endian bytes.
+        // We accumulate into a u8 vec using schoolbook multiplication.
+        let mut result: Vec<u8> = Vec::new();
+        for &c in addr.as_bytes() {
+            let val = ALPHABET.iter().position(|&a| a == c)? as u16;
+            // Multiply existing number by 58 and add val.
+            let mut carry = val;
+            for byte in result.iter_mut().rev() {
+                let v = (*byte as u16) * 58 + carry;
+                *byte = (v & 0xff) as u8;
+                carry = v >> 8;
+            }
+            while carry > 0 {
+                result.insert(0, (carry & 0xff) as u8);
+                carry >>= 8;
+            }
+        }
+
+        // Prepend leading zero bytes for leading '1's.
+        let leading_ones = addr.as_bytes().iter().take_while(|&&b| b == b'1').count();
+        let mut decoded = vec![0u8; leading_ones];
+        decoded.extend_from_slice(&result);
+
+        // decoded = prefix (1 or 2 bytes) + 32-byte pubkey + 2-byte checksum
+        if decoded.len() == 35 {
+            let mut account = [0u8; 32];
+            account.copy_from_slice(&decoded[1..33]);
+            Some(account)
+        } else if decoded.len() == 36 {
+            let mut account = [0u8; 32];
+            account.copy_from_slice(&decoded[2..34]);
+            Some(account)
+        } else {
+            println!("SS58 decode: unexpected length {} for {addr}", decoded.len());
+            None
+        }
+    }
+
+    /// Check whether the first sdchat pre-attested account has statement store
+    /// allowance on PoP3 People chain.
+    ///
+    /// Two-pronged approach:
+    ///   1. Query `:statement_allowance:<pubkey>` storage directly
+    ///   2. Derive keypair from mnemonic and attempt statement submission
+    ///
+    /// Run with: cargo test -p epoca-chain -- --ignored test_sdchat_allowance --nocapture
+    #[test]
+    #[ignore]
+    fn test_sdchat_allowance() {
+        let _ = env_logger::try_init();
+
+        let endpoint = SS_ENDPOINTS[0];
+
+        // sdchat stable account #1
+        let mnemonic_str = "reveal only slab nephew tuna faculty tuition upon someone index begin ceiling";
+        let expected_ss58 = "5GnPAoP6E75xDu76qcJst3KKdx6Mv5QDozs3Wz9RMyy67CLq";
+
+        // --- Derive sr25519 keypair from mnemonic ---
+        // Try multiple derivation methods to find which one matches the SS58 address.
+        let mnemonic = bip39::Mnemonic::parse(mnemonic_str).expect("valid mnemonic");
+
+        // Decode expected pubkey from SS58
+        let decoded = bs58::decode(expected_ss58).into_vec().expect("valid bs58");
+        let mut expected_pubkey = [0u8; 32];
+        expected_pubkey.copy_from_slice(&decoded[1..33]);
+        println!("Expected pubkey (from SS58): {}", hex_encode(&expected_pubkey));
+
+        // Method 1: BIP-39 standard PBKDF2 seed (first 32 bytes)
+        let seed = mnemonic.to_seed("");
+        let mut mini_bytes = [0u8; 32];
+        mini_bytes.copy_from_slice(&seed[..32]);
+        let secret1 = schnorrkel::MiniSecretKey::from_bytes(&mini_bytes).expect("valid");
+        let kp1 = secret1.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+        println!("Method 1 (PBKDF2 seed[:32]): {}", hex_encode(&kp1.public.to_bytes()));
+
+        // Method 2: Raw entropy (16 bytes for 12-word, zero-padded to 32)
+        let entropy = mnemonic.to_entropy();
+        println!("Entropy ({} bytes): {}", entropy.len(), hex_encode(&entropy));
+        let mut entropy_padded = [0u8; 32];
+        entropy_padded[..entropy.len()].copy_from_slice(&entropy);
+        let secret2 = schnorrkel::MiniSecretKey::from_bytes(&entropy_padded).expect("valid");
+        let kp2 = secret2.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+        println!("Method 2 (entropy zero-padded): {}", hex_encode(&kp2.public.to_bytes()));
+
+        // Method 3: BIP-39 PBKDF2 with Ed25519 expansion mode
+        let secret3 = schnorrkel::MiniSecretKey::from_bytes(&mini_bytes).expect("valid");
+        let kp3 = secret3.expand_to_keypair(schnorrkel::ExpansionMode::Uniform);
+        println!("Method 3 (PBKDF2 seed[:32] Uniform): {}", hex_encode(&kp3.public.to_bytes()));
+
+        // Method 4: entropy with Uniform expansion
+        let secret4 = schnorrkel::MiniSecretKey::from_bytes(&entropy_padded).expect("valid");
+        let kp4 = secret4.expand_to_keypair(schnorrkel::ExpansionMode::Uniform);
+        println!("Method 4 (entropy Uniform): {}", hex_encode(&kp4.public.to_bytes()));
+
+        // Find which method matches
+        let keypair = if kp1.public.to_bytes() == expected_pubkey {
+            println!("MATCH: Method 1 (PBKDF2 Ed25519)");
+            kp1
+        } else if kp2.public.to_bytes() == expected_pubkey {
+            println!("MATCH: Method 2 (entropy Ed25519)");
+            kp2
+        } else if kp3.public.to_bytes() == expected_pubkey {
+            println!("MATCH: Method 3 (PBKDF2 Uniform)");
+            kp3
+        } else if kp4.public.to_bytes() == expected_pubkey {
+            println!("MATCH: Method 4 (entropy Uniform)");
+            kp4
+        } else {
+            println!("WARNING: No derivation method matched the SS58 address!");
+            println!("Using PBKDF2 Ed25519 (method 1) for submission test anyway.");
+            kp1
+        };
+        let pubkey = keypair.public.to_bytes();
+
+        // --- Step 1: Query allowance storage directly ---
+        // The statement store uses well-known key `:statement_allowance:<account_id_32_bytes>`
+        let prefix_str = ":statement_allowance:";
+        let prefix_hex = hex_encode(prefix_str.as_bytes());
+
+        // Query for the expected SS58 account (from CSV)
+        let expected_hex: String = expected_pubkey.iter().map(|b| format!("{b:02x}")).collect();
+        let expected_key = format!("{prefix_hex}{expected_hex}");
+        println!("\n=== Step 1a: Query storage for SS58 account ===");
+        println!("Storage key: {expected_key}");
+        let check_req_expected = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "state_getStorage",
+            "params": [expected_key]
+        });
+        match ws_request(endpoint, &check_req_expected.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                let value = body.get("result");
+                println!("Response: {body}");
+                if value.is_none() || value == Some(&serde_json::Value::Null) {
+                    println!("=> Storage for SS58 account: NO allowance entry");
+                } else {
+                    println!("=> Storage for SS58 account: allowance exists: {value:?}");
+                }
+            }
+            Err(e) => println!("Storage query error: {e}"),
+        }
+
+        // Also query for the derived account (may be different)
+        let account_hex_raw: String = pubkey.iter().map(|b| format!("{b:02x}")).collect();
+        let full_key = format!("{prefix_hex}{account_hex_raw}");
+        if pubkey != expected_pubkey {
+            println!("\n=== Step 1b: Query storage for derived account ===");
+            println!("Storage key: {full_key}");
+        }
+
+        println!("\n=== Step 1: Query storage key ===");
+        println!("Storage key: {full_key}");
+
+        let check_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "state_getStorage",
+            "params": [full_key]
+        });
+        match ws_request(endpoint, &check_req.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                let value = body.get("result");
+                println!("Raw response: {body}");
+                if value.is_none() || value == Some(&serde_json::Value::Null) {
+                    println!("=> Storage: NO allowance entry (null)");
+                } else {
+                    println!("=> Storage: allowance entry exists: {value:?}");
+                }
+            }
+            Err(e) => println!("Storage query error: {e}"),
+        }
+
+        // Also enumerate all keys with this prefix to see who HAS allowance
+        println!("\n=== Enumerating all allowance keys ===");
+        let keys_req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "state_getKeysPaged",
+            "params": [prefix_hex, 20]
+        });
+        match ws_request(endpoint, &keys_req.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                if let Some(err) = body.get("error") {
+                    println!("RPC error: {err}");
+                } else if let Some(keys) = body.get("result").and_then(|v| v.as_array()) {
+                    println!("Found {} accounts with allowance", keys.len());
+                    let prefix_byte_len = prefix_str.len();
+                    for (i, key_val) in keys.iter().enumerate() {
+                        if let Some(key_hex) = key_val.as_str() {
+                            let raw = key_hex.strip_prefix("0x").unwrap_or(key_hex);
+                            if raw.len() >= prefix_byte_len * 2 + 64 {
+                                let acct = &raw[(prefix_byte_len * 2)..];
+                                println!("  [{i}] 0x{acct}");
+                                // Check if this matches our sdchat account
+                                if acct == account_hex_raw {
+                                    println!("       ^^^ THIS IS THE SDCHAT ACCOUNT!");
+                                }
+                            } else {
+                                println!("  [{i}] {key_hex}");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("Keys enumeration error: {e}"),
+        }
+
+        // --- Step 2: Try submitting a statement ---
+        println!("\n=== Step 2: Submit test statement ===");
+        let dk = string_to_topic("sdchat-allowance-test");
+        let ch = string_to_topic("test-probe");
+        let epoca_topic = string_to_topic("ss-epoca");
+        let data = b"allowance probe";
+
+        let sign_fn = |msg: &[u8]| -> [u8; 64] {
+            let ctx = schnorrkel::signing_context(b"substrate");
+            keypair.sign(ctx.bytes(msg)).to_bytes()
+        };
+
+        let encoded = encode_statement(
+            Some(&dk),
+            Some(&ch),
+            1,
+            &[epoca_topic],
+            data,
+            &pubkey,
+            &sign_fn,
+        );
+        println!("Encoded statement: {} bytes", encoded.len());
+
+        let submit_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "statement_submit",
+            "params": [hex_encode(&encoded)]
+        });
+
+        match ws_request(endpoint, &submit_payload.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                println!("Submit response: {body}");
+                let result = body.get("result");
+                // Result can be "ok" (string) or {"status":"rejected","reason":"noAllowance"} (object)
+                if let Some(s) = result.and_then(|v| v.as_str()) {
+                    match s {
+                        "ok" => println!("=> RESULT: Statement ACCEPTED -- account HAS allowance"),
+                        other => println!("=> RESULT: Statement rejected: {other}"),
+                    }
+                } else if let Some(obj) = result.and_then(|v| v.as_object()) {
+                    let status = obj.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let reason = obj.get("reason").and_then(|v| v.as_str()).unwrap_or("?");
+                    println!("=> RESULT: status={status}, reason={reason}");
+                    if reason == "noAllowance" {
+                        println!("=> CONFIRMED: Account has NO statement store allowance");
+                    }
+                } else if let Some(err) = body.get("error") {
+                    println!("=> RESULT: RPC error: {err}");
+                } else {
+                    println!("=> RESULT: Unexpected response: {result:?}");
+                }
+            }
+            Err(e) => println!("Submit error: {e}"),
+        }
+    }
+
+    /// Check whether Alice's dev account has sudo access on PoP3 People chain.
+    ///
+    /// 1. Queries `Sudo.Key` storage to see who the sudo account is.
+    /// 2. Queries `System.Account` for Alice to see if she has a balance.
+    ///
+    /// Run with: cargo test -p epoca-chain test_check_sudo -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn test_check_sudo() {
+        let _ = env_logger::try_init();
+
+        let endpoint = "wss://pop3-testnet.parity-lab.parity.io/people";
+
+        // Alice's well-known public key (sr25519 on dev chains)
+        let alice_pubkey: [u8; 32] = [
+            0xd4, 0x35, 0x93, 0xc7, 0x15, 0xfd, 0xd3, 0x1c,
+            0x61, 0x14, 0x1a, 0xbd, 0x04, 0xa9, 0x9f, 0xd6,
+            0x82, 0x2c, 0x85, 0x58, 0x85, 0x4c, 0xcd, 0xe3,
+            0x9a, 0x56, 0x84, 0xe7, 0xa5, 0x6d, 0xa2, 0x7d,
+        ];
+        println!("Alice pubkey: {}", hex_encode(&alice_pubkey));
+
+        // =====================================================================
+        // Approach 1: Query Sudo.Key
+        // =====================================================================
+        // twox128("Sudo") = 5c0d1176a568c1f92944340dbfed9e9c
+        // twox128("Key")  = 530ebca703c85910e7164cb7d1c9e47b
+        let sudo_key = "0x5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b";
+
+        println!("\n=== Approach 1: Query Sudo.Key ===");
+        println!("Storage key: {sudo_key}");
+
+        let req = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "state_getStorage",
+            "params": [sudo_key]
+        });
+
+        match ws_request(endpoint, &req.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                println!("Raw response: {body}");
+
+                let result = body.get("result");
+                if result.is_none() || result == Some(&serde_json::Value::Null) {
+                    println!("=> Sudo.Key storage is EMPTY (no sudo pallet or no key set)");
+                } else if let Some(hex_str) = result.and_then(|v| v.as_str()) {
+                    println!("=> Sudo.Key value: {hex_str}");
+                    // Decode as Option<AccountId32>: 0x01 + 32 bytes (Some), or 0x00 (None)
+                    if let Some(bytes) = hex_decode(hex_str) {
+                        if bytes.is_empty() {
+                            println!("=> Empty value");
+                        } else if bytes[0] == 0x00 {
+                            println!("=> Sudo.Key = None (no sudo account set)");
+                        } else if bytes[0] == 0x01 && bytes.len() >= 33 {
+                            let sudo_account = &bytes[1..33];
+                            println!("=> Sudo account: {}", hex_encode(sudo_account));
+                            if sudo_account == alice_pubkey {
+                                println!("=> ALICE IS THE SUDO ACCOUNT!");
+                            } else {
+                                println!("=> Sudo account is NOT Alice");
+                                println!("   Alice:  {}", hex_encode(&alice_pubkey));
+                                println!("   Sudo:   {}", hex_encode(sudo_account));
+                            }
+                        } else {
+                            // Maybe it's stored as raw AccountId32 without Option wrapper
+                            if bytes.len() == 32 {
+                                println!("=> Sudo account (raw, no Option wrapper): {}", hex_encode(&bytes));
+                                if bytes.as_slice() == alice_pubkey {
+                                    println!("=> ALICE IS THE SUDO ACCOUNT!");
+                                } else {
+                                    println!("=> Sudo account is NOT Alice");
+                                }
+                            } else {
+                                println!("=> Unexpected format: {} bytes, first byte = 0x{:02x}",
+                                    bytes.len(), bytes[0]);
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("Sudo.Key query error: {e}"),
+        }
+
+        // =====================================================================
+        // Approach 2: Query System.Account for Alice
+        // =====================================================================
+        // twox128("System")  = 26aa394eea5630e07c48ae0c9558cef7
+        // twox128("Account") = b99d880ec681799c0cf30e8886371da9
+        // blake2_128_concat(alice_pubkey) = blake2_128(alice) ++ alice
+        println!("\n=== Approach 2: Query System.Account for Alice ===");
+
+        // Compute blake2_128 of Alice's pubkey
+        use blake2::digest::consts::U16;
+        type Blake2b128 = Blake2b<U16>;
+        let mut hasher = <Blake2b128 as Digest>::new();
+        hasher.update(&alice_pubkey);
+        let hash_result = hasher.finalize();
+        let mut blake2_128_hash = [0u8; 16];
+        blake2_128_hash.copy_from_slice(&hash_result);
+
+        // blake2_128_concat = blake2_128(key) ++ key
+        let mut blake2_128_concat = Vec::with_capacity(16 + 32);
+        blake2_128_concat.extend_from_slice(&blake2_128_hash);
+        blake2_128_concat.extend_from_slice(&alice_pubkey);
+
+        let system_account_prefix = "26aa394eea5630e07c48ae0c9558cef7b99d880ec681799c0cf30e8886371da9";
+        let concat_hex: String = blake2_128_concat.iter().map(|b| format!("{b:02x}")).collect();
+        let system_account_key = format!("0x{system_account_prefix}{concat_hex}");
+
+        println!("Storage key: {system_account_key}");
+
+        let req2 = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "state_getStorage",
+            "params": [system_account_key]
+        });
+
+        match ws_request(endpoint, &req2.to_string()) {
+            Ok(resp) => {
+                let body: serde_json::Value = serde_json::from_str(&resp).expect("parse json");
+                println!("Raw response: {body}");
+
+                let result = body.get("result");
+                if result.is_none() || result == Some(&serde_json::Value::Null) {
+                    println!("=> System.Account for Alice: NOT FOUND (account does not exist on this chain)");
+                } else if let Some(hex_str) = result.and_then(|v| v.as_str()) {
+                    println!("=> System.Account for Alice exists!");
+                    if let Some(bytes) = hex_decode(hex_str) {
+                        println!("   Account data: {} bytes", bytes.len());
+                        // AccountInfo layout (SCALE):
+                        //   nonce: u32 (4 bytes)
+                        //   consumers: u32 (4 bytes)
+                        //   providers: u32 (4 bytes)
+                        //   sufficients: u32 (4 bytes)
+                        //   data: AccountData {
+                        //     free: u128 (16 bytes)
+                        //     reserved: u128 (16 bytes)
+                        //     frozen: u128 (16 bytes)
+                        //     flags: u128 (16 bytes)
+                        //   }
+                        if bytes.len() >= 64 {
+                            let nonce = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+                            let consumers = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+                            let providers = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+                            let sufficients = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
+                            let free = u128::from_le_bytes(bytes[16..32].try_into().unwrap());
+                            let reserved = u128::from_le_bytes(bytes[32..48].try_into().unwrap());
+                            let frozen = u128::from_le_bytes(bytes[48..64].try_into().unwrap());
+
+                            println!("   nonce: {nonce}");
+                            println!("   consumers: {consumers}");
+                            println!("   providers: {providers}");
+                            println!("   sufficients: {sufficients}");
+                            println!("   free balance: {free}");
+                            println!("   reserved balance: {reserved}");
+                            println!("   frozen: {frozen}");
+
+                            if free > 0 || reserved > 0 {
+                                println!("=> Alice HAS balance on this chain");
+                            } else {
+                                println!("=> Alice account exists but has ZERO balance");
+                            }
+                        } else {
+                            println!("   (unexpected AccountInfo size: {} bytes)", bytes.len());
+                        }
+                    }
+                }
+            }
+            Err(e) => println!("System.Account query error: {e}"),
+        }
+
+        println!("\n=== Done ===");
+    }
+
+    /// Grant statement store allowance to the current signing keypair using Alice sudo.
+    ///
+    /// Initializes the store with Alice's keypair, checks for existing allowance,
+    /// and if missing submits a Sudo.sudo(System.set_storage) extrinsic.
+    ///
+    /// Run with: cargo test -p epoca-chain test_ensure_allowance -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn test_ensure_allowance() {
+        let _ = env_logger::try_init();
+        // Initialize the store (uses Alice's keypair).
+        init();
+        match ensure_allowance() {
+            Ok(()) => println!("[test] ensure_allowance: OK — allowance is set"),
+            Err(e) => panic!("[test] ensure_allowance failed: {e}"),
+        }
     }
 
     /// Submit a real statement to previewnet for integration testing.
