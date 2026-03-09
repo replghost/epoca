@@ -12,3 +12,4 @@ chain = "paseo-asset-hub"
 [permissions]
 sign = true
 statements = true
+media = ["camera", "audio"]

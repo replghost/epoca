@@ -121,6 +121,15 @@ pub fn init_network_bridge() {
 
 /// Called by the statement store poll loop when a statement arrives from the network.
 fn on_network_statement(stmt: epoca_chain::statement_store::Statement) {
+    // Skip statements signed by our own key — already delivered locally by write().
+    if let Some(signer) = &stmt.proof_pubkey {
+        if let Some(our_key) = epoca_chain::statement_store::public_key_bytes() {
+            if signer == &our_key {
+                return;
+            }
+        }
+    }
+
     // Decode the data as JSON to extract author, channel, data, timestamp.
     let json_str = match String::from_utf8(stmt.data.clone()) {
         Ok(s) => s,

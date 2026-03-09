@@ -27,14 +27,60 @@
   .status .value { color: #00d4aa; }
   .status .err { color: #f85149; }
   .status .warn { color: #d29922; }
+
+  /* Video section */
+  .video-section {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .video-section h2 { font-size: 0.85rem; color: #484f58; margin-bottom: 0.5rem; }
+  .video-grid {
+    display: flex;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+  .video-box {
+    position: relative;
+    background: #000;
+    border-radius: 6px;
+    overflow: hidden;
+    width: 280px;
+    height: 210px;
+  }
+  .video-box video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .video-label {
+    position: absolute;
+    bottom: 6px;
+    left: 8px;
+    font-size: 0.65rem;
+    color: #fff;
+    background: rgba(0,0,0,0.6);
+    padding: 2px 6px;
+    border-radius: 3px;
+  }
+  .video-status {
+    font-size: 0.75rem;
+    margin-bottom: 0.5rem;
+  }
+  .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+  /* Chat */
   #messages {
     background: #161b22;
     border: 1px solid #21262d;
     border-radius: 6px;
     padding: 0.75rem;
     margin-bottom: 1rem;
-    min-height: 200px;
-    max-height: 400px;
+    min-height: 120px;
+    max-height: 200px;
     overflow-y: auto;
     font-size: 0.8rem;
   }
@@ -44,10 +90,7 @@
   .msg .self { color: #00d4aa; }
   .msg .txt { color: #c9d1d9; }
   .msg .sys { color: #d29922; font-style: italic; }
-  .input-row {
-    display: flex;
-    gap: 0.5rem;
-  }
+  .input-row { display: flex; gap: 0.5rem; }
   input[type="text"] {
     flex: 1;
     background: #0d1117;
@@ -69,9 +112,12 @@
     font-weight: 700;
     font-family: inherit;
     font-size: 0.85rem;
+    white-space: nowrap;
   }
   button:hover { background: #00e8bb; }
   button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+  button.danger { background: #f85149; color: #fff; }
+  button.danger:hover { background: #ff6e67; }
   #log {
     background: #0d1117;
     border: 1px solid #21262d;
@@ -86,22 +132,44 @@
 </style>
 </head>
 <body>
-  <h1>P2P Statement Test</h1>
-  <div class="sub">Tests cross-host statement delivery via PoP3 People chain</div>
+  <h1>P2P Test</h1>
+  <div class="sub">Chat + video via PoP3 statement store signaling</div>
 
   <div class="status">
     <span class="label">Identity: </span>
     <span id="identity" class="value">loading...</span>
     <br>
-    <span class="label">Channel: </span>
-    <span id="channel-display" class="value">—</span>
+    <span class="label">Peer ID: </span>
+    <span id="peer-id" class="value" style="cursor:pointer;user-select:all" onclick="navigator.clipboard.writeText(this.textContent).then(function(){document.getElementById('peer-id').style.color='#d29922';setTimeout(function(){document.getElementById('peer-id').style.color=''},500)})">loading...</span>
     <br>
     <span class="label">Status: </span>
     <span id="status" class="warn">connecting...</span>
   </div>
 
-  <div id="messages"></div>
+  <!-- Video -->
+  <div class="video-section">
+    <h2>Video Call</h2>
+    <div class="video-grid">
+      <div class="video-box">
+        <video id="local-video" autoplay playsinline muted></video>
+        <div class="video-label">You</div>
+      </div>
+      <div class="video-box" id="remote-box" style="display:none">
+        <video id="remote-video" autoplay playsinline></video>
+        <div class="video-label" id="remote-label">Remote</div>
+      </div>
+    </div>
+    <div class="video-status" id="video-status"></div>
+    <div class="btn-row">
+      <button id="cam-btn" onclick="startCamera()" disabled>Start Camera</button>
+      <input type="text" id="peer-input" placeholder="Paste remote peer ID..." style="flex:1;min-width:150px" disabled>
+      <button id="call-btn" onclick="startCall()" disabled>Call</button>
+      <button id="hangup-btn" class="danger" onclick="hangup()" style="display:none">Hang Up</button>
+    </div>
+  </div>
 
+  <!-- Chat -->
+  <div id="messages"></div>
   <div class="input-row">
     <input type="text" id="msg-input" placeholder="Type a message..." disabled>
     <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
@@ -112,7 +180,9 @@
 <script>
   var CHANNEL = 'p2p-test-room';
   var myAddr = null;
-  var msgCount = 0;
+  var myPeerId = null;
+  var localTrackIds = [];
+  var currentSessionId = null;
 
   function log(msg) {
     var el = document.getElementById('log');
@@ -134,11 +204,21 @@
     }
     el.appendChild(div);
     el.scrollTop = el.scrollHeight;
-    msgCount++;
   }
 
   function escHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function addJoinMessage(author, peerId) {
+    var el = document.getElementById('messages');
+    var div = document.createElement('div');
+    div.className = 'msg';
+    var ts = new Date().toISOString().slice(11, 19);
+    var pidSpan = '<span style="color:#00d4aa;cursor:pointer;user-select:all" title="Click to use as call target" onclick="document.getElementById(\'peer-input\').value=this.textContent">' + escHtml(peerId) + '</span>';
+    div.innerHTML = '<span class="ts">' + ts + '</span> <span class="sys">joined: </span>' + pidSpan;
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
   }
 
   function setStatus(text, cls) {
@@ -147,11 +227,14 @@
     el.textContent = text;
   }
 
+  function setVideoStatus(text) {
+    document.getElementById('video-status').textContent = text;
+  }
+
   // --- Init ---
   async function init() {
     if (!window.epoca) {
       setStatus('window.epoca not available', 'err');
-      log('ERROR: no host API');
       return;
     }
 
@@ -165,79 +248,175 @@
     } catch (e) {
       document.getElementById('identity').className = 'err';
       document.getElementById('identity').textContent = e.message;
-      log('getAddress error: ' + e.message);
     }
 
-    // 2. Listen for statements
+    // 2. Get peer ID
+    try {
+      myPeerId = await window.epoca.media.getPeerId();
+      document.getElementById('peer-id').textContent = myPeerId;
+      log('peer ID: ' + myPeerId);
+    } catch (e) {
+      document.getElementById('peer-id').className = 'err';
+      document.getElementById('peer-id').textContent = e.message;
+    }
+
+    // 3. Listen for events
     window.epoca.on('statement', function(data) {
-      log('statement: ch=' + data.channel + ' from=' + (data.author||'?').slice(0,8) + ' data=' + data.data.slice(0,80));
+      log('stmt: ' + (data.author||'?').slice(0,8) + ' ' + data.data.slice(0,60));
       var isSelf = data.author === myAddr;
-      // Parse the data — we send JSON {text: "..."}
       try {
         var parsed = JSON.parse(data.data);
         if (parsed.type === 'join') {
-          addMessage(data.author, 'joined the room', false, true);
+          var pid = parsed.peerId || '?';
+          addJoinMessage(data.author, pid);
         } else if (parsed.type === 'msg') {
           addMessage(data.author, parsed.text, isSelf, false);
-        } else {
-          addMessage(data.author, data.data, isSelf, false);
         }
       } catch (e) {
-        // Plain text fallback
         addMessage(data.author || '?', data.data, isSelf, false);
       }
     });
 
-    // 3. Subscribe to channel
+    window.epoca.on('mediaTrackReady', function(data) {
+      log('track ready: ' + data.trackId + ' ' + data.kind);
+      if (data.trackId === pendingVideoTrackId && data.kind === 'video') {
+        pendingVideoTrackId = null;
+        window.epoca.media.attachTrack(data.trackId, 'local-video');
+        setVideoStatus('Camera ready — enter a peer ID and click Call');
+        document.getElementById('call-btn').disabled = false;
+      }
+    });
+
+    window.epoca.on('mediaConnected', function(data) {
+      log('connected! session=' + data.sessionId + ' peer=' + data.peer);
+      setVideoStatus('Connected to ' + data.peer);
+      document.getElementById('hangup-btn').style.display = '';
+      document.getElementById('call-btn').disabled = true;
+    });
+
+    window.epoca.on('mediaRemoteTrack', function(data) {
+      log('remote track: ' + data.trackId + ' ' + data.kind);
+      if (data.kind === 'video') {
+        document.getElementById('remote-box').style.display = '';
+        document.getElementById('remote-label').textContent = 'Remote';
+        window.epoca.media.attachTrack(data.trackId, 'remote-video');
+        setVideoStatus('Video connected');
+      }
+    });
+
+    window.epoca.on('mediaClosed', function(data) {
+      log('session closed: ' + data.reason);
+      setVideoStatus('Call ended: ' + data.reason);
+      document.getElementById('remote-box').style.display = 'none';
+      document.getElementById('hangup-btn').style.display = 'none';
+      document.getElementById('call-btn').disabled = false;
+      currentSessionId = null;
+    });
+
+    window.epoca.on('mediaError', function(data) {
+      log('media error: ' + data.error);
+      setVideoStatus('Error: ' + data.error);
+    });
+
+    // 4. Subscribe to chat channel
     try {
       await window.epoca.statements.subscribe(CHANNEL);
-      document.getElementById('channel-display').textContent = CHANNEL;
-      setStatus('subscribed — waiting for messages', 'value');
+      setStatus('connected', 'value');
       log('subscribed to: ' + CHANNEL);
     } catch (e) {
       setStatus('subscribe failed: ' + e.message, 'err');
-      log('subscribe error: ' + e.message);
       return;
     }
 
-    // 4. Enable input
+    // 5. Enable UI
     document.getElementById('msg-input').disabled = false;
     document.getElementById('send-btn').disabled = false;
+    document.getElementById('cam-btn').disabled = false;
+    document.getElementById('peer-input').disabled = false;
     document.getElementById('msg-input').focus();
 
-    // 5. Announce join
+    // 6. Announce join (include peer ID so others can call us)
     try {
-      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'join'}));
+      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'join', peerId: myPeerId}));
       addMessage(null, 'You joined the room', false, true);
-      setStatus('connected — send a message!', 'value');
-      log('join announcement sent');
     } catch (e) {
-      setStatus('write failed: ' + e.message, 'err');
-      log('write error: ' + e.message);
+      log('join write error: ' + e.message);
     }
   }
 
+  // --- Chat ---
   async function sendMessage() {
     var input = document.getElementById('msg-input');
     var text = input.value.trim();
     if (!text) return;
     input.value = '';
-
-    var payload = JSON.stringify({type: 'msg', text: text});
-    log('sending: ' + payload);
     try {
-      await window.epoca.statements.write(CHANNEL, payload);
-      log('sent OK');
+      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'msg', text: text}));
     } catch (e) {
       addMessage(null, 'Send failed: ' + e.message, false, true);
-      log('send error: ' + e.message);
     }
   }
 
-  // Enter key to send
   document.getElementById('msg-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendMessage();
   });
+
+  // --- Video ---
+  var pendingVideoTrackId = null;
+
+  async function startCamera() {
+    setVideoStatus('Starting camera...');
+    try {
+      var result = await window.epoca.media.getUserMedia({ audio: true, video: true });
+      log('getUserMedia: ' + JSON.stringify(result));
+      localTrackIds = [];
+      if (result.audioTrackId) localTrackIds.push(result.audioTrackId);
+      if (result.videoTrackId) {
+        localTrackIds.push(result.videoTrackId);
+        // Don't attach yet — wait for mediaTrackReady event
+        pendingVideoTrackId = result.videoTrackId;
+      }
+      setVideoStatus('Waiting for camera...');
+      document.getElementById('cam-btn').disabled = true;
+    } catch (e) {
+      setVideoStatus('Camera error: ' + (e.message || e));
+      log('getUserMedia error: ' + (e.message || e));
+    }
+  }
+
+  async function startCall() {
+    var peer = document.getElementById('peer-input').value.trim();
+    if (!peer) {
+      setVideoStatus('Enter a peer ID first');
+      return;
+    }
+    setVideoStatus('Calling ' + peer + '...');
+    log('calling peer: ' + peer + ' with tracks: ' + JSON.stringify(localTrackIds));
+    try {
+      currentSessionId = await window.epoca.media.connect(peer, localTrackIds);
+      log('session created: ' + currentSessionId);
+      setVideoStatus('Signaling... session=' + currentSessionId);
+      document.getElementById('hangup-btn').style.display = '';
+    } catch (e) {
+      setVideoStatus('Call failed: ' + (e.message || e));
+      log('connect error: ' + (e.message || e));
+    }
+  }
+
+  async function hangup() {
+    if (!currentSessionId) return;
+    log('hanging up session ' + currentSessionId);
+    try {
+      await window.epoca.media.close(currentSessionId);
+    } catch (e) {
+      log('close error: ' + (e.message || e));
+    }
+    document.getElementById('remote-box').style.display = 'none';
+    document.getElementById('hangup-btn').style.display = 'none';
+    document.getElementById('call-btn').disabled = false;
+    currentSessionId = null;
+    setVideoStatus('Call ended');
+  }
 
   init();
 </script>

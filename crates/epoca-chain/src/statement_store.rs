@@ -722,6 +722,12 @@ pub fn public_key_hex() -> Option<String> {
     st.as_ref().map(|s| hex_encode(&s.keypair.public.to_bytes()))
 }
 
+/// Return the raw 32-byte public key of the signing keypair.
+pub fn public_key_bytes() -> Option<[u8; 32]> {
+    let st = store().lock().unwrap();
+    st.as_ref().map(|s| s.keypair.public.to_bytes())
+}
+
 /// Submit a statement to the network.
 ///
 /// `app_id` is used as the decryption_key namespace.
