@@ -5,6 +5,13 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
+/// Per-file asset entry in the `[assets]` manifest table.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssetEntry {
+    pub sha256: String,
+    pub size: u64,
+}
+
 /// Top-level manifest parsed from `manifest.toml` inside a `.prod` bundle.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProdManifest {
@@ -12,6 +19,9 @@ pub struct ProdManifest {
     pub permissions: Option<PermissionsMeta>,
     pub sandbox: Option<SandboxMeta>,
     pub webapp: Option<WebAppMeta>,
+    /// Per-file asset manifest with SHA-256 hashes and sizes.
+    #[serde(default)]
+    pub assets: Option<HashMap<String, AssetEntry>>,
 }
 
 /// Application metadata.

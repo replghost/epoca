@@ -532,12 +532,24 @@ pub fn resolve_owner(name: &str) -> Option<String> {
 /// Fetch content from IPFS and return a map of filename → bytes.
 ///
 /// Strategy:
-/// 1. Request directory listing via `Accept: text/html` + `?format=html` query
+/// 1. Request the entire directory tree as a CARv1 file via `?format=car`.
+///    Single round-trip; the parser handles both standard UnixFS and
+///    zstd-compressed leaves.
+/// 2. Request directory listing via `Accept: text/html` + `?format=html` query
 ///    param (forces gateway to return listing instead of index.html).
-/// 2. If that works, parse filenames from listing and fetch each file.
-/// 3. If the CID is a single file (not a directory), treat it as index.html.
+/// 3. If that works, parse filenames from listing and fetch each file.
+/// 4. If the CID is a single file (not a directory), treat it as index.html.
 pub fn fetch_ipfs(cid: &str) -> Result<HashMap<String, Vec<u8>>, String> {
     log::info!("[dotns] fetching IPFS: {cid}");
+
+    // Try CAR format first — single roundtrip, returns entire directory tree.
+    let car_url = format!("{IPFS_GATEWAY}/ipfs/{cid}?format=car");
+    if let Ok((ct, body)) = fetch_ipfs_url_large(&car_url) {
+        if ct.contains("vnd.ipld.car") || is_car_file(&body) {
+            log::info!("[dotns] got CAR response ({} bytes), parsing...", body.len());
+            return parse_car_to_assets(&body);
+        }
+    }
 
     // Try to get a directory listing. Many gateways support ?format=html to
     // force directory listing mode even when index.html exists.
@@ -677,7 +689,7 @@ fn looks_like_directory_listing(body: &[u8]) -> bool {
 
 fn fetch_ipfs_directory(cid: &str, listing_html: &[u8]) -> Result<HashMap<String, Vec<u8>>, String> {
     let mut assets = HashMap::new();
-    fetch_ipfs_directory_recursive(cid, "", listing_html, &mut assets)?;
+    fetch_ipfs_directory_recursive(cid, "", listing_html, &mut assets, 0)?;
     if assets.is_empty() {
         return Err("directory listing contained no files".into());
     }
@@ -689,7 +701,12 @@ fn fetch_ipfs_directory_recursive(
     prefix: &str,
     listing_html: &[u8],
     assets: &mut HashMap<String, Vec<u8>>,
+    depth: u8,
 ) -> Result<(), String> {
+    if depth > 8 {
+        log::warn!("[dotns] recursion depth limit reached at prefix={prefix}");
+        return Ok(());
+    }
     let html = std::str::from_utf8(listing_html).map_err(|e| format!("invalid UTF-8: {e}"))?;
 
     // Extract entry names from the directory listing.
@@ -732,7 +749,7 @@ fn fetch_ipfs_directory_recursive(
                 Ok((_, body)) => {
                     if looks_like_directory_listing(&body) {
                         log::info!("[dotns] recursing into subdirectory: {path}");
-                        fetch_ipfs_directory_recursive(sc, &path, &body, assets)?;
+                        fetch_ipfs_directory_recursive(sc, &path, &body, assets, depth + 1)?;
                         continue;
                     }
                 }
@@ -823,37 +840,68 @@ pub fn resolve_and_fetch_full(name: &str) -> Result<DotnsResolution, String> {
 pub fn resolve_lazy(name: &str) -> Result<DotnsLazyResolution, String> {
     log::info!("[dotns] resolve_lazy START for {name}");
     let cid = resolve_dotns(name)?;
-    log::info!("[dotns] resolve_dotns done, cid={cid}, now resolving owner...");
+    log::info!("[dotns] resolve_dotns done, cid={cid}");
     let owner = resolve_owner(name);
-    log::info!("[dotns] lazy resolve {name}: cid={cid}, owner={owner:?}");
 
     let manifest_url = format!("{IPFS_GATEWAY}/ipfs/{cid}/manifest.toml");
-    let manifest_bytes = match fetch_ipfs_url(&manifest_url) {
+    let mut manifest_bytes = match fetch_ipfs_url(&manifest_url) {
         Ok((_, bytes)) => {
             log::info!("[dotns] fetched manifest.toml ({} bytes)", bytes.len());
             Some(bytes)
         }
         Err(e) => {
-            log::info!("[dotns] no manifest.toml ({e}), treating as raw web app");
+            log::info!("[dotns] no manifest.toml at sub-path ({e}), will try raw CID");
             None
         }
     };
 
+    // If manifest sub-path failed, the CID may point to a single .prod blob
+    // (CARv1 archive). Fetch the raw CID and try to parse it as CAR.
+    let mut all_files = HashMap::new();
+    if manifest_bytes.is_none() {
+        let raw_url = format!("{IPFS_GATEWAY}/ipfs/{cid}");
+        if let Ok((ct, body)) = fetch_ipfs_url_large(&raw_url) {
+            if ct.contains("vnd.ipld.car") || ct.contains("octet-stream") || is_car_file(&body) {
+                if is_car_file(&body) {
+                    log::info!("[dotns] raw CID is a CAR file ({} bytes), parsing...", body.len());
+                    match parse_car_to_assets(&body) {
+                        Ok(files) => {
+                            log::info!("[dotns] parsed {} files from CAR blob", files.len());
+                            manifest_bytes = files.get("manifest.toml").cloned();
+                            all_files = files;
+                        }
+                        Err(e) => {
+                            log::warn!("[dotns] failed to parse CAR blob: {e}");
+                        }
+                    }
+                }
+            }
+        }
+
+        if manifest_bytes.is_none() {
+            log::info!("[dotns] no manifest found, treating as raw web app");
+        }
+    }
+
     // For non-SPA bundles (application/framebuffer), fetch all files eagerly
     // since PolkaVM sandboxes need program_bytes + assets upfront.
-    let mut all_files = HashMap::new();
-    if let Some(ref raw) = manifest_bytes {
-        if let Ok(s) = std::str::from_utf8(raw) {
-            let is_spa = s.contains("app_type = \"spa\"");
-            if !is_spa {
-                log::info!("[dotns] non-SPA bundle detected, fetching all files...");
-                match fetch_ipfs(&cid) {
-                    Ok(files) => {
-                        log::info!("[dotns] fetched {} files from IPFS", files.len());
-                        all_files = files;
-                    }
-                    Err(e) => {
-                        log::warn!("[dotns] failed to fetch bundle files: {e}");
+    if all_files.is_empty() {
+        if let Some(ref raw) = manifest_bytes {
+            if let Ok(s) = std::str::from_utf8(raw) {
+                // Detect SPA: not an explicit framebuffer type and no legacy framebuffer=true flag.
+                let is_spa = !s.contains("app_type = \"framebuffer\"") && !s.contains("framebuffer = true");
+                if !is_spa {
+                    log::info!("[dotns] SPA bundle, skipping eager file fetch");
+                } else {
+                    log::info!("[dotns] non-SPA bundle, fetching all files...");
+                    match fetch_ipfs(&cid) {
+                        Ok(files) => {
+                            log::info!("[dotns] fetched {} files from IPFS", files.len());
+                            all_files = files;
+                        }
+                        Err(e) => {
+                            log::warn!("[dotns] failed to fetch bundle files: {e}");
+                        }
                     }
                 }
             }

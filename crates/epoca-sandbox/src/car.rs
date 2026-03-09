@@ -213,7 +213,7 @@ pub fn parse_dagpb_links(pb: &[u8]) -> Vec<(String, Vec<u8>, u64)> {
                         _ => break,
                     }
                 }
-                if !name.is_empty() && !hash.is_empty() {
+                if !hash.is_empty() {
                     links.push((name, hash, tsize));
                 }
             }
@@ -392,6 +392,7 @@ fn extract_unixfs_data(unixfs: &[u8]) -> Result<Vec<u8>, String> {
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
 
 /// Read an unsigned varint (LEB128). Returns (value, bytes_consumed).
 pub fn read_uvarint(data: &[u8]) -> Result<(usize, usize), String> {

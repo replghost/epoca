@@ -29,6 +29,8 @@ fn main() {
         eprintln!("Warning: no manifest.toml found in bundle directory");
     }
 
+    inject_asset_hashes(&mut files);
+
     let car_bytes = build_car(&files);
     std::fs::write(&output, &car_bytes).expect("failed to write output");
     eprintln!(
@@ -37,6 +39,34 @@ fn main() {
         car_bytes.len(),
         files.len()
     );
+}
+
+/// Compute SHA-256 and size for every file in the bundle, then append an
+/// `[assets]` TOML section to `manifest.toml` so consumers can verify
+/// individual files without re-hashing the whole archive.
+fn inject_asset_hashes(files: &mut BTreeMap<String, Vec<u8>>) {
+    // Build the [assets] section over all files except manifest.toml itself.
+    let mut section = String::from("\n[assets]\n");
+    for (path, data) in files.iter() {
+        if path == "manifest.toml" {
+            continue;
+        }
+        let hash = Sha256::digest(data);
+        let hex_hash = hash
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let size = data.len() as u64;
+        // Use quoted keys so paths with slashes are valid TOML.
+        section.push_str(&format!(
+            "[assets.\"{}\"]\nsha256 = \"{}\"\nsize = {}\n",
+            path, hex_hash, size
+        ));
+    }
+
+    // Append the section to the existing manifest content.
+    let manifest = files.entry("manifest.toml".to_string()).or_default();
+    manifest.extend_from_slice(section.as_bytes());
 }
 
 fn collect_files(

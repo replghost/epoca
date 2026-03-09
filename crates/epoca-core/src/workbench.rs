@@ -1082,8 +1082,12 @@ impl Workbench {
 
                         let wallet_address: Result<String, String> =
                             if wallet_enabled && cx.has_global::<crate::wallet::WalletGlobal>() {
-                                cx.global_mut::<crate::wallet::WalletGlobal>()
-                                    .manager
+                                let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
+                                // Auto-unlock if locked (triggers Touch ID on macOS)
+                                if matches!(wg.manager.state(), epoca_wallet::WalletState::Locked) {
+                                    let _ = wg.manager.unlock();
+                                }
+                                wg.manager
                                     .app_address(&app_id)
                                     .map_err(|e| e.to_string())
                             } else {
@@ -3051,6 +3055,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.active_tab_id = Some(tab_id);
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(dot_url, window, inner_cx));
+        if self._loading_glow_task.is_none() {
+            self.start_loading_glow(cx);
+        }
 
         self.pending_dot_load = Some(PendingDotLoad {
             tab_id,
@@ -3210,6 +3217,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                                             sandbox: "strict".into(),
                                             chain: "paseo-asset-hub".into(),
                                         }),
+                                        assets: None,
                                     }
                                 };
 
@@ -3223,10 +3231,27 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                                 // For non-SPA bundles, extract program + assets from fetched files.
                                 let mut all_files = resolution.all_files;
                                 let program_bytes = all_files.remove("app.polkavm");
+
+                                // Early return with a user-visible error when a framebuffer
+                                // bundle is missing its PolkaVM program binary.
+                                let is_framebuffer = manifest.app.app_type == "framebuffer"
+                                    || manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer);
+                                if is_framebuffer && program_bytes.is_none() {
+                                    log::error!("[dotns] app.polkavm not found in IPFS bundle for {name_for_bundle}");
+                                    if let Some(le) = loading_entity_weak.upgrade() {
+                                        le.update(cx, |tab, cx| {
+                                            tab.set_error("app.polkavm not found in bundle".into());
+                                            cx.notify();
+                                        });
+                                    }
+                                    return;
+                                }
+
                                 // Strip "assets/" prefix from remaining files.
                                 let mut assets = HashMap::new();
                                 for (k, v) in all_files {
                                     if k == "manifest.toml" { continue; }
+                                    if k.ends_with(".prod") { continue; }
                                     let key = k.strip_prefix("assets/").unwrap_or(&k).to_string();
                                     assets.insert(key, v);
                                 }
@@ -7355,7 +7380,9 @@ impl Render for Workbench {
 
         // Handle deferred dot-loading approve/deny (subscribe callbacks lack window).
         if let Some((bundle, verification)) = self.pending_dot_approve.take() {
-            if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
+            let is_framebuffer = bundle.manifest.app.app_type == "framebuffer"
+                || bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer);
+            if is_framebuffer {
                 // Framebuffer/application bundle — open in PolkaVM sandbox.
                 self.open_framebuffer_app(bundle, window, cx);
             } else {
