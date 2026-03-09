@@ -573,22 +573,43 @@ pub fn set_on_statement(cb: StatementCallback) {
 /// App-level namespace topic.
 const EPOCA_TOPIC: &str = "ss-epoca";
 
-/// Initialize the statement store with a dev sr25519 keypair (Alice).
-///
-/// Uses Alice's well-known dev account which has allowance on PoP3 testnet.
-/// TODO: use the wallet keypair or register identity for ephemeral keys.
-/// Call once at startup.
+/// Load a persisted sr25519 keypair from ~/.epoca/peer_key, or generate and save one.
+fn load_or_generate_keypair() -> Keypair {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = std::path::PathBuf::from(&home).join(".epoca");
+    let path = dir.join("peer_key");
+
+    // Try loading existing key (32-byte mini secret).
+    if let Ok(data) = std::fs::read(&path) {
+        if data.len() == 32 {
+            if let Ok(mini) = schnorrkel::MiniSecretKey::from_bytes(&data) {
+                let kp = mini.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+                log::info!("[ss] loaded peer key from {}", path.display());
+                return kp;
+            }
+        }
+        log::warn!("[ss] invalid peer_key file, regenerating");
+    }
+
+    // Generate new key and save.
+    let mini = schnorrkel::MiniSecretKey::generate();
+    let kp = mini.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+    let _ = std::fs::create_dir_all(&dir);
+    if let Err(e) = std::fs::write(&path, mini.as_bytes()) {
+        log::warn!("[ss] failed to save peer key: {e}");
+    } else {
+        log::info!("[ss] generated and saved new peer key to {}", path.display());
+    }
+    kp
+}
+
+/// Initialize the statement store with a persisted keypair.
+/// On first run, generates a random key and saves it to ~/.epoca/peer_key.
+/// On subsequent runs, loads the saved key for a stable peer identity.
+/// Alice's sudo provisions the on-chain allowance for this key.
 pub fn init() {
-    // Alice's mini-secret key — well-known on all Substrate dev/test chains.
-    let alice_seed: [u8; 32] = [
-        0xe5, 0xbe, 0x9a, 0x50, 0x92, 0xb8, 0x1b, 0xca,
-        0x64, 0xbe, 0x81, 0xd2, 0x12, 0xe7, 0xf2, 0xf9,
-        0xeb, 0xa1, 0x83, 0xbb, 0x7a, 0x90, 0x95, 0x4f,
-        0x7b, 0x76, 0x36, 0x1f, 0x6e, 0xdb, 0x5c, 0x0a,
-    ];
-    let secret = schnorrkel::MiniSecretKey::from_bytes(&alice_seed)
-        .expect("valid mini secret");
-    let keypair = secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+    let keypair = load_or_generate_keypair();
+    log::info!("[ss] using persisted peer key");
     let pubkey = keypair.public.to_bytes();
     let running = Arc::new(AtomicBool::new(true));
     let running2 = running.clone();

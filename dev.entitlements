@@ -22,10 +22,5 @@
     <key>com.apple.developer.web-browser</key>
     <true/>
 
-    <!-- Camera and microphone access for WebRTC / media APIs in WKWebView. -->
-    <key>com.apple.security.device.camera</key>
-    <true/>
-    <key>com.apple.security.device.audio-input</key>
-    <true/>
 </dict>
 </plist>
