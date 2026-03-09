@@ -571,10 +571,13 @@ fn run_webrtc_offerer(
 
     let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
+    let now = Instant::now();
     let mut rtc = Rtc::builder()
         .set_ice_lite(false)
         .set_stats_interval(None)
-        .build(Instant::now());
+        .build(now);
+    // Initialize DTLS timing before any SDP or poll operations.
+    let _ = rtc.handle_input(Input::Timeout(now));
 
     let candidate =
         Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
@@ -633,10 +636,13 @@ fn run_webrtc_answerer(
 
     let (socket, local_addr, srflx_addr) = bind_ice_socket(conn_id)?;
 
+    let now = Instant::now();
     let mut rtc = Rtc::builder()
         .set_ice_lite(false)
         .set_stats_interval(None)
-        .build(Instant::now());
+        .build(now);
+    // Initialize DTLS timing before any SDP or poll operations.
+    let _ = rtc.handle_input(Input::Timeout(now));
 
     let candidate =
         Candidate::host(local_addr, "udp").map_err(|e| format!("host candidate: {e}"))?;
