@@ -105,6 +105,11 @@ pub enum TabKind {
 // Welcome Panel
 // ---------------------------------------------------------------------------
 
+/// Event emitted when the user clicks a link on the onboarding page.
+pub enum WelcomeEvent {
+    Navigate(String),
+}
+
 pub struct WelcomeTab {
     focus_handle: FocusHandle,
 }
@@ -118,6 +123,7 @@ impl WelcomeTab {
 }
 
 impl EventEmitter<PanelEvent> for WelcomeTab {}
+impl EventEmitter<WelcomeEvent> for WelcomeTab {}
 
 impl Focusable for WelcomeTab {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -141,33 +147,185 @@ impl Panel for WelcomeTab {
 
 impl Render for WelcomeTab {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let surface = rgb(0x1c1c1e);
+        let text_primary = rgba(0xffffffe0);
+        let text_secondary = rgba(0xffffff80);
+        let text_muted = rgba(0xffffff50);
+        let accent = rgba(0x00d4aaff);
+        let violet = rgba(0x8b5cf6ff);
+        let card_bg = rgba(0xffffff08);
+        let card_border = rgba(0xffffff10);
+
+        let link_pill = move |id: &str, label: &str, url: &str| {
+            let url_owned = url.to_string();
+            div()
+                .id(SharedString::from(id.to_string()))
+                .px(px(12.0))
+                .py(px(6.0))
+                .rounded(px(6.0))
+                .bg(rgba(0x00d4aa14))
+                .border_1()
+                .border_color(rgba(0x00d4aa30))
+                .cursor_pointer()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(accent)
+                .child(label.to_string())
+                .on_click(cx.listener(move |this, _ev, _window, cx| {
+                    cx.emit(WelcomeEvent::Navigate(url_owned.clone()));
+                    let _ = this;
+                }))
+        };
+
+        let section_title = move |text: &str| {
+            div()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_muted)
+                                .child(text.to_string().to_uppercase())
+        };
+
         div()
             .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .size_full()
-            .items_center()
-            .justify_center()
-            .gap_4()
+            .bg(surface)
+            .overflow_y_scrollbar()
             .child(
                 div()
-                    .text_xl()
-                    .text_color(cx.theme().foreground)
-                    .child("Welcome to Epoca"),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child("A cross-platform programmable workbench"),
-            )
-            .child(
-                div()
+                    .w_full()
+                    .max_w(px(520.0))
+                    .mx_auto()
+                    .py(px(60.0))
+                    .px(px(32.0))
                     .flex()
-                    .gap_2()
-                    .child(Button::new("new-file").primary().label("New File"))
-                    .child(Button::new("open-file").label("Open File"))
-                    .child(Button::new("open-app").label("Open App")),
+                    .flex_col()
+                    .gap(px(40.0))
+                    // ── Header ──
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_2xl()
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(text_primary)
+                                    .child("Welcome to Epoca"),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .line_height(px(22.0))
+                                    .text_color(text_secondary)
+                                    .child("A privacy-first browser with a built-in sandbox for running apps directly in tabs."),
+                            ),
+                    )
+                    // ── Browse the web ──
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .child(section_title("Browse the web"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .line_height(px(22.0))
+                                    .text_color(text_secondary)
+                                    .child("Type any URL or search term into the address bar. Content blocking is on by default."),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(8.0))
+                                    .child(link_pill("link-eff", "eff.org", "https://www.eff.org"))
+                                    .child(link_pill("link-wiki", "wikipedia.org", "https://wikipedia.org"))
+                                    .child(link_pill("link-hn", "news.ycombinator.com", "https://news.ycombinator.com")),
+                            ),
+                    )
+                    // ── .dot apps ──
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .child(section_title(".dot apps"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .line_height(px(22.0))
+                                    .text_color(text_secondary)
+                                    .child("Apps hosted on IPFS and resolved via on-chain name registry. Type a .dot address to load one."),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap(px(8.0))
+                                    .child(link_pill("link-doom", "doomgame.dot", "dot://doomgame.dot"))
+                                    .child(link_pill("link-testapp", "mytestapp.dot", "dot://mytestapp.dot"))
+                                    .child(link_pill("link-getsome", "getsome.dot", "dot://getsome.dot")),
+                            ),
+                    )
+                    // ── Keyboard shortcuts ──
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(12.0))
+                            .child(section_title("Shortcuts"))
+                            .child(
+                                div()
+                                    .rounded(px(10.0))
+                                    .bg(card_bg)
+                                    .border_1()
+                                    .border_color(card_border)
+                                    .p(px(16.0))
+                                    .flex()
+                                    .flex_col()
+                                    .gap(px(8.0))
+                                    .child(Self::shortcut_row("New tab", "Cmd + T", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Close tab", "Cmd + W", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Address bar", "Cmd + L", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Find in page", "Cmd + F", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Toggle sidebar", "Cmd + S", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Settings", "Cmd + ,", text_secondary, text_muted))
+                                    .child(Self::shortcut_row("Reader mode", "Cmd + Shift + R", text_secondary, text_muted)),
+                            ),
+                    )
+                    // ── Footer hint ──
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_muted)
+                            .child("Type epoca://onboard in the address bar to return here anytime."),
+                    ),
+            )
+    }
+}
+
+impl WelcomeTab {
+    fn shortcut_row(label: &str, keys: &str, label_color: Rgba, key_color: Rgba) -> Div {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(label_color)
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(key_color)
+                    .child(keys.to_string()),
             )
     }
 }
@@ -3244,13 +3402,17 @@ impl SpaTab {
             });
 
         let has_chain_perm = permissions.as_ref().map(|p| p.chain).unwrap_or(false);
+        let network_origins: Vec<String> = permissions
+            .as_ref()
+            .and_then(|p| p.network.clone())
+            .unwrap_or_default();
         let entry_url = format!("epocaapp://{}/{}", app_id, entry);
         let mut error = None;
         let mut wv_entity = None;
         let mut sidebar_blocker_ptr: u64 = 0;
         let mut webview_ptr: usize = 0;
 
-        log::info!("[spa] entry_url={entry_url} app_id={app_id} chain_perm={has_chain_perm}");
+        log::info!("[spa] entry_url={entry_url} app_id={app_id} chain_perm={has_chain_perm} network={network_origins:?}");
         // Build the SPA WebView with custom protocol + host API injection.
         match gpui_component::wry::WebViewBuilder::new()
             .with_url(&entry_url)
@@ -3262,6 +3424,7 @@ impl SpaTab {
             .with_custom_protocol("epocaapp".to_string(), {
                 let app_id_inner = app_id.clone();
                 let chain_perm = has_chain_perm;
+                let allowed_origins = network_origins.clone();
                 move |_wv, request| {
                     let uri = request.uri().to_string();
                     log::info!("[spa-proto] request URI: {uri}");
@@ -3275,7 +3438,13 @@ impl SpaTab {
                     let path = if path.is_empty() { "index.html" } else { path };
 
                     log::info!("[spa-proto] app_id={app_id_inner} path={path}");
-                    let connect_src = if chain_perm { "connect-src 'self' epocaapp: wss:" } else { "connect-src 'self' epocaapp:" };
+                    // Build connect-src with chain (wss:) and any approved https origins.
+                    let mut connect_parts = vec!["'self'".to_string(), "epocaapp:".to_string()];
+                    if chain_perm { connect_parts.push("wss:".to_string()); }
+                    for origin in &allowed_origins {
+                        connect_parts.push(origin.clone());
+                    }
+                    let connect_src = format!("connect-src {}", connect_parts.join(" "));
                     let csp = format!("default-src 'self' epocaapp:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' epocaapp: data: blob:; font-src 'self' epocaapp: data:; {connect_src}; object-src 'none'; frame-src 'none'");
                     // Look up the asset; if not found and the path looks like
                     // an HTML route (no file extension), fall back to index.html
@@ -3327,10 +3496,25 @@ impl SpaTab {
   window.WebSocket.CLOSED=OrigWS.CLOSED;
 })();
 "#;
+                                    let csp_violation_listener = r#"
+(function(){
+  document.addEventListener('securitypolicyviolation', function(e) {
+    if (e.violatedDirective && e.violatedDirective.startsWith('connect-src') && e.blockedURI && e.blockedURI.startsWith('https://')) {
+      try {
+        var origin = new URL(e.blockedURI).origin;
+        if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.epocaHost) {
+          window.webkit.messageHandlers.epocaHost.postMessage({id:0, method:'requestHttpPermission', params:{origin: origin}});
+        }
+      } catch(_){}
+    }
+  });
+})();
+"#;
                                     let inject = format!(
-                                        "<script>{}</script><script>{}</script><script>{}</script><script>{}</script>",
+                                        "<script>{}</script><script>{}</script><script>{}</script><script>{}</script><script>{}</script>",
                                         CONSOLE_RELAY_SCRIPT,
                                         wss_interceptor,
+                                        csp_violation_listener,
                                         crate::spa::HOST_API_SCRIPT,
                                         epoca_hostapi::HOST_API_BRIDGE_SCRIPT,
                                     );

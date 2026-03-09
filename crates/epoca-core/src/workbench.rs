@@ -74,7 +74,7 @@ fn is_window_fullscreen() -> bool {
 use crate::tabs::{
     AppLibraryTab, BookmarksTab, CodeEditorTab, DeclarativeAppTab, DotLoadingEvent, DotLoadingTab,
     DotStatus, DotVerification, FramebufferAppTab, SandboxAppTab, SettingsTab, SpaTab, TabEntry,
-    TabKind, WebViewTab,
+    TabKind, WebViewTab, WelcomeEvent, WelcomeTab,
 };
 use epoca_sandbox::ProdBundle;
 
@@ -226,6 +226,12 @@ struct PendingWssPermission {
     call_id: u64,
 }
 
+struct PendingHttpPermission {
+    app_id: String,
+    origin: String,
+    webview_ptr: usize,
+}
+
 /// A pending BTC wallet sign request awaiting user confirmation.
 pub(crate) struct PendingBtcWalletSign {
     pub webview_ptr: usize,
@@ -303,6 +309,9 @@ pub struct Workbench {
     pub(crate) find_input: Entity<InputState>,
     _find_subscription: Subscription,
 
+    // Onboarding
+    _welcome_subscription: Option<Subscription>,
+
     // History
     _history_cleanup: Option<Task<()>>,
     omnibox_history_results: Vec<crate::history::HistoryEntry>,
@@ -318,6 +327,7 @@ pub struct Workbench {
     pending_data_connect: Option<PendingDataConnect>,
     pending_hostapi_sign: Option<PendingHostApiSign>,
     pending_wss_permission: Option<PendingWssPermission>,
+    pending_http_permission: Option<PendingHttpPermission>,
     /// Active dot-loading tab state — holds bundle waiting for user approval.
     pending_dot_load: Option<PendingDotLoad>,
     /// Monotonically increasing counter for dot-load requests; detached DOTNS
@@ -507,6 +517,7 @@ impl Workbench {
             find_open: false,
             find_input,
             _find_subscription,
+            _welcome_subscription: None,
             _history_cleanup: Some(history_cleanup_task),
             omnibox_history_results: Vec::new(),
             pending_wallet_sign: None,
@@ -518,6 +529,7 @@ impl Workbench {
             pending_data_connect: None,
             pending_hostapi_sign: None,
             pending_wss_permission: None,
+            pending_http_permission: None,
             pending_dot_load: None,
             dot_load_generation: 0,
             approved_dot_apps: crate::session::load_approved_apps(),
@@ -672,8 +684,12 @@ impl Workbench {
         if let Some(raw_text) = self.pending_nav.take() {
             self.url_bar_clicked = false;
             let text = raw_text.trim().to_string();
+            // Internal epoca:// pages.
+            if text == "epoca://onboard" || text == "epoca://welcome" {
+                self.open_onboard(window, cx);
+                cx.notify();
             // dot:// scheme or bare .dot TLD — resolve to local .prod bundle or DOTNS on-chain.
-            if text.starts_with("dot://") {
+            } else if text.starts_with("dot://") {
                 log::info!("[nav] dot:// URL detected: {text}");
                 self.resolve_dot_url(&text, window, cx);
             } else if text.ends_with(".dot") && !text.contains('/') && !text.contains(' ') {
@@ -1256,6 +1272,17 @@ impl Workbench {
                                             url,
                                             webview_ptr: ev_ptr,
                                             call_id: id,
+                                        });
+                                        self.trigger_sidebar_show(false, cx);
+                                        cx.notify();
+                                    }
+                                }
+                                crate::js_bridge::BridgeAsyncAction::HttpPermission { origin } => {
+                                    if self.pending_http_permission.is_none() {
+                                        self.pending_http_permission = Some(PendingHttpPermission {
+                                            app_id: app_id.clone(),
+                                            origin,
+                                            webview_ptr: ev_ptr,
                                         });
                                         self.trigger_sidebar_show(false, cx);
                                         cx.notify();
@@ -2212,6 +2239,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if text == "epoca://onboard" || text == "epoca://welcome" {
+            self.open_onboard(window, cx);
+            return;
+        }
         if text.starts_with("dot://") {
             self.resolve_dot_url(text, window, cx);
             return;
@@ -2378,6 +2409,49 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let focus_handle = self.omnibox_input.focus_handle(cx);
         window.focus(&focus_handle);
         cx.notify();
+    }
+
+    /// Open the onboarding page, or switch to it if already open.
+    pub fn open_onboard(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(id) = self.tabs.iter().find(|t| t.kind == TabKind::Welcome).map(|t| t.id) {
+            self.active_tab_id = Some(id);
+            cx.notify();
+            return;
+        }
+        let id = self.alloc_id();
+        let entity = cx.new(|cx| WelcomeTab::new(cx));
+        self._welcome_subscription = Some(cx.subscribe(&entity, Self::on_welcome_event));
+        self.tabs.push(TabEntry {
+            id,
+            kind: TabKind::Welcome,
+            title: "Welcome".to_string(),
+            icon: IconName::Globe,
+            entity: entity.into(),
+            pinned: false,
+            nav: None,
+            favicon_url: None,
+            context_id: None,
+            loading_progress: 0.0,
+            reader_active: false,
+            readerable: false,
+            dot_verification: None,
+        });
+        self.active_tab_id = Some(id);
+        cx.notify();
+    }
+
+    fn on_welcome_event(
+        &mut self,
+        _entity: Entity<WelcomeTab>,
+        event: &WelcomeEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            WelcomeEvent::Navigate(url) => {
+                self.pending_nav = Some(url.clone());
+                cx.notify();
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -2960,6 +3034,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .as_ref()
             .map(|p| p.data)
             .unwrap_or(false);
+        let is_ipfs = bundle.ipfs_cid.is_some();
         let entity = cx.new(|cx| {
             SpaTab::new(bundle, window, cx)
         });
@@ -2984,14 +3059,39 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             nav: None,
             favicon_url: None,
             context_id: None,
-                        loading_progress: 0.0,
-                        reader_active: false,
-                        readerable: false,
-                        dot_verification: verification,
+            loading_progress: if is_ipfs { 0.5 } else { 0.0 },
+            reader_active: false,
+            readerable: false,
+            dot_verification: verification,
         });
         self.active_tab_id = Some(id);
         self.url_input
             .update(cx, |s, inner_cx| s.set_value(url_display, window, inner_cx));
+        // For IPFS-loaded SPAs, start the border glow and schedule it to stop
+        // once the lazy asset fetch is done (the custom protocol handler blocks
+        // on IPFS, so WebView loading-progress events don't fire).
+        if is_ipfs {
+            if self._loading_glow_task.is_none() {
+                self.start_loading_glow(cx);
+            }
+            let tab_id = id;
+            cx.spawn(async move |this: WeakEntity<Self>, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(3))
+                    .await;
+                let _ = cx.update(|cx| {
+                    if let Some(entity) = this.upgrade() {
+                        entity.update(cx, |wb, cx| {
+                            if let Some(te) = wb.tabs.iter_mut().find(|t| t.id == tab_id) {
+                                te.loading_progress = 0.0;
+                            }
+                            cx.notify();
+                        });
+                    }
+                });
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -3365,6 +3465,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     // Replace the loading tab with the real SPA tab.
                     let tab_id = load.tab_id;
                     self.tabs.retain(|t| t.id != tab_id);
+                    // Restart the border glow while the SPA/framebuffer spins up.
+                    if self._loading_glow_task.is_none() {
+                        self.start_loading_glow(cx);
+                    }
                     // Need a window ref — defer to pending field picked up in render.
                     self.pending_dot_approve = Some((bundle, verification));
                 } else {
@@ -3844,11 +3948,12 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         let Some(entity) = this.upgrade() else { return true };
                         let mut finished = false;
                         entity.update(cx, |wb, cx| {
-                            let active_loading = wb
+                            let tab_loading = wb
                                 .active_tab_id
                                 .and_then(|id| wb.tabs.iter().find(|t| t.id == id))
                                 .map(|t| t.loading_progress > 0.0 && t.loading_progress < 1.0)
                                 .unwrap_or(false);
+                            let active_loading = tab_loading || wb.pending_dot_approve.is_some();
                             if active_loading {
                                 // Pulse phase while loading
                                 wb.loading_glow_intensity = 1.0;
@@ -5659,6 +5764,7 @@ impl Workbench {
             || self.pending_data_connect.is_some()
             || self.pending_hostapi_sign.is_some()
             || self.pending_wss_permission.is_some()
+            || self.pending_http_permission.is_some()
     }
 
     fn is_pending_high_risk(&self) -> bool {
@@ -5690,6 +5796,7 @@ impl Workbench {
             ChainSubmit,
             DataConnect,
             WssPermission,
+            HttpPermission,
         }
 
         let kind;
@@ -5796,6 +5903,18 @@ impl Workbench {
             note = "This app wants to connect to a blockchain node via WebSocket. Granting this will reload the page.";
             approve_label = "Allow";
             is_high_risk = false;
+        } else if let Some(req) = &self.pending_http_permission {
+            kind = ApprovalKind::HttpPermission;
+            title = "Network Access (HTTPS)";
+            app_label = req.app_id.clone();
+            detail_rows = vec![
+                ("Capability", "HTTPS Fetch".into()),
+                ("Origin", req.origin.clone()),
+            ];
+            payload_text = String::new();
+            note = "This app wants to make HTTPS requests to an external server. Granting this will reload the page.";
+            approve_label = "Allow";
+            is_high_risk = false;
         } else {
             return None;
         }
@@ -5804,7 +5923,7 @@ impl Workbench {
 
         let icon_name = match kind {
             ApprovalKind::ChainSubmit => IconName::ExternalLink,
-            ApprovalKind::DataConnect | ApprovalKind::WssPermission => IconName::Globe,
+            ApprovalKind::DataConnect | ApprovalKind::WssPermission | ApprovalKind::HttpPermission => IconName::Globe,
             _ => IconName::TriangleAlert,
         };
 
@@ -5965,6 +6084,8 @@ impl Workbench {
                                             this.deny_data_connect(cx);
                                         } else if this.pending_wss_permission.is_some() {
                                             this.deny_wss_permission(cx);
+                                        } else if this.pending_http_permission.is_some() {
+                                            this.deny_http_permission(cx);
                                         }
                                     })),
                             )
@@ -6000,6 +6121,8 @@ impl Workbench {
                                             this.approve_data_connect(cx);
                                         } else if this.pending_wss_permission.is_some() {
                                             this.approve_wss_permission(window, cx);
+                                        } else if this.pending_http_permission.is_some() {
+                                            this.approve_http_permission(window, cx);
                                         }
                                     })),
                             ),
@@ -6660,6 +6783,95 @@ impl Workbench {
     fn deny_wss_permission(&mut self, cx: &mut Context<Self>) {
         if let Some(req) = self.pending_wss_permission.take() {
             log::info!("[wss-perm] denied WSS for app={}", req.app_id);
+        }
+        cx.notify();
+    }
+
+    fn approve_http_permission(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(req) = self.pending_http_permission.take() else { return };
+        log::info!("[http-perm] approved HTTPS for app={}, origin={}", req.app_id, req.origin);
+
+        // Find the SPA tab matching this webview pointer.
+        let tab_idx = self.tabs.iter().position(|t| {
+            t.entity.clone().downcast::<SpaTab>().ok()
+                .map(|e| e.read(cx).webview_ptr == req.webview_ptr)
+                .unwrap_or(false)
+        });
+
+        if let Some(idx) = tab_idx {
+            let old_tab_id = self.tabs[idx].id;
+            let was_active = self.active_tab_id == Some(old_tab_id);
+            let verification = self.tabs[idx].dot_verification.clone();
+
+            // Build a manifest clone with the origin added to network permissions.
+            let spa_entity = self.tabs[idx].entity.clone().downcast::<SpaTab>().unwrap();
+            let mut manifest = spa_entity.read(cx).manifest_snapshot().clone();
+            let ipfs_cid = spa_entity.read(cx).ipfs_cid_snapshot().map(|s| s.to_string());
+            if let Some(ref mut perms) = manifest.permissions {
+                let origins = perms.network.get_or_insert_with(Vec::new);
+                if !origins.contains(&req.origin) {
+                    origins.push(req.origin.clone());
+                }
+            } else {
+                manifest.permissions = Some(epoca_sandbox::bundle::PermissionsMeta {
+                    network: Some(vec![req.origin.clone()]),
+                    sign: false,
+                    statements: false,
+                    chain: false,
+                    data: false,
+                    media: Vec::new(),
+                });
+            }
+
+            // Build a new bundle with updated manifest (empty assets — they are already registered).
+            let bundle = ProdBundle {
+                manifest,
+                program_bytes: None,
+                assets: std::collections::HashMap::new(),
+                ipfs_cid,
+            };
+
+            // Remove old tab.
+            self.tabs.remove(idx);
+
+            // Open a new SPA tab with the updated permissions.
+            let new_id = self.alloc_id();
+            let app_name = bundle.manifest.app.name.clone();
+            let app_id = bundle.manifest.app.id.clone();
+            let new_entity = cx.new(|cx| SpaTab::new(bundle, window, cx));
+            let url_display = if let Some(ref dv) = verification {
+                format!("dot://{}.dot", dv.name)
+            } else {
+                format!("dot://{}.dot", app_name)
+            };
+            self.tabs.push(TabEntry {
+                id: new_id,
+                kind: TabKind::Spa { app_id: app_id.clone() },
+                title: app_name,
+                icon: IconName::Globe,
+                entity: new_entity.into(),
+                pinned: false,
+                nav: None,
+                favicon_url: None,
+                context_id: None,
+                loading_progress: 0.0,
+                reader_active: false,
+                readerable: false,
+                dot_verification: verification,
+            });
+            if was_active {
+                self.active_tab_id = Some(new_id);
+                self.url_input.update(cx, |s, inner_cx| {
+                    s.set_value(url_display, window, inner_cx);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    fn deny_http_permission(&mut self, cx: &mut Context<Self>) {
+        if let Some(req) = self.pending_http_permission.take() {
+            log::info!("[http-perm] denied HTTPS for app={}, origin={}", req.app_id, req.origin);
         }
         cx.notify();
     }
@@ -7862,6 +8074,8 @@ impl Workbench {
             Some(("data_connect", false))
         } else if self.pending_wss_permission.is_some() {
             Some(("wss_permission", false))
+        } else if self.pending_http_permission.is_some() {
+            Some(("http_permission", false))
         } else {
             None
         }
@@ -7887,6 +8101,8 @@ impl Workbench {
             self.approve_data_connect(cx);
         } else if self.pending_wss_permission.is_some() {
             self.approve_wss_permission(window, cx);
+        } else if self.pending_http_permission.is_some() {
+            self.approve_http_permission(window, cx);
         } else {
             return false;
         }
@@ -7909,6 +8125,8 @@ impl Workbench {
             self.deny_data_connect(cx);
         } else if self.pending_wss_permission.is_some() {
             self.deny_wss_permission(cx);
+        } else if self.pending_http_permission.is_some() {
+            self.deny_http_permission(cx);
         } else {
             return false;
         }

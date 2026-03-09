@@ -292,9 +292,9 @@ fn main() {
                             wb.open_webview(url.clone(), window, cx);
                         }
                         None => {
-                            // Try session restore; fall back to new tab.
+                            // Try session restore; fall back to onboarding page.
                             if !wb.restore_session(window, cx) {
-                                wb.new_tab(window, cx);
+                                wb.open_onboard(window, cx);
                             }
                         }
                     }

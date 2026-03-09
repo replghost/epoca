@@ -23,6 +23,7 @@ pub enum BridgeRequest {
     MediaSignal { session_id: u64, signal_type: String, data: String },
     MediaGetPeerId,
     RequestWssPermission { url: String },
+    RequestHttpPermission { origin: String },
 }
 
 /// Permission context needed for dispatch decisions.
@@ -83,6 +84,7 @@ pub enum BridgeAsyncAction {
         session_id: u64,
     },
     WssPermission { url: String },
+    HttpPermission { origin: String },
 }
 
 /// Format a JS resolve call for success.
@@ -208,6 +210,10 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
             let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
             Ok(BridgeRequest::RequestWssPermission { url })
         }
+        "requestHttpPermission" => {
+            let origin = params.get("origin").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::RequestHttpPermission { origin })
+        }
         "mediaGetPeerId" => Ok(BridgeRequest::MediaGetPeerId),
         "mediaSignal" => {
             let session_id = params.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -310,6 +316,10 @@ pub fn dispatch(
                 return BridgeResult::Js(resolve_ok(id, "true"));
             }
             BridgeResult::Async(BridgeAsyncAction::WssPermission { url: url.clone() })
+        }
+
+        BridgeRequest::RequestHttpPermission { origin } => {
+            BridgeResult::Async(BridgeAsyncAction::HttpPermission { origin: origin.clone() })
         }
 
         BridgeRequest::StatementsWrite { channel, data } => {

@@ -7,7 +7,7 @@
 <p align="center">
   A programmable, privacy-first browser built on
   <a href="https://gpui.rs">GPUI</a> and
-  <a href=" ">PolkaVM</a>.
+  <a href="https://polkavm.org">PolkaVM</a>.
   <br />
   Native on macOS. No Electron.
 </p>
@@ -28,7 +28,7 @@
 
 ## Install
 
-Build from source (see [below](#building-from-source)). Prebuilt binaries coming soon.
+Build from source (see [below](#building-from-source)).
 
 ## Features
 
@@ -39,6 +39,7 @@ Build from source (see [below](#building-from-source)). Prebuilt binaries coming
 - Session restore across launches
 - Browsing history with configurable retention (session only, 8h, 24h, 7d, 30d)
 - Favicon and live page titles in the tab sidebar
+- Reader mode for distraction-free article reading
 
 **Privacy**
 - Content blocking via WKContentRuleList — blocks before the network request, not after
@@ -48,25 +49,25 @@ Build from source (see [below](#building-from-source)). Prebuilt binaries coming
 - Session contexts — named browsing sessions with separate data stores
 - Cosmetic filtering with element count badge
 
-**Sandboxed Apps**
+**Sandboxed Apps (.dot)**
 - Run apps as browser tabs in a PolkaVM sandbox
-- Declarative UI apps via ZML (a markup language for GPUI)
 - Framebuffer apps (games, emulators) with full pixel-level rendering
 - SPA bundles — sandboxed single-page web apps in `.prod` format
+- `.dot` domain resolution — load apps from IPFS via on-chain name registry
 - Capability broker controls what each app can access
 
-**Wallet (experimental)**
+**Wallet**
 - BIP-39 mnemonic key management with encrypted keystore
-- Ethereum: EIP-191 signing, Helios light client (trustless verification)
-- Bitcoin: BIP-137 signing, Kyoto light client (compact block filters)
 - Polkadot: Smoldot light client, `window.polkadot` injection
+- Ethereum: EIP-191 signing, Helios light client
+- Bitcoin: BIP-137 signing, Kyoto light client (compact block filters)
 - `window.bitcoin` (Unisat-compatible) and `window.ethereum` bridges
 
 ## Building from Source
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs) (stable)
+- [Rust](https://rustup.rs) 1.91+
 - macOS 13+ (Ventura or later)
 - Xcode Command Line Tools: `xcode-select --install`
 
@@ -77,7 +78,13 @@ git clone https://github.com/replghost/epoca.git
 cd epoca
 
 cargo build -p epoca --release
-./target/release/Epoca.app/Contents/MacOS/epoca
+./target/release/epoca
+```
+
+Or use the convenience script:
+
+```bash
+./run-release.sh
 ```
 
 ### Run a guest app
@@ -85,6 +92,9 @@ cargo build -p epoca --release
 ```bash
 # Open a .prod bundle (sandboxed app)
 ./target/release/epoca path/to/app.prod
+
+# Open a .dot app from IPFS
+./target/release/epoca dot://doomgame.dot
 
 # Open a URL
 ./target/release/epoca https://example.com
@@ -101,9 +111,9 @@ crates/
   epoca-protocol/   ViewTree serialization (host <> guest)
   epoca-broker/     capability/permission broker
   epoca-dsl/        ZML parser and evaluator
-  epoca-chain/      light clients (Polkadot, Ethereum, Bitcoin)
+  epoca-chain/      light clients (Polkadot, Ethereum, Bitcoin), DOTNS resolver
   epoca-wallet/     key management and signing
-  epoca-android/    Android renderer (wgpu + cosmic-text)
+  epoca-hostapi/    host API dispatch (JSON + SCALE transports)
 ```
 
 ## Status
