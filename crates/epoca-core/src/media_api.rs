@@ -57,6 +57,8 @@ struct MediaSession {
     state: SessionState,
     /// Signal to stop the signaling background thread.
     signaling_running: Option<Arc<AtomicBool>>,
+    /// Local peer ID used for this session's signaling channels.
+    local_peer_id: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,8 +126,8 @@ pub fn local_peer_id_pub() -> String {
 }
 
 /// Determine if we are the offerer (lower peer ID = offerer).
-pub fn is_offerer(peer_address: &str) -> bool {
-    local_peer_id() < peer_address.to_string()
+pub fn is_offerer(local_peer_id: &str, peer_address: &str) -> bool {
+    local_peer_id < peer_address
 }
 
 /// Signaling channel name: from → to.
@@ -243,6 +245,7 @@ pub fn create_session(
     app_id: &str,
     peer_address: &str,
     track_ids: Vec<u64>,
+    local_peer_id: &str,
 ) -> u64 {
     let session_id = next_session_id();
     let mut st = state().lock().unwrap();
@@ -254,6 +257,7 @@ pub fn create_session(
         track_ids,
         state: SessionState::Signaling,
         signaling_running: None,
+        local_peer_id: local_peer_id.to_string(),
     });
     log::info!("[media] session {session_id} created for peer={peer_address}");
     session_id
@@ -346,8 +350,9 @@ pub fn start_signaling(
     session_id: u64,
     app_id: &str,
     peer_address: &str,
+    local_peer_id: &str,
 ) -> Result<Arc<AtomicBool>, String> {
-    let local_id = local_peer_id();
+    let local_id = local_peer_id.to_string();
     let listen_ch = signal_channel(app_id, peer_address, &local_id);
     let (sub_id, signal_rx) = crate::statements_api::subscribe_direct(app_id, &listen_ch)
         .map_err(|e| format!("subscribe signaling: {e}"))?;
@@ -400,14 +405,13 @@ pub fn publish_signal(
     signal_type: &str,
     data: &str,
 ) -> Result<(), String> {
-    let (app_id, peer_address) = {
+    let (app_id, peer_address, local_id) = {
         let st = state().lock().unwrap();
         let session = st.sessions.get(&session_id)
             .ok_or_else(|| format!("session {session_id} not found"))?;
-        (session.app_id.clone(), session.peer_address.clone())
+        (session.app_id.clone(), session.peer_address.clone(), session.local_peer_id.clone())
     };
 
-    let local_id = local_peer_id();
     let write_ch = signal_channel(&app_id, &local_id, &peer_address);
 
     let payload = serde_json::json!({
@@ -423,18 +427,21 @@ pub fn publish_signal(
 // JS generation for RTCPeerConnection lifecycle
 // ---------------------------------------------------------------------------
 
-/// JS snippet that obtains native WebRTC constructors from a temporary iframe.
-/// The init script removes them from the main window, so the host retrieves
-/// fresh copies from a blank iframe whose contentWindow is untouched.
-/// The iframe is destroyed immediately after capture.
+/// JS snippet that obtains native WebRTC constructors from a hidden iframe.
+/// The main frame's `epocaapp://` scheme doesn't expose RTCPeerConnection,
+/// but a blank iframe (about:blank) does.  The iframe is kept alive —
+/// removing it would tear down the browsing context and invalidate the
+/// native constructors WebKit handed us.
 const GET_RTC_JS: &str = r#"
-        var _f = document.createElement('iframe');
-        _f.style.display = 'none';
-        document.documentElement.appendChild(_f);
-        var _RTC = _f.contentWindow.RTCPeerConnection;
-        var _Desc = _f.contentWindow.RTCSessionDescription;
-        var _ICE = _f.contentWindow.RTCIceCandidate;
-        _f.remove();
+        if (!window.__epocaRTCFrame) {
+            var _f = document.createElement('iframe');
+            _f.style.display = 'none';
+            document.documentElement.appendChild(_f);
+            window.__epocaRTCFrame = _f;
+        }
+        var _RTC = window.__epocaRTCFrame.contentWindow.RTCPeerConnection;
+        var _Desc = window.__epocaRTCFrame.contentWindow.RTCSessionDescription;
+        var _ICE = window.__epocaRTCFrame.contentWindow.RTCIceCandidate;
         if (!_RTC) {
             console.error('epoca: WebRTC not available in iframe');
             throw new Error('WebRTC not available');

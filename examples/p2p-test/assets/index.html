@@ -233,6 +233,14 @@
 
   // --- Init ---
   async function init() {
+    // Diagnostic: check secure context + WebRTC availability
+    log('isSecureContext=' + window.isSecureContext + ' protocol=' + location.protocol);
+    log('RTCPeerConnection=' + (typeof RTCPeerConnection) + ' mediaDevices=' + (typeof navigator.mediaDevices));
+    var _f = document.createElement('iframe'); _f.style.display='none'; document.documentElement.appendChild(_f);
+    log('iframe.RTC=' + (typeof _f.contentWindow.RTCPeerConnection) + ' iframe.mediaDevices=' + (typeof (_f.contentWindow.navigator||{}).mediaDevices));
+    try { var _pc = new _f.contentWindow.RTCPeerConnection({iceServers:[]}); _pc.close(); log('iframe RTC constructor: OK'); } catch(e) { log('iframe RTC constructor: ' + e.message); }
+    _f.remove();
+
     if (!window.epoca) {
       setStatus('window.epoca not available', 'err');
       return;
@@ -250,15 +258,10 @@
       document.getElementById('identity').textContent = e.message;
     }
 
-    // 2. Get peer ID
-    try {
-      myPeerId = await window.epoca.media.getPeerId();
-      document.getElementById('peer-id').textContent = myPeerId;
-      log('peer ID: ' + myPeerId);
-    } catch (e) {
-      document.getElementById('peer-id').className = 'err';
-      document.getElementById('peer-id').textContent = e.message;
-    }
+    // 2. Peer ID = wallet address
+    myPeerId = myAddr;
+    document.getElementById('peer-id').textContent = myPeerId;
+    log('peer ID: ' + myPeerId);
 
     // 3. Listen for events
     window.epoca.on('statement', function(data) {

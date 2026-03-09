@@ -1328,25 +1328,17 @@ fn skip_vec_of_strings(meta: &[u8], pos: usize, limit: usize) -> Option<usize> {
     Some(p)
 }
 
-/// Ensure the statement store signing key has allowance on the People chain.
+/// Ensure a specific public key has statement store allowance on the People chain.
 ///
 /// Checks whether `:statement_allowance:<pubkey>` exists in chain storage.
 /// If not, submits a `Sudo.sudo(System.set_storage)` extrinsic signed by Alice
 /// to grant `(max_count=50, max_size=51200)`.
 ///
 /// This is a blocking call that performs several network round-trips.
-pub fn ensure_allowance() -> Result<(), String> {
+pub fn ensure_allowance_for_pubkey(pubkey: &[u8; 32]) -> Result<(), String> {
     let endpoint = SS_ENDPOINTS[0];
 
-    // --- Step 1: Get our signing pubkey ---
-    let pubkey: [u8; 32] = {
-        let st = store().lock().unwrap();
-        let state = st
-            .as_ref()
-            .ok_or("statement store not initialized — call init() first")?;
-        state.keypair.public.to_bytes()
-    };
-    log::info!("[ss] ensure_allowance: checking for pubkey {}", hex_encode(&pubkey));
+    log::info!("[ss] ensure_allowance: checking for pubkey {}", hex_encode(pubkey));
 
     // --- Step 2: Check existing allowance ---
     let allowance_key = build_allowance_storage_key(&pubkey);
@@ -1466,6 +1458,18 @@ pub fn ensure_allowance() -> Result<(), String> {
              The extrinsic may still be pending."
         ))
     }
+}
+
+/// Ensure the statement store signing key has allowance on the People chain.
+pub fn ensure_allowance() -> Result<(), String> {
+    let pubkey: [u8; 32] = {
+        let st = store().lock().unwrap();
+        let state = st
+            .as_ref()
+            .ok_or("statement store not initialized — call init() first")?;
+        state.keypair.public.to_bytes()
+    };
+    ensure_allowance_for_pubkey(&pubkey)
 }
 
 /// Build the hex-encoded storage key for a statement allowance entry.

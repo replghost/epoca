@@ -3632,6 +3632,27 @@ impl SpaTab {
                                 }
                             }
 
+                            // Enable WebRTC/media on WKPreferences via private setters.
+                            let prefs: *mut objc2::runtime::AnyObject =
+                                objc2::msg_send![config, preferences];
+                            if !prefs.is_null() {
+                                macro_rules! try_set_bool {
+                                    ($prefs:expr, $sel_name:expr, $sel:ident) => {
+                                        let sel = objc2::sel!($sel);
+                                        let responds: bool = objc2::msg_send![$prefs, respondsToSelector: sel];
+                                        if responds {
+                                            let _: () = objc2::msg_send![$prefs, $sel: true];
+                                            log::info!("[spa] set {}=YES on WKPreferences", $sel_name);
+                                        }
+                                    };
+                                }
+                                try_set_bool!(prefs, "_setWebRTCEnabled", _setWebRTCEnabled);
+                                try_set_bool!(prefs, "_setPeerConnectionEnabled", _setPeerConnectionEnabled);
+                                try_set_bool!(prefs, "_setMediaDevicesEnabled", _setMediaDevicesEnabled);
+                                try_set_bool!(prefs, "_setMediaStreamEnabled", _setMediaStreamEnabled);
+                                try_set_bool!(prefs, "_setMediaCaptureEnabled", _setMediaCaptureEnabled);
+                            }
+
                             let uc: *mut objc2::runtime::AnyObject =
                                 objc2::msg_send![config, userContentController];
                             if !uc.is_null() {

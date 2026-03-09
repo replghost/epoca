@@ -1096,19 +1096,34 @@ impl Workbench {
                             media: entity.read(cx).media_permissions(),
                         };
 
-                        let wallet_address: Result<String, String> =
+                        let (wallet_address, root_pubkey): (Result<String, String>, Option<[u8; 32]>) =
                             if wallet_enabled && cx.has_global::<crate::wallet::WalletGlobal>() {
                                 let wg = cx.global_mut::<crate::wallet::WalletGlobal>();
                                 // Auto-unlock if locked (triggers Touch ID on macOS)
                                 if matches!(wg.manager.state(), epoca_wallet::WalletState::Locked) {
                                     let _ = wg.manager.unlock();
                                 }
-                                wg.manager
-                                    .app_address(&app_id)
-                                    .map_err(|e| e.to_string())
+                                let addr = wg.manager.app_address(&app_id).map_err(|e| e.to_string());
+                                let rpk = wg.manager.root_public_key();
+                                (addr, rpk)
                             } else {
-                                Err("no wallet configured".into())
+                                (Err("no wallet configured".into()), None)
                             };
+
+                        // Ensure the wallet root pubkey has statement store allowance (once per process).
+                        if wallet_address.is_ok() {
+                            if let Some(root_pk) = root_pubkey {
+                                static WALLET_ALLOWANCE_DONE: std::sync::Once = std::sync::Once::new();
+                                WALLET_ALLOWANCE_DONE.call_once(move || {
+                                    std::thread::spawn(move || {
+                                        match epoca_chain::statement_store::ensure_allowance_for_pubkey(&root_pk) {
+                                            Ok(()) => log::info!("[wallet] allowance confirmed for root pubkey"),
+                                            Err(e) => log::warn!("[wallet] ensure_allowance for root pubkey failed: {e}"),
+                                        }
+                                    });
+                                });
+                            }
+                        }
 
                         let author: String = match &wallet_address {
                             Ok(addr) => addr.clone(),
@@ -1239,6 +1254,7 @@ impl Workbench {
                                     session_id,
                                     ref peer_address,
                                     ref track_ids,
+                                    ref author,
                                 } => {
                                     // Resolve the promise with the session ID.
                                     let resolve_js = format!(
@@ -1246,7 +1262,7 @@ impl Workbench {
                                     );
                                     entity.read(cx).evaluate_script(&resolve_js, cx);
                                     // Set up RTCPeerConnection via evaluateScript.
-                                    let offerer = crate::media_api::is_offerer(peer_address);
+                                    let offerer = crate::media_api::is_offerer(author, peer_address);
                                     let setup_js = crate::media_api::setup_session_js(
                                         session_id, track_ids, offerer,
                                     );

@@ -76,6 +76,7 @@ pub enum BridgeAsyncAction {
         session_id: u64,
         peer_address: String,
         track_ids: Vec<u64>,
+        author: String,
     },
     /// close: tear down RTCPeerConnection and clean up session.
     MediaClose {
@@ -391,7 +392,10 @@ pub fn dispatch(
             if !perms.data {
                 return BridgeResult::Js(resolve_err(id, "data permission not granted"));
             }
-            let peer_id = crate::data_api::local_peer_id(webview_ptr);
+            let peer_id = match &wallet_address {
+                Ok(addr) => addr.clone(),
+                Err(_) => crate::data_api::local_peer_id(webview_ptr),
+            };
             BridgeResult::Js(resolve_ok(id, &format!("'{peer_id}'")))
         }
 
@@ -421,7 +425,10 @@ pub fn dispatch(
         }
 
         BridgeRequest::MediaGetPeerId => {
-            let peer_id = crate::media_api::local_peer_id_pub();
+            let peer_id = match &wallet_address {
+                Ok(addr) => addr.clone(),
+                Err(_) => crate::media_api::local_peer_id_pub(),
+            };
             BridgeResult::Js(resolve_ok(id, &format!("'{peer_id}'")))
         }
 
@@ -433,10 +440,10 @@ pub fn dispatch(
                 return BridgeResult::Js(resolve_err(id, "peer address cannot be empty"));
             }
             let session_id = crate::media_api::create_session(
-                webview_ptr, app_id, peer_address, track_ids.clone(),
+                webview_ptr, app_id, peer_address, track_ids.clone(), author,
             );
             // Start signaling relay thread.
-            match crate::media_api::start_signaling(session_id, app_id, peer_address) {
+            match crate::media_api::start_signaling(session_id, app_id, peer_address, author) {
                 Ok(handle) => {
                     crate::media_api::set_signaling_handle(session_id, handle);
                 }
@@ -450,6 +457,7 @@ pub fn dispatch(
                 session_id,
                 peer_address: peer_address.clone(),
                 track_ids: track_ids.clone(),
+                author: author.to_string(),
             })
         }
 
