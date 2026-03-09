@@ -205,6 +205,11 @@
 
   window.epoca.on('dataError', function(data) {
     log('Error: ' + data.error, 'log-err');
+    connId = null;
+    setStatus('off');
+    connectBtn.disabled = false;
+    closeBtn.disabled = true;
+    sendBtn.disabled = true;
   });
 
   init();
