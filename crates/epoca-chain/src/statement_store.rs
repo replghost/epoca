@@ -25,7 +25,7 @@ pub type Topic = [u8; 32];
 
 /// WebSocket endpoints with statement store pallet.
 const SS_ENDPOINTS: &[&str] = &[
-    "wss://previewnet.substrate.dev/people",
+    "wss://pop3-testnet.parity-lab.parity.io/people",
 ];
 
 /// Hash a string into a 32-byte Topic (blake2b-256).
@@ -171,9 +171,8 @@ pub fn encode_statement(
         sign_payload.extend_from_slice(data);
     }
 
-    // Sign blake2b_256(signing_payload).
-    let hash = blake2b_256(&sign_payload);
-    let signature = sr25519_sign(&hash);
+    // Sign the raw signing payload (substrate verifies against raw bytes, not hash).
+    let signature = sr25519_sign(&sign_payload);
 
     // Assemble full encoded statement.
     let mut out = Vec::new();
@@ -390,7 +389,15 @@ pub fn rpc_submit(encoded_statement: &[u8]) -> Result<(), String> {
                     log::warn!("[ss] RPC error from {endpoint}: {err}");
                     continue;
                 }
-                log::info!("[ss] statement submitted successfully");
+                let result = body.get("result");
+                log::info!("[ss] statement submitted: {result:?}");
+                // Check for rejection statuses returned as string result.
+                if let Some(status) = result.and_then(|v| v.as_str()) {
+                    match status {
+                        "ok" => return Ok(()),
+                        other => return Err(format!("statement rejected: {other}")),
+                    }
+                }
                 return Ok(());
             }
             Err(e) => {
@@ -789,7 +796,9 @@ fn subscribe_loop(
         .ok_or_else(|| format!("DNS: no addresses for {host}"))?;
     let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .map_err(|e| format!("TCP connect: {e}"))?;
-    tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    // Short read timeout to allow periodic `running` flag checks.
+    // tungstenite preserves frame state across WouldBlock/TimedOut errors.
+    tcp.set_read_timeout(Some(Duration::from_secs(5))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
     let (mut ws, _) = tungstenite::client_tls(request, tcp)
@@ -831,38 +840,80 @@ fn subscribe_loop(
     log::info!("[ss] subscribed (id={sub_id})");
 
     // Read notifications until shutdown or error.
+    let mut timeout_count: u32 = 0;
     while running.load(Ordering::Relaxed) {
         let msg = match ws.read() {
-            Ok(Message::Text(t)) => t.to_string(),
+            Ok(Message::Text(t)) => {
+                timeout_count = 0;
+                t.to_string()
+            }
             Ok(Message::Ping(data)) => {
+                timeout_count = 0;
+                log::debug!("[ss] got ping, sending pong");
                 let _ = ws.send(Message::Pong(data));
                 continue;
             }
             Ok(Message::Close(_)) => return Err("WS closed by server".into()),
-            Ok(_) => continue,
+            Ok(other) => {
+                log::debug!("[ss] got non-text message: {other:?}");
+                continue;
+            }
             Err(tungstenite::Error::Io(ref e))
                 if e.kind() == std::io::ErrorKind::WouldBlock
                     || e.kind() == std::io::ErrorKind::TimedOut =>
             {
-                // Read timeout — just loop and check running flag.
+                timeout_count += 1;
+                if timeout_count % 12 == 1 {
+                    log::debug!("[ss] read timeout #{timeout_count}, still listening...");
+                }
                 continue;
             }
             Err(e) => return Err(format!("WS read: {e}")),
         };
 
-        // Parse notification: {"jsonrpc":"2.0","method":"statement_statement","params":{"subscription":"...","result":{...}}}
+        // Parse notification.
         let json: serde_json::Value = match serde_json::from_str(&msg) {
             Ok(v) => v,
-            Err(_) => continue,
+            Err(e) => {
+                log::warn!("[ss] non-JSON message: {e} — {}", &msg[..msg.len().min(200)]);
+                continue;
+            }
         };
 
-        // Extract statements array from StatementEvent::NewStatements
+        let method = json.get("method").and_then(|v| v.as_str()).unwrap_or("");
+        log::info!(
+            "[ss] notification: method={method}, msg_len={}",
+            msg.len(),
+        );
+
+        // Try multiple JSON pointer paths — substrate serialization varies.
         let statements_hex = json
             .pointer("/params/result/data/statements")
-            .and_then(|v| v.as_array());
+            .and_then(|v| v.as_array())
+            .or_else(|| {
+                json.pointer("/params/result/newStatements/statements")
+                    .and_then(|v| v.as_array())
+            })
+            .or_else(|| {
+                json.pointer("/params/result/statements")
+                    .and_then(|v| v.as_array())
+            });
         let statements_hex = match statements_hex {
-            Some(arr) => arr,
-            None => continue,
+            Some(arr) => {
+                log::info!("[ss] found {} statements in notification", arr.len());
+                arr
+            }
+            None => {
+                // Log the structure to help debug.
+                if let Some(result) = json.pointer("/params/result") {
+                    let preview = result.to_string();
+                    log::info!(
+                        "[ss] notification has /params/result but no statements found. Preview: {}",
+                        &preview[..preview.len().min(500)]
+                    );
+                }
+                continue;
+            }
         };
 
         for hex_val in statements_hex {
@@ -985,5 +1036,73 @@ mod tests {
         assert_eq!(decoded.priority, 0);
         assert!(decoded.topics.is_empty());
         assert!(decoded.data.is_empty());
+    }
+
+    /// Submit a real statement to previewnet for integration testing.
+    /// Run with: cargo test -p epoca-chain -- --ignored test_submit_to_previewnet --nocapture
+    #[test]
+    #[ignore]
+    fn test_submit_to_previewnet() {
+        env_logger::init();
+
+        // Target: the running app's incoming listener channel.
+        let target_peer = std::env::var("TARGET_PEER")
+            .unwrap_or_else(|_| "peer-0xa2ce6d3a925727-1".to_string());
+        let app_id = "com.epoca.data-test";
+        let channel = format!("{app_id}-offer-to-{target_peer}");
+
+        // Build a fake offer JSON payload (matching what statements_api::write produces).
+        let fake_offer = serde_json::json!({
+            "app_id": app_id,
+            "author": "test-script",
+            "channel": channel,
+            "data": "{\"type\":\"offer\",\"from\":\"test-script\",\"sdp\":\"v=0\\r\\n\"}",
+            "timestamp_ms": 9999999999u64,
+        });
+        let payload_bytes = fake_offer.to_string().into_bytes();
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+
+        // Use Alice's dev account keypair (has allowance on previewnet).
+        // Alice's mini-secret key is well-known for all Substrate dev chains.
+        let alice_seed: [u8; 32] = [
+            0xe5, 0xbe, 0x9a, 0x50, 0x92, 0xb8, 0x1b, 0xca,
+            0x64, 0xbe, 0x81, 0xd2, 0x12, 0xe7, 0xf2, 0xf9,
+            0xeb, 0xa1, 0x83, 0xbb, 0x7a, 0x90, 0x95, 0x4f,
+            0x7b, 0x76, 0x36, 0x1f, 0x6e, 0xdb, 0x5c, 0x0a,
+        ];
+        let secret = schnorrkel::MiniSecretKey::from_bytes(&alice_seed)
+            .expect("valid mini secret");
+        let keypair = secret.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
+        let pubkey = keypair.public.to_bytes();
+        println!("Using Alice pubkey: {}", hex_encode(&pubkey));
+        let sign_fn = |msg: &[u8]| -> [u8; 64] {
+            let ctx = schnorrkel::signing_context(b"substrate");
+            keypair.sign(ctx.bytes(msg)).to_bytes()
+        };
+
+        let dk = string_to_topic(app_id);
+        let ch = string_to_topic(&channel);
+        let epoca_topic = string_to_topic("ss-epoca");
+
+        let encoded = encode_statement(
+            Some(&dk),
+            Some(&ch),
+            now_secs,
+            &[epoca_topic],
+            &payload_bytes,
+            &pubkey,
+            &sign_fn,
+        );
+
+        println!("Encoded statement: {} bytes", encoded.len());
+        println!("Target channel: {channel}");
+        println!("Submitting to previewnet...");
+
+        let result = rpc_submit(&encoded);
+        println!("Submit result: {result:?}");
+        assert!(result.is_ok(), "submit failed: {result:?}");
     }
 }

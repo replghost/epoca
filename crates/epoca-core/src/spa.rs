@@ -284,21 +284,18 @@ pub const HOST_API_SCRIPT: &str = r#"
     'use strict';
     console.log('[epoca-host-api] running, guard=' + !!window.__epocaHostApi + ' bridge=' + !!window.__epocaHostApiBridge);
 
-    // Save WebRTC constructors for host-mediated use, then freeze for app code.
-    // The host creates RTCPeerConnection via evaluateScript for media.connect() sessions.
+    // Remove WebRTC constructors from app-visible scope entirely.
+    // The host recovers them via a hidden iframe in evaluateScript when needed.
     // getUserMedia is intentionally left available (harmless without RTCPeerConnection).
-    var _OrigRTC = window.RTCPeerConnection;
-    var _OrigDesc = window.RTCSessionDescription;
-    var _OrigICE = window.RTCIceCandidate;
+    //
+    // SECURITY: Do NOT stash constructors anywhere on window. Any property
+    // (including Symbol-keyed, non-enumerable) is discoverable via
+    // Object.getOwnPropertyNames/Symbols. Instead, the host's evaluateScript
+    // creates a temporary about:blank iframe to obtain fresh native constructors
+    // on demand (see media_api::get_rtc_from_iframe_js).
     window.RTCPeerConnection = undefined;
     window.RTCSessionDescription = undefined;
     window.RTCIceCandidate = undefined;
-    if (_OrigRTC) {
-        Object.defineProperty(window, '__epocaRTC', {
-            value: Object.freeze({ PC: _OrigRTC, Desc: _OrigDesc, ICE: _OrigICE }),
-            writable: false, enumerable: false, configurable: false
-        });
-    }
     if (!window.__epocaMediaSessions) {
         Object.defineProperty(window, '__epocaMediaSessions', {
             value: {}, writable: false, enumerable: false, configurable: false

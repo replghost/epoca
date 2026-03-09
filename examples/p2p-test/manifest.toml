@@ -1,0 +1,14 @@
+[app]
+id = "com.epoca.p2p-test"
+name = "P2P Test"
+version = "0.1.0"
+app_type = "spa"
+
+[webapp]
+entry = "index.html"
+sandbox = "strict"
+chain = "paseo-asset-hub"
+
+[permissions]
+sign = true
+statements = true

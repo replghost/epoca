@@ -125,7 +125,14 @@ fn on_network_statement(stmt: epoca_chain::statement_store::Statement) {
     let json_str = match String::from_utf8(stmt.data.clone()) {
         Ok(s) => s,
         Err(_) => {
-            log::warn!("[statements] network: non-UTF8 statement data, dropping");
+            let preview: Vec<u8> = stmt.data.iter().take(64).copied().collect();
+            log::warn!(
+                "[statements] network: non-UTF8 statement data ({} bytes, first 64: {:02x?}), topics={}, ch={}, dropping",
+                stmt.data.len(),
+                preview,
+                stmt.topics.len(),
+                stmt.channel.is_some(),
+            );
             return;
         }
     };

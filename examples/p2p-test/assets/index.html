@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>P2P Test</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', SFMono-Regular, monospace;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 1.5rem;
+    min-height: 100vh;
+  }
+  h1 { color: #00d4aa; font-size: 1.1rem; margin-bottom: 0.25rem; }
+  .sub { color: #484f58; font-size: 0.75rem; margin-bottom: 1rem; }
+  .status {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    font-size: 0.8rem;
+  }
+  .status .label { color: #484f58; }
+  .status .value { color: #00d4aa; }
+  .status .err { color: #f85149; }
+  .status .warn { color: #d29922; }
+  #messages {
+    background: #161b22;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 0.75rem;
+    margin-bottom: 1rem;
+    min-height: 200px;
+    max-height: 400px;
+    overflow-y: auto;
+    font-size: 0.8rem;
+  }
+  .msg { margin-bottom: 0.35rem; }
+  .msg .ts { color: #484f58; }
+  .msg .who { color: #d2a8ff; }
+  .msg .self { color: #00d4aa; }
+  .msg .txt { color: #c9d1d9; }
+  .msg .sys { color: #d29922; font-style: italic; }
+  .input-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+  input[type="text"] {
+    flex: 1;
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 4px;
+    color: #c9d1d9;
+    padding: 0.5rem 0.75rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+  }
+  input:focus { outline: none; border-color: #00d4aa; }
+  button {
+    background: #00d4aa;
+    color: #0d1117;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 700;
+    font-family: inherit;
+    font-size: 0.85rem;
+  }
+  button:hover { background: #00e8bb; }
+  button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+  #log {
+    background: #0d1117;
+    border: 1px solid #21262d;
+    border-radius: 6px;
+    padding: 0.5rem;
+    margin-top: 1rem;
+    max-height: 150px;
+    overflow-y: auto;
+    font-size: 0.7rem;
+    color: #484f58;
+  }
+</style>
+</head>
+<body>
+  <h1>P2P Statement Test</h1>
+  <div class="sub">Tests cross-host statement delivery via PoP3 People chain</div>
+
+  <div class="status">
+    <span class="label">Identity: </span>
+    <span id="identity" class="value">loading...</span>
+    <br>
+    <span class="label">Channel: </span>
+    <span id="channel-display" class="value">—</span>
+    <br>
+    <span class="label">Status: </span>
+    <span id="status" class="warn">connecting...</span>
+  </div>
+
+  <div id="messages"></div>
+
+  <div class="input-row">
+    <input type="text" id="msg-input" placeholder="Type a message..." disabled>
+    <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
+  </div>
+
+  <div id="log"></div>
+
+<script>
+  var CHANNEL = 'p2p-test-room';
+  var myAddr = null;
+  var msgCount = 0;
+
+  function log(msg) {
+    var el = document.getElementById('log');
+    el.textContent += new Date().toISOString().slice(11,19) + ' ' + msg + '\n';
+    el.scrollTop = el.scrollHeight;
+  }
+
+  function addMessage(who, text, isSelf, isSystem) {
+    var el = document.getElementById('messages');
+    var div = document.createElement('div');
+    div.className = 'msg';
+    var ts = new Date().toISOString().slice(11, 19);
+    if (isSystem) {
+      div.innerHTML = '<span class="ts">' + ts + '</span> <span class="sys">' + escHtml(text) + '</span>';
+    } else {
+      var short = who.length > 12 ? who.slice(0, 6) + '..' + who.slice(-4) : who;
+      var cls = isSelf ? 'self' : 'who';
+      div.innerHTML = '<span class="ts">' + ts + '</span> <span class="' + cls + '">' + escHtml(short) + '</span> <span class="txt">' + escHtml(text) + '</span>';
+    }
+    el.appendChild(div);
+    el.scrollTop = el.scrollHeight;
+    msgCount++;
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function setStatus(text, cls) {
+    var el = document.getElementById('status');
+    el.className = cls || 'value';
+    el.textContent = text;
+  }
+
+  // --- Init ---
+  async function init() {
+    if (!window.epoca) {
+      setStatus('window.epoca not available', 'err');
+      log('ERROR: no host API');
+      return;
+    }
+
+    // 1. Get identity
+    try {
+      myAddr = await window.epoca.getAddress();
+      var short = myAddr.slice(0, 8) + '...' + myAddr.slice(-6);
+      document.getElementById('identity').textContent = short;
+      document.getElementById('identity').title = myAddr;
+      log('address: ' + myAddr);
+    } catch (e) {
+      document.getElementById('identity').className = 'err';
+      document.getElementById('identity').textContent = e.message;
+      log('getAddress error: ' + e.message);
+    }
+
+    // 2. Listen for statements
+    window.epoca.on('statement', function(data) {
+      log('statement: ch=' + data.channel + ' from=' + (data.author||'?').slice(0,8) + ' data=' + data.data.slice(0,80));
+      var isSelf = data.author === myAddr;
+      // Parse the data — we send JSON {text: "..."}
+      try {
+        var parsed = JSON.parse(data.data);
+        if (parsed.type === 'join') {
+          addMessage(data.author, 'joined the room', false, true);
+        } else if (parsed.type === 'msg') {
+          addMessage(data.author, parsed.text, isSelf, false);
+        } else {
+          addMessage(data.author, data.data, isSelf, false);
+        }
+      } catch (e) {
+        // Plain text fallback
+        addMessage(data.author || '?', data.data, isSelf, false);
+      }
+    });
+
+    // 3. Subscribe to channel
+    try {
+      await window.epoca.statements.subscribe(CHANNEL);
+      document.getElementById('channel-display').textContent = CHANNEL;
+      setStatus('subscribed — waiting for messages', 'value');
+      log('subscribed to: ' + CHANNEL);
+    } catch (e) {
+      setStatus('subscribe failed: ' + e.message, 'err');
+      log('subscribe error: ' + e.message);
+      return;
+    }
+
+    // 4. Enable input
+    document.getElementById('msg-input').disabled = false;
+    document.getElementById('send-btn').disabled = false;
+    document.getElementById('msg-input').focus();
+
+    // 5. Announce join
+    try {
+      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'join'}));
+      addMessage(null, 'You joined the room', false, true);
+      setStatus('connected — send a message!', 'value');
+      log('join announcement sent');
+    } catch (e) {
+      setStatus('write failed: ' + e.message, 'err');
+      log('write error: ' + e.message);
+    }
+  }
+
+  async function sendMessage() {
+    var input = document.getElementById('msg-input');
+    var text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+
+    var payload = JSON.stringify({type: 'msg', text: text});
+    log('sending: ' + payload);
+    try {
+      await window.epoca.statements.write(CHANNEL, payload);
+      log('sent OK');
+    } catch (e) {
+      addMessage(null, 'Send failed: ' + e.message, false, true);
+      log('send error: ' + e.message);
+    }
+  }
+
+  // Enter key to send
+  document.getElementById('msg-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendMessage();
+  });
+
+  init();
+</script>
+</body>
+</html>

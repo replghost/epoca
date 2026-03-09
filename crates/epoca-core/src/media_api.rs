@@ -410,6 +410,24 @@ pub fn publish_signal(
 // JS generation for RTCPeerConnection lifecycle
 // ---------------------------------------------------------------------------
 
+/// JS snippet that obtains native WebRTC constructors from a temporary iframe.
+/// The init script removes them from the main window, so the host retrieves
+/// fresh copies from a blank iframe whose contentWindow is untouched.
+/// The iframe is destroyed immediately after capture.
+const GET_RTC_JS: &str = r#"
+        var _f = document.createElement('iframe');
+        _f.style.display = 'none';
+        document.documentElement.appendChild(_f);
+        var _RTC = _f.contentWindow.RTCPeerConnection;
+        var _Desc = _f.contentWindow.RTCSessionDescription;
+        var _ICE = _f.contentWindow.RTCIceCandidate;
+        _f.remove();
+        if (!_RTC) {
+            console.error('epoca: WebRTC not available in iframe');
+            throw new Error('WebRTC not available');
+        }
+"#;
+
 /// JS to create RTCPeerConnection, add tracks, and (if offerer) generate offer.
 /// Signaling callbacks post to host via messageHandler.
 pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) -> String {
@@ -421,13 +439,9 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
     format!(
         r#"(async function() {{
     try {{
-        if (!window.__epocaRTC) {{
-            console.error('epoca: WebRTC not available');
-            window.__epocaPush('mediaError', {{ sessionId: {sid}, error: 'WebRTC not available' }});
-            return;
-        }}
+{get_rtc}
         if (!window.__epocaMediaTracks) window.__epocaMediaTracks = {{}};
-        var pc = new window.__epocaRTC.PC({{
+        var pc = new _RTC({{
             iceServers: [{{ urls: 'stun:stun.l.google.com:19302' }}]
         }});
         window.__epocaMediaSessions[{sid}] = {{ pc: pc, remoteTrackCount: 0 }};
@@ -492,6 +506,7 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
         window.__epocaPush('mediaError', {{ sessionId: {sid}, error: e.message || 'setup failed' }});
     }}
 }})()"#,
+        get_rtc = GET_RTC_JS,
         sid = session_id,
         tids = track_ids_json,
         offerer = if is_offerer { "true" } else { "false" },
@@ -511,7 +526,7 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
         var offer = JSON.parse(atob('{b64}'));
-        await sess.pc.setRemoteDescription(new window.__epocaRTC.Desc(offer));
+        await sess.pc.setRemoteDescription(offer);
         var answer = await sess.pc.createAnswer();
         await sess.pc.setLocalDescription(answer);
         window.webkit.messageHandlers.epocaHost.postMessage({{
@@ -528,7 +543,7 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
         var answer = JSON.parse(atob('{b64}'));
-        await sess.pc.setRemoteDescription(new window.__epocaRTC.Desc(answer));
+        await sess.pc.setRemoteDescription(answer);
     }} catch(e) {{ console.error('epoca: apply answer error:', e); }}
 }})()"#,
             sid = session_id, b64 = b64,
@@ -539,7 +554,7 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
         var cand = JSON.parse(atob('{b64}'));
-        await sess.pc.addIceCandidate(new window.__epocaRTC.ICE(cand));
+        await sess.pc.addIceCandidate(cand);
     }} catch(e) {{ console.warn('epoca: add ICE candidate error:', e); }}
 }})()"#,
             sid = session_id, b64 = b64,
