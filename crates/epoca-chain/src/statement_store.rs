@@ -400,14 +400,15 @@ fn ws_request(endpoint: &str, payload: &str) -> Result<String, String> {
         .to_string();
     let port = request.uri().port_u16().unwrap_or(443);
 
-    // Connect with timeout.
-    let tcp = TcpStream::connect_timeout(
-        &format!("{host}:{port}")
-            .parse()
-            .map_err(|e| format!("addr parse: {e}"))?,
-        Duration::from_secs(10),
-    )
-    .map_err(|e| format!("TCP connect failed: {e}"))?;
+    // Resolve hostname to IP, then connect with timeout.
+    use std::net::ToSocketAddrs;
+    let addr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolve: {e}"))?
+        .next()
+        .ok_or_else(|| format!("DNS resolve: no addresses for {host}"))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("TCP connect failed: {e}"))?;
     tcp.set_read_timeout(Some(Duration::from_secs(10))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
 
@@ -648,66 +649,200 @@ pub fn submit(
 /// Maximum dedup cache size — evict oldest half when exceeded.
 const MAX_SEEN: usize = 8192;
 
-/// Background poll loop — fetches new statements every 2 seconds.
+/// Background subscription loop — subscribes to statement_subscribeStatement
+/// and processes incoming notifications. Reconnects on failure.
 fn poll_loop(running: Arc<AtomicBool>) {
-    let epoca_topic = string_to_topic(EPOCA_TOPIC);
     // Dedup key = hash(decryption_key || channel || data). Value = priority.
     let mut seen: HashMap<[u8; 32], u32> = HashMap::new();
     let mut seen_order: Vec<[u8; 32]> = Vec::new();
 
     while running.load(Ordering::Relaxed) {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        if !running.load(Ordering::Relaxed) {
-            break;
-        }
-
-        match rpc_get_broadcasts(&[epoca_topic]) {
-            Ok(statements) => {
-                for stmt in statements {
-                    // Dedup key includes namespace fields, not just data.
-                    let dedup_input = [
-                        stmt.decryption_key.unwrap_or([0; 32]).as_slice(),
-                        stmt.channel.unwrap_or([0; 32]).as_slice(),
-                        &stmt.data,
-                    ]
-                    .concat();
-                    let hash = blake2b_256(&dedup_input);
-
-                    // Skip if we've already seen this at equal or higher priority.
-                    if let Some(&prev) = seen.get(&hash) {
-                        if stmt.priority <= prev {
-                            continue;
-                        }
-                    }
-                    if !seen.contains_key(&hash) {
-                        seen_order.push(hash);
-                    }
-                    seen.insert(hash, stmt.priority);
-
-                    // Evict oldest half when cache exceeds limit.
-                    if seen.len() > MAX_SEEN {
-                        let half = seen_order.len() / 2;
-                        for key in seen_order.drain(..half) {
-                            seen.remove(&key);
-                        }
-                    }
-
-                    // Deliver to callback.
-                    if let Ok(guard) = on_statement().lock() {
-                        if let Some(cb) = guard.as_ref() {
-                            cb(stmt);
-                        }
-                    }
-                }
-            }
+        match subscribe_loop(&running, &mut seen, &mut seen_order) {
+            Ok(()) => break, // clean shutdown
             Err(e) => {
-                log::warn!("[ss] poll failed: {e}");
+                log::warn!("[ss] subscription error: {e}, reconnecting in 3s...");
+                // Wait before reconnecting.
+                for _ in 0..6 {
+                    if !running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
             }
         }
     }
 
     log::info!("[ss] poll loop stopped");
+}
+
+/// Open a persistent WebSocket, subscribe with topic filter "any",
+/// and deliver incoming statements via the callback.
+fn subscribe_loop(
+    running: &Arc<AtomicBool>,
+    seen: &mut HashMap<[u8; 32], u32>,
+    seen_order: &mut Vec<[u8; 32]>,
+) -> Result<(), String> {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+    use tungstenite::{client::IntoClientRequest, Message};
+
+    // Connect to first working endpoint.
+    let endpoint = SS_ENDPOINTS[0];
+    let request = endpoint
+        .into_client_request()
+        .map_err(|e| format!("bad WS URL: {e}"))?;
+    let host = request
+        .uri()
+        .host()
+        .ok_or("no host in endpoint")?
+        .to_string();
+    let port = request.uri().port_u16().unwrap_or(443);
+    let addr = format!("{host}:{port}")
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolve: {e}"))?
+        .next()
+        .ok_or_else(|| format!("DNS: no addresses for {host}"))?;
+    let tcp = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
+        .map_err(|e| format!("TCP connect: {e}"))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    tcp.set_write_timeout(Some(Duration::from_secs(10))).ok();
+
+    let (mut ws, _) = tungstenite::client_tls(request, tcp)
+        .map_err(|e| format!("WS handshake: {e}"))?;
+
+    log::info!("[ss] connected to {endpoint}, subscribing...");
+
+    // Send subscription request: statement_subscribeStatement with TopicFilter::Any
+    let sub_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "statement_subscribeStatement",
+        "params": ["any"]
+    });
+    ws.send(Message::Text(sub_req.to_string()))
+        .map_err(|e| format!("send subscribe: {e}"))?;
+
+    // Read subscription response to get sub_id (skip any Ping frames).
+    let resp_text = loop {
+        match ws.read().map_err(|e| format!("read subscribe response: {e}"))? {
+            Message::Text(t) => break t.to_string(),
+            Message::Ping(data) => {
+                let _ = ws.send(Message::Pong(data));
+                continue;
+            }
+            other => return Err(format!("unexpected response: {other:?}")),
+        }
+    };
+    let resp_json: serde_json::Value =
+        serde_json::from_str(&resp_text).map_err(|e| format!("parse response: {e}"))?;
+    if let Some(err) = resp_json.get("error") {
+        return Err(format!("subscribe RPC error: {err}"));
+    }
+    let sub_id = resp_json
+        .get("result")
+        .and_then(|v| v.as_str())
+        .ok_or("no subscription id in response")?
+        .to_string();
+    log::info!("[ss] subscribed (id={sub_id})");
+
+    // Read notifications until shutdown or error.
+    while running.load(Ordering::Relaxed) {
+        let msg = match ws.read() {
+            Ok(Message::Text(t)) => t.to_string(),
+            Ok(Message::Ping(data)) => {
+                let _ = ws.send(Message::Pong(data));
+                continue;
+            }
+            Ok(Message::Close(_)) => return Err("WS closed by server".into()),
+            Ok(_) => continue,
+            Err(tungstenite::Error::Io(ref e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                // Read timeout — just loop and check running flag.
+                continue;
+            }
+            Err(e) => return Err(format!("WS read: {e}")),
+        };
+
+        // Parse notification: {"jsonrpc":"2.0","method":"statement_statement","params":{"subscription":"...","result":{...}}}
+        let json: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // Extract statements array from StatementEvent::NewStatements
+        let statements_hex = json
+            .pointer("/params/result/data/statements")
+            .and_then(|v| v.as_array());
+        let statements_hex = match statements_hex {
+            Some(arr) => arr,
+            None => continue,
+        };
+
+        for hex_val in statements_hex {
+            let hex_str = match hex_val.as_str() {
+                Some(s) => s,
+                None => continue,
+            };
+            let bytes = match hex_decode(hex_str) {
+                Some(b) => b,
+                None => continue,
+            };
+            let stmt = match decode_statement(&bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::warn!("[ss] decode statement: {e}");
+                    continue;
+                }
+            };
+
+            // Dedup.
+            let dedup_input = [
+                stmt.decryption_key.unwrap_or([0; 32]).as_slice(),
+                stmt.channel.unwrap_or([0; 32]).as_slice(),
+                &stmt.data,
+            ]
+            .concat();
+            let hash = blake2b_256(&dedup_input);
+
+            if let Some(&prev) = seen.get(&hash) {
+                if stmt.priority <= prev {
+                    continue;
+                }
+            }
+            if !seen.contains_key(&hash) {
+                seen_order.push(hash);
+            }
+            seen.insert(hash, stmt.priority);
+
+            if seen.len() > MAX_SEEN {
+                let half = seen_order.len() / 2;
+                for key in seen_order.drain(..half) {
+                    seen.remove(&key);
+                }
+            }
+
+            // Deliver to callback.
+            if let Ok(guard) = on_statement().lock() {
+                if let Some(cb) = guard.as_ref() {
+                    cb(stmt);
+                }
+            }
+        }
+    }
+
+    // Clean shutdown — unsubscribe.
+    let unsub = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "statement_unsubscribeStatement",
+        "params": [sub_id]
+    });
+    let _ = ws.send(Message::Text(unsub.to_string()));
+    let _ = ws.close(None);
+
+    Ok(())
 }
 
 #[cfg(test)]
