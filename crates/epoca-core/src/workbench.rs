@@ -1261,10 +1261,9 @@ impl Workbench {
                                         "window.__epocaResolve({call_id}, null, {session_id})"
                                     );
                                     entity.read(cx).evaluate_script(&resolve_js, cx);
-                                    // Set up RTCPeerConnection via evaluateScript.
-                                    let offerer = crate::media_api::is_offerer(author, peer_address);
+                                    // Caller is always the offerer.
                                     let setup_js = crate::media_api::setup_session_js(
-                                        session_id, track_ids, offerer,
+                                        session_id, track_ids, true,
                                     );
                                     entity.read(cx).evaluate_script(&setup_js, cx);
                                 }
