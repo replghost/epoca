@@ -692,8 +692,8 @@ impl Workbench {
             } else if text.starts_with("dot://") {
                 log::info!("[nav] dot:// URL detected: {text}");
                 self.resolve_dot_url(&text, window, cx);
-            } else if text.ends_with(".dot") && !text.contains('/') && !text.contains(' ') {
-                // Bare ".dot" TLD (e.g. "hackme3.dot") — wrap in dot:// scheme.
+            } else if is_bare_dot_name(&text) {
+                // Bare ".dot" TLD (e.g. "hackme3.dot" or "hackme3.dot/") — wrap in dot:// scheme.
                 let dot_url = format!("dot://{text}");
                 log::info!("[nav] bare .dot name detected, resolving: {dot_url}");
                 self.resolve_dot_url(&dot_url, window, cx);
@@ -2287,7 +2287,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             self.resolve_dot_url(text, window, cx);
             return;
         }
-        if text.ends_with(".dot") && !text.contains('/') && !text.contains(' ') {
+        if is_bare_dot_name(text) {
             let dot_url = format!("dot://{text}");
             self.resolve_dot_url(&dot_url, window, cx);
             return;
@@ -8065,6 +8065,15 @@ fn record_history_visit(url: &str, title: &str, cx: &gpui::App) {
 /// Heuristic: no spaces and contains a dot (e.g. "github.com", "localhost:3000").
 fn looks_like_url(s: &str) -> bool {
     !s.contains(' ') && (s.contains('.') || s.contains(':'))
+}
+
+/// Check if the input is a bare .dot domain name, with optional trailing slash/path.
+/// Matches "name.dot", "name.dot/", "name.dot/path".
+fn is_bare_dot_name(s: &str) -> bool {
+    if s.contains(' ') { return false; }
+    // Strip path/slash after the domain portion.
+    let domain = s.split('/').next().unwrap_or(s);
+    domain.ends_with(".dot") && !domain.contains(':')
 }
 
 /// Percent-encodes a string for use as a query-string value (RFC 3986).
