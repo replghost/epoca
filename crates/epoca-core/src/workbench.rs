@@ -2884,9 +2884,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     if result == 1 {
                         let url: *mut objc2::runtime::AnyObject = objc2::msg_send![panel, URL];
                         let path_ns: *mut objc2::runtime::AnyObject = objc2::msg_send![url, path];
-                        let utf8: *const u8 = objc2::msg_send![path_ns, UTF8String];
+                        // UTF8String returns *const c_char (*const i8), not *const u8.
+                        let utf8: *const i8 = objc2::msg_send![path_ns, UTF8String];
                         if !utf8.is_null() {
-                            let c_str = std::ffi::CStr::from_ptr(utf8 as *const i8);
+                            let c_str = std::ffi::CStr::from_ptr(utf8);
                             c_str.to_str().ok().map(|s| std::path::PathBuf::from(s))
                         } else {
                             None

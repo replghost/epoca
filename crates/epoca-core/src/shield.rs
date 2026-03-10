@@ -1154,7 +1154,8 @@ pub fn install_key_monitor() {
                     let app: *mut AnyObject = msg_send![AnyClass::get("NSApplication").unwrap(), sharedApplication];
                     let win: *mut AnyObject = msg_send![app, keyWindow];
                     if !win.is_null() {
-                        let _: () = msg_send![win, makeFirstResponder: win];
+                        // makeFirstResponder: returns BOOL, not void.
+                        let _: bool = msg_send![win, makeFirstResponder: win];
                     }
                     Some(ShortcutAction::FocusUrlBar)
                 },

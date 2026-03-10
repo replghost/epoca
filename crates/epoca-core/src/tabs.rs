@@ -3173,7 +3173,8 @@ impl WebViewTab {
                 let raw = wv_entity.read(cx).raw();
                 let wkwebview = raw.webview();
                 let ptr = &*wkwebview as *const _ as *mut AnyObject;
-                let _: () = msg_send![ptr, reloadFromOrigin];
+                // reloadFromOrigin returns WKNavigation* (nullable), not void.
+                let _: *mut AnyObject = msg_send![ptr, reloadFromOrigin];
             }
             #[cfg(not(target_os = "macos"))]
             {
@@ -3587,21 +3588,17 @@ impl SpaTab {
                                     objc2::msg_send![config, processPool];
                                 if !pool.is_null() {
                                     ONCE.call_once(|| {
+                                        let s = b"epocaapp\0";
+                                        let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
+                                        let scheme: *mut objc2::runtime::AnyObject = objc2::msg_send![
+                                            cls,
+                                            stringWithUTF8String: s.as_ptr() as *const i8
+                                        ];
                                         // _registerURLSchemeAsSecure:
                                         let sel = objc2::sel!(_registerURLSchemeAsSecure:);
                                         let responds: bool =
                                             objc2::msg_send![pool, respondsToSelector: sel];
                                         if responds {
-                                            let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
-                                            let alloc: *mut objc2::runtime::AnyObject =
-                                                objc2::msg_send![cls, alloc];
-                                            let s = b"epocaapp";
-                                            let scheme: *mut objc2::runtime::AnyObject = objc2::msg_send![
-                                                alloc,
-                                                initWithBytes: s.as_ptr() as *const std::ffi::c_void
-                                                length: s.len()
-                                                encoding: 4u64
-                                            ];
                                             let _: () = objc2::msg_send![pool, _registerURLSchemeAsSecure: scheme];
                                             log::info!("[spa] registered epocaapp:// as secure on actual pool");
                                         } else {
@@ -3612,22 +3609,13 @@ impl SpaTab {
                                         let responds2: bool =
                                             objc2::msg_send![pool, respondsToSelector: sel2];
                                         if responds2 {
-                                            let cls = objc2::runtime::AnyClass::get("NSString").unwrap();
-                                            let alloc: *mut objc2::runtime::AnyObject =
-                                                objc2::msg_send![cls, alloc];
-                                            let s = b"epocaapp";
-                                            let scheme: *mut objc2::runtime::AnyObject = objc2::msg_send![
-                                                alloc,
-                                                initWithBytes: s.as_ptr() as *const std::ffi::c_void
-                                                length: s.len()
-                                                encoding: 4u64
-                                            ];
                                             let _: () = objc2::msg_send![pool, _registerURLSchemeAsCORSEnabled: scheme];
                                             log::info!("[spa] registered epocaapp:// as CORS-enabled");
                                         }
                                     });
                                     // Reload to apply the secure context registration.
-                                    let _: () = objc2::msg_send![obj, reload];
+                                    // WKWebView.reload returns WKNavigation* (nullable), not void.
+                                    let _: *mut objc2::runtime::AnyObject = objc2::msg_send![obj, reload];
                                     log::info!("[spa] reloaded webview after scheme registration");
                                 }
                             }

@@ -33,10 +33,40 @@ and must not be changed without explicit user approval.
   frame. CSS `cursor:pointer` in WKWebView has no effect. Instead, track hover state via JS →
   `epocaCursor` channel → `WebViewTab.cursor_pointer: bool` → `.cursor_pointer()` on the GPUI
   wrapper div. This makes GPUI's own cursor system apply the hand cursor.
-- **ObjC msg_send return types**: Always match the actual ObjC return type. `BOOL` methods
-  must use `let _: bool = msg_send![...]`, NOT `let _: () = ...`. Wrong type = bus error.
-- **NSString creation**: Use `stringWithUTF8String:` (takes `*const i8`), NOT
-  `initWithBytes:length:encoding:` (expects `*const c_void`, causes type mismatch crash).
+- **ObjC msg_send return types**: objc2 0.5's `msg_send!` verifies return types in debug
+  builds (`#[cfg(debug_assertions)]`). Mismatches cause a panic. Common pitfalls:
+  - `reload`, `reloadFromOrigin`, `goBack`, `goForward`, `loadRequest:` → return
+    `WKNavigation*` (`*mut AnyObject`), NOT void
+  - `makeFirstResponder:` → returns `BOOL` (`bool`), NOT void
+  - `UTF8String` → returns `*const i8`, NOT `*const u8` (encoding `*` vs `^C`)
+  - Property setters (`setX:`) → return `void` (`()`)
+  - Property BOOL getters (`isX`) → return `bool`
+  - `respondsToSelector:` → returns `bool`
+  - `configuration`, `preferences`, `processPool` etc → return `*mut AnyObject`
+- **NSString creation**: For fixed strings use `stringWithUTF8String:` with null-terminated
+  `b"name\0"` (takes `*const i8`). For arbitrary-length Rust `&str` (not null-terminated),
+  `initWithBytes:length:encoding:` with `*const c_void` cast is acceptable.
+
+## Conventions
+
+### Commit Messages
+Conventional commits: `feat:`, `fix:`, `refactor:`, `test:`, `chore:`, `docs:`
+Scope by crate or module: `feat(sandbox): add asset caching`, `fix(shield): cosmetic count off-by-one`
+
+### Code Style
+- Rust: `cargo clippy` clean, `cargo fmt` applied before commit
+- Functions: aim for <50 lines. If longer, extract helpers
+- Files: aim for <500 lines for new files. Existing large files (workbench.rs) don't need splitting retroactively
+- No `TODO`/`FIXME` without a tracking comment explaining what's blocked
+- No commented-out code — delete it, git has history
+- Inline comments for "why", not "what"
+
+### Security
+- No secrets, keys, or mnemonics in code or committed files
+- Private keys never cross JS/WASM boundaries — only addresses and signatures
+- Iframe/WebView sandbox attributes enforced; no `*` CORS in production
+- Validate at system boundaries (host API inputs, bundle parsing, ObjC bridge messages)
+- File permissions: 0600 for user data files (history.db, bookmarks.json, session.json)
 
 ## Workspace Structure
 ```
@@ -375,6 +405,12 @@ If unsure, ask rather than assume.
 
 When implementing a non-trivial feature (new module, multi-file change, user-facing behavior):
 
+### Before You Start
+- Pull latest from main
+- Run `cargo build` to confirm clean baseline
+- Read existing code in the area you're modifying — use existing patterns
+
+### Lifecycle
 1. **Plan** — Design the implementation approach (plan mode or manual).
 2. **Architect Review** — Before writing code, have the `software-architect` agent review the plan for correctness, security, and alignment with existing patterns.
 3. **QA Test Strategy** — Have the `QA-expert` agent define the testing approach (unit tests, integration tests, manual verification steps). Tests may be written before or after implementation depending on the feature — QA decides.
@@ -384,6 +420,39 @@ When implementing a non-trivial feature (new module, multi-file change, user-fac
 7. **Fix** — Address any findings from steps 5-6 before considering the feature complete.
 
 For small fixes (typos, single-line changes, obvious bugs), skip this process.
+
+### Self-Review Checklist (before requesting review)
+- [ ] `cargo build` and `cargo clippy` clean
+- [ ] No `TODO`/`FIXME` without tracking context
+- [ ] No commented-out code
+- [ ] No secrets, keys, or mnemonics
+- [ ] CHANGELOG.md updated (if user-facing)
+- [ ] Implemented Features list updated (if new feature)
+- [ ] Commit messages follow conventional format
+
+## Testing
+
+### Coverage Targets
+| Layer | Tool | Target |
+|-------|------|--------|
+| Rust pure logic | `cargo test` | 80% for new modules |
+| Host API boundary | manual + test server | every capability path |
+| ObjC/WebView bridge | manual smoke test | every message handler |
+| Bundle parsing | `cargo test` | 90% (security-critical) |
+
+### Test Naming
+Pattern: `test_<verb>s_<noun>_<condition>` — reads as a specification.
+```rust
+#[test]
+fn test_rejects_bundle_with_invalid_signature() { ... }
+#[test]
+fn test_normalizes_url_with_trailing_slash() { ... }
+```
+
+### Regression Prevention
+- **Never delete a passing test** without documenting why
+- **Flaky tests**: fix immediately or `#[ignore]` with tracking comment
+- **New features**: write at least one happy-path test before considering done
 
 ---
 
