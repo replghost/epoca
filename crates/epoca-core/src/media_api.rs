@@ -582,28 +582,43 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
             }});
         }};
 
-        // Connection state handler — works on both connectionState and iceConnectionState
-        // since older WebKit versions may not fire onconnectionstatechange.
+        // Connection state handler — checks connectionState AND iceConnectionState
+        // independently. connectionState may be 'connecting' (truthy) while
+        // iceConnectionState is already 'connected', so we must not short-circuit.
+        // Also polls every 500ms as a fallback since cross-frame RTCPeerConnection
+        // in WKWebView may not reliably fire event callbacks.
         var notifiedConnected = false;
+        var notifiedClosed = false;
         function checkConnectionState() {{
-            var cs = pc.connectionState || pc.iceConnectionState;
-            if ((cs === 'connected' || cs === 'completed') && !notifiedConnected) {{
+            var cs = pc.connectionState;
+            var ice = pc.iceConnectionState;
+            console.warn('[epoca-rtc] session={sid} connectionState=' + cs + ' iceConnectionState=' + ice);
+            var isConnected = (cs === 'connected' || cs === 'completed')
+                           || (ice === 'connected' || ice === 'completed');
+            var isFailed = (cs === 'failed' || cs === 'closed')
+                        || (ice === 'failed' || ice === 'closed');
+            if (isConnected && !notifiedConnected) {{
                 notifiedConnected = true;
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+                if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'connected', data: '' }}
                 }});
-            }} else if (cs === 'failed' || cs === 'closed' || cs === 'disconnected') {{
+            }} else if (isFailed && !notifiedClosed) {{
+                notifiedClosed = true;
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+                if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
-                    params: {{ sessionId: {sid}, type: 'closed', data: cs }}
+                    params: {{ sessionId: {sid}, type: 'closed', data: (cs || ice) }}
                 }});
             }}
         }}
         pc.onconnectionstatechange = checkConnectionState;
         pc.oniceconnectionstatechange = checkConnectionState;
+        // Poll as fallback for cross-frame RTCPeerConnection callback issues in WKWebView.
+        sess.statePoller = setInterval(checkConnectionState, 500);
 
         if ({offerer}) {{
             var offer = await pc.createOffer();
@@ -682,6 +697,8 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
         // Stop offer retry — answer received.
         sess.pendingOffer = false;
         if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+        // Guard: don't apply duplicate answer if already stable.
+        if (sess.pc.signalingState === 'stable') return;
         var answer = JSON.parse(atob('{b64}'));
         await sess.pc.setRemoteDescription(answer);
     }} catch(e) {{ console.error('epoca: apply answer error:', e); }}
@@ -710,6 +727,7 @@ pub fn close_session_js(session_id: u64) -> String {
     var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
     if (sess) {{
         if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+        if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
         if (sess.pc) {{ try {{ sess.pc.close(); }} catch(e) {{}} }}
         delete window.__epocaMediaSessions[{sid}];
     }}
