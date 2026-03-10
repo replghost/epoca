@@ -618,15 +618,22 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
     try {{
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
-        // Skip duplicate offers — already processing one.
-        if (sess.pc.remoteDescription) return;
+        // If we already processed an offer, re-send the stored answer.
+        if (sess.pc.remoteDescription && sess.localAnswer) {{
+            window.webkit.messageHandlers.epocaHost.postMessage({{
+                id: 0, method: 'mediaSignal',
+                params: {{ sessionId: {sid}, type: 'answer', data: sess.localAnswer }}
+            }});
+            return;
+        }}
         var offer = JSON.parse(atob('{b64}'));
         await sess.pc.setRemoteDescription(offer);
         var answer = await sess.pc.createAnswer();
         await sess.pc.setLocalDescription(answer);
+        sess.localAnswer = JSON.stringify(answer);
         window.webkit.messageHandlers.epocaHost.postMessage({{
             id: 0, method: 'mediaSignal',
-            params: {{ sessionId: {sid}, type: 'answer', data: JSON.stringify(answer) }}
+            params: {{ sessionId: {sid}, type: 'answer', data: sess.localAnswer }}
         }});
     }} catch(e) {{ console.error('epoca: apply offer error:', e); }}
 }})()"#,
