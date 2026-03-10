@@ -525,8 +525,12 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
             }}
         }}
 
+        var sess = window.__epocaMediaSessions[{sid}];
+        sess.iceCandidates = [];
+
         pc.onicecandidate = function(e) {{
             if (e.candidate) {{
+                sess.iceCandidates.push(e.candidate);
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'candidate', data: JSON.stringify(e.candidate) }}
@@ -552,11 +556,13 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
 
         pc.onconnectionstatechange = function() {{
             if (pc.connectionState === 'connected') {{
+                if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'connected', data: '' }}
                 }});
             }} else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {{
+                if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'closed', data: pc.connectionState }}
@@ -567,10 +573,26 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
         if ({offerer}) {{
             var offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
+            var offerJson = JSON.stringify(offer);
             window.webkit.messageHandlers.epocaHost.postMessage({{
                 id: 0, method: 'mediaSignal',
-                params: {{ sessionId: {sid}, type: 'offer', data: JSON.stringify(offer) }}
+                params: {{ sessionId: {sid}, type: 'offer', data: offerJson }}
             }});
+            // Retry offer + ICE every 3s until answer received.
+            sess.offerRetry = setInterval(function() {{
+                if (!sess.pendingOffer) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; return; }}
+                window.webkit.messageHandlers.epocaHost.postMessage({{
+                    id: 0, method: 'mediaSignal',
+                    params: {{ sessionId: {sid}, type: 'offer', data: offerJson }}
+                }});
+                for (var ci = 0; ci < sess.iceCandidates.length; ci++) {{
+                    window.webkit.messageHandlers.epocaHost.postMessage({{
+                        id: 0, method: 'mediaSignal',
+                        params: {{ sessionId: {sid}, type: 'candidate', data: JSON.stringify(sess.iceCandidates[ci]) }}
+                    }});
+                }}
+            }}, 3000);
+            sess.pendingOffer = true;
         }}
     }} catch(e) {{
         console.error('epoca media setup error:', e);
@@ -596,6 +618,8 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
     try {{
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
+        // Skip duplicate offers — already processing one.
+        if (sess.pc.remoteDescription) return;
         var offer = JSON.parse(atob('{b64}'));
         await sess.pc.setRemoteDescription(offer);
         var answer = await sess.pc.createAnswer();
@@ -613,6 +637,9 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
     try {{
         var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
         if (!sess || !sess.pc) return;
+        // Stop offer retry — answer received.
+        sess.pendingOffer = false;
+        if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
         var answer = JSON.parse(atob('{b64}'));
         await sess.pc.setRemoteDescription(answer);
     }} catch(e) {{ console.error('epoca: apply answer error:', e); }}
@@ -639,8 +666,9 @@ pub fn close_session_js(session_id: u64) -> String {
     format!(
         r#"(function() {{
     var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
-    if (sess && sess.pc) {{
-        try {{ sess.pc.close(); }} catch(e) {{}}
+    if (sess) {{
+        if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+        if (sess.pc) {{ try {{ sess.pc.close(); }} catch(e) {{}} }}
         delete window.__epocaMediaSessions[{sid}];
     }}
 }})()"#,
