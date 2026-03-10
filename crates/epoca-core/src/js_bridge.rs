@@ -89,6 +89,8 @@ pub enum BridgeAsyncAction {
         peer_address: String,
         track_ids: Vec<u64>,
         local_peer_id: String,
+        /// JS strings for signals buffered between ring and accept (offer, ICE, etc.).
+        buffered_signals: Vec<String>,
     },
     /// close: tear down RTCPeerConnection and clean up session.
     MediaClose {
@@ -490,7 +492,7 @@ pub fn dispatch(
                 return BridgeResult::Js(resolve_err(id, "media permission not granted"));
             }
             match crate::media_api::accept_incoming_call(webview_ptr) {
-                Ok((session_id, peer_address, _app_id, track_ids, local_peer_id)) => {
+                Ok((session_id, peer_address, _app_id, track_ids, local_peer_id, buffered_signals)) => {
                     BridgeResult::Async(BridgeAsyncAction::MediaAccept {
                         call_id: id,
                         webview_ptr,
@@ -498,6 +500,7 @@ pub fn dispatch(
                         peer_address,
                         track_ids,
                         local_peer_id,
+                        buffered_signals,
                     })
                 }
                 Err(e) => BridgeResult::Js(resolve_err(id, &e)),

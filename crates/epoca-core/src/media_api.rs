@@ -73,6 +73,9 @@ struct PendingIncomingCall {
     caller_id: String,
     app_id: String,
     local_peer_id: String,
+    /// Pre-subscribed signaling channel (sub_id, receiver).
+    /// Signals buffer here between ring arrival and user accept.
+    signal_sub: Option<(u64, std::sync::mpsc::Receiver<crate::statements_api::Statement>)>,
 }
 
 struct MediaState {
@@ -380,6 +383,48 @@ fn push_eval_js(webview_ptr: usize, js: String) {
 // Signaling relay (Statement Store ↔ WebView JS)
 // ---------------------------------------------------------------------------
 
+/// Parse a signaling statement and return the JS to apply it, if valid.
+fn signal_statement_to_js(session_id: u64, stmt: &crate::statements_api::Statement) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(&stmt.data).ok()?;
+    let sig_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let sig_data = json.get("data").and_then(|v| v.as_str()).unwrap_or("");
+    if sig_type.is_empty() {
+        return None;
+    }
+    let js = apply_signal_js(session_id, sig_type, sig_data);
+    if js.is_empty() { None } else { Some(js) }
+}
+
+/// Start a signaling relay thread using an existing subscription receiver.
+fn start_signaling_with_rx(
+    session_id: u64,
+    sub_id: u64,
+    signal_rx: std::sync::mpsc::Receiver<crate::statements_api::Statement>,
+    webview_ptr: usize,
+) -> Arc<AtomicBool> {
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+
+    std::thread::spawn(move || {
+        log::info!("[media] signaling thread for session={session_id} (live)");
+        while running_clone.load(Ordering::Acquire) {
+            match signal_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(stmt) => {
+                    if let Some(js) = signal_statement_to_js(session_id, &stmt) {
+                        push_eval_js(webview_ptr, js);
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        crate::statements_api::unsubscribe(sub_id);
+        log::info!("[media] signaling thread for session={session_id} stopped");
+    });
+
+    running
+}
+
 /// Start a signaling relay thread for a media session.
 /// Subscribes to the peer's signaling channel and pushes received signals
 /// as EvalJs events for the workbench to apply on the webview.
@@ -394,10 +439,6 @@ pub fn start_signaling(
     let (sub_id, signal_rx) = crate::statements_api::subscribe_direct(app_id, &listen_ch)
         .map_err(|e| format!("subscribe signaling: {e}"))?;
 
-    let running = Arc::new(AtomicBool::new(true));
-    let running_clone = running.clone();
-
-    // Get webview_ptr from the session for pushing eval events.
     let webview_ptr = {
         let st = state().lock().unwrap();
         st.sessions.get(&session_id)
@@ -405,35 +446,7 @@ pub fn start_signaling(
             .ok_or("session not found")?
     };
 
-    std::thread::spawn(move || {
-        log::info!("[media] signaling thread for session={session_id} listening on {listen_ch}");
-        while running_clone.load(Ordering::Acquire) {
-            match signal_rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(stmt) => {
-                    let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
-                        Ok(v) => v,
-                        Err(_) => continue,
-                    };
-                    let sig_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let sig_data = json.get("data").and_then(|v| v.as_str()).unwrap_or("");
-                    if sig_type.is_empty() {
-                        continue;
-                    }
-                    // Generate JS to apply the signal and push as EvalJs event.
-                    let js = apply_signal_js(session_id, sig_type, sig_data);
-                    if !js.is_empty() {
-                        push_eval_js(webview_ptr, js);
-                    }
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        crate::statements_api::unsubscribe(sub_id);
-        log::info!("[media] signaling thread for session={session_id} stopped");
-    });
-
-    Ok(running)
+    Ok(start_signaling_with_rx(session_id, sub_id, signal_rx, webview_ptr))
 }
 
 /// Publish a signal to the remote peer via Statement Store.
@@ -713,12 +726,26 @@ pub fn start_ring_listener(
                     log::info!("[media] incoming call from {caller_id}");
 
                     // Defer session creation until the user accepts — store pending call.
+                    // Subscribe to the signaling channel NOW so the caller's offer
+                    // buffers in the mpsc channel until accept time.
+                    let listen_ch = signal_channel(&app_id, &caller_id, &local_id);
+                    let pre_sub = match crate::statements_api::subscribe_direct(&app_id, &listen_ch) {
+                        Ok((sub_id, rx)) => {
+                            log::info!("[media] pre-subscribed signaling on {listen_ch}");
+                            Some((sub_id, rx))
+                        }
+                        Err(e) => {
+                            log::warn!("[media] failed to pre-subscribe signaling: {e}");
+                            None
+                        }
+                    };
                     {
                         let mut st = state().lock().unwrap();
                         st.pending_incoming.insert(webview_ptr, PendingIncomingCall {
                             caller_id: caller_id.clone(),
                             app_id: app_id.clone(),
                             local_peer_id: local_id.clone(),
+                            signal_sub: pre_sub,
                         });
                     }
 
@@ -744,9 +771,10 @@ pub fn start_ring_listener(
 }
 
 /// Accept a pending incoming call: create session, start signaling, return IDs.
+/// Returns buffered signal JS strings that must be evaluated AFTER setup_session_js.
 pub fn accept_incoming_call(
     webview_ptr: usize,
-) -> Result<(u64, String, String, Vec<u64>, String), String> {
+) -> Result<(u64, String, String, Vec<u64>, String, Vec<String>), String> {
     let pending = {
         let mut st = state().lock().unwrap();
         st.pending_incoming.remove(&webview_ptr)
@@ -763,15 +791,37 @@ pub fn accept_incoming_call(
         track_ids.clone(), &pending.local_peer_id,
     );
 
-    match start_signaling(session_id, &pending.app_id, &pending.caller_id, &pending.local_peer_id) {
-        Ok(handle) => set_signaling_handle(session_id, handle),
-        Err(e) => {
-            close_session(session_id, &format!("signaling failed: {e}"));
-            return Err(format!("signaling failed: {e}"));
+    let mut buffered_js = Vec::new();
+
+    if let Some((sub_id, signal_rx)) = pending.signal_sub {
+        // Drain signals that arrived between ring and accept.
+        loop {
+            match signal_rx.try_recv() {
+                Ok(stmt) => {
+                    if let Some(js) = signal_statement_to_js(session_id, &stmt) {
+                        buffered_js.push(js);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        log::info!("[media] drained {} buffered signals for session {session_id}", buffered_js.len());
+
+        // Start live signaling thread with the same receiver (no gap).
+        let handle = start_signaling_with_rx(session_id, sub_id, signal_rx, webview_ptr);
+        set_signaling_handle(session_id, handle);
+    } else {
+        // Fallback: no pre-subscription, start fresh (may miss early signals).
+        match start_signaling(session_id, &pending.app_id, &pending.caller_id, &pending.local_peer_id) {
+            Ok(handle) => set_signaling_handle(session_id, handle),
+            Err(e) => {
+                close_session(session_id, &format!("signaling failed: {e}"));
+                return Err(format!("signaling failed: {e}"));
+            }
         }
     }
 
-    Ok((session_id, pending.caller_id, pending.app_id, track_ids, pending.local_peer_id))
+    Ok((session_id, pending.caller_id, pending.app_id, track_ids, pending.local_peer_id, buffered_js))
 }
 
 // ---------------------------------------------------------------------------
@@ -807,7 +857,12 @@ pub fn cleanup_for_webview(webview_ptr: usize) {
     st.pending_events.retain(|e| e.webview_ptr != webview_ptr);
     st.local_tracks.remove(&webview_ptr);
     st.ring_listeners.remove(&webview_ptr);
-    st.pending_incoming.remove(&webview_ptr);
+    // Unsubscribe pre-subscribed signaling channel if pending call was never accepted.
+    if let Some(pending) = st.pending_incoming.remove(&webview_ptr) {
+        if let Some((sub_id, _rx)) = pending.signal_sub {
+            crate::statements_api::unsubscribe(sub_id);
+        }
+    }
 }
 
 /// Returns JS to stop all tracks belonging to a webview.

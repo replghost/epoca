@@ -1275,6 +1275,7 @@ impl Workbench {
                                     peer_address: _,
                                     ref track_ids,
                                     local_peer_id: _,
+                                    ref buffered_signals,
                                 } => {
                                     // Resolve the promise with the session ID.
                                     let resolve_js = format!(
@@ -1286,6 +1287,11 @@ impl Workbench {
                                         session_id, track_ids, false,
                                     );
                                     entity.read(cx).evaluate_script(&setup_js, cx);
+                                    // Replay signals buffered between ring and accept
+                                    // (offer + ICE candidates from the caller).
+                                    for sig_js in buffered_signals {
+                                        entity.read(cx).evaluate_script(sig_js, cx);
+                                    }
                                 }
                                 crate::js_bridge::BridgeAsyncAction::MediaClose {
                                     call_id,
