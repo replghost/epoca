@@ -582,21 +582,28 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
             }});
         }};
 
-        pc.onconnectionstatechange = function() {{
-            if (pc.connectionState === 'connected') {{
+        // Connection state handler — works on both connectionState and iceConnectionState
+        // since older WebKit versions may not fire onconnectionstatechange.
+        var notifiedConnected = false;
+        function checkConnectionState() {{
+            var cs = pc.connectionState || pc.iceConnectionState;
+            if ((cs === 'connected' || cs === 'completed') && !notifiedConnected) {{
+                notifiedConnected = true;
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'connected', data: '' }}
                 }});
-            }} else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {{
+            }} else if (cs === 'failed' || cs === 'closed' || cs === 'disconnected') {{
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
-                    params: {{ sessionId: {sid}, type: 'closed', data: pc.connectionState }}
+                    params: {{ sessionId: {sid}, type: 'closed', data: cs }}
                 }});
             }}
-        }};
+        }}
+        pc.onconnectionstatechange = checkConnectionState;
+        pc.oniceconnectionstatechange = checkConnectionState;
 
         if ({offerer}) {{
             var offer = await pc.createOffer();
