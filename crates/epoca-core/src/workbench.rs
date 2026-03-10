@@ -1508,6 +1508,13 @@ impl Workbench {
                 crate::media_api::MediaEventType::EvalJs { ref js } => {
                     js.clone()
                 }
+                crate::media_api::MediaEventType::SignalingProgress { session_id, ref stage } => {
+                    let json = serde_json::json!({ "sessionId": session_id, "stage": stage });
+                    format!(
+                        "window.__epocaPush('mediaSignalingProgress', {})",
+                        serde_json::to_string(&json).unwrap_or_else(|_| "{}".into())
+                    )
+                }
             };
             for tab in &self.tabs {
                 if let Ok(entity) = tab.entity.clone().downcast::<SpaTab>() {
@@ -2319,7 +2326,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             if bundle.manifest.app.app_type == "spa" {
                                 self.open_spa(bundle, window, cx);
                             } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
-                                self.open_framebuffer_app(bundle, window, cx);
+                                self.open_framebuffer_app(bundle, None, window, cx);
                             } else {
                                 // Non-framebuffer .prod — open as regular sandbox app
                                 let name = bundle.manifest.app.name.clone();
@@ -2378,8 +2385,13 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             .map(|tab| match &tab.kind {
                 TabKind::WebView { url } => url.clone(),
                 TabKind::DeclarativeApp { path } => path.clone(),
-                TabKind::SandboxApp { app_id } => app_id.clone(),
-                TabKind::FramebufferApp { app_id } => app_id.clone(),
+                TabKind::SandboxApp { app_id } | TabKind::FramebufferApp { app_id } => {
+                    if let Some(ref dv) = tab.dot_verification {
+                        format!("dot://{}.dot", dv.name)
+                    } else {
+                        app_id.clone()
+                    }
+                }
                 TabKind::Spa { .. } => {
                     // Show dot:// URL for .dot apps instead of the raw app_id
                     if let Some(ref dv) = tab.dot_verification {
@@ -2853,7 +2865,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             if bundle.manifest.app.app_type == "spa" {
                 self.open_spa(bundle, window, cx);
             } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
-                self.open_framebuffer_app(bundle, window, cx);
+                self.open_framebuffer_app(bundle, None, window, cx);
             }
             return;
         }
@@ -2913,7 +2925,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                             if bundle.manifest.app.app_type == "spa" {
                                 self.open_spa(bundle, window, cx);
                             } else if bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer) {
-                                self.open_framebuffer_app(bundle, window, cx);
+                                self.open_framebuffer_app(bundle, None, window, cx);
                             }
                         }
                         Err(e) => log::error!("Failed to load .prod: {e}"),
@@ -3019,6 +3031,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     pub fn open_framebuffer_app(
         &mut self,
         bundle: ProdBundle,
+        verification: Option<DotVerification>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3029,9 +3042,14 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let app_id_clone = app_id.clone();
         let entity =
             cx.new(|cx| FramebufferAppTab::from_bundle(bundle, broker, window, cx));
+        let url_display = if let Some(ref dv) = verification {
+            format!("dot://{}.dot", dv.name)
+        } else {
+            app_id_clone.clone()
+        };
         self.tabs.push(TabEntry {
             id,
-            kind: TabKind::FramebufferApp { app_id: app_id_clone.clone() },
+            kind: TabKind::FramebufferApp { app_id: app_id_clone },
             title,
             icon: IconName::Frame,
             entity: entity.into(),
@@ -3042,11 +3060,11 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         loading_progress: 0.0,
                         reader_active: false,
                         readerable: false,
-                        dot_verification: None,
+                        dot_verification: verification,
         });
         self.active_tab_id = Some(id);
         self.url_input
-            .update(cx, |s, inner_cx| s.set_value(app_id_clone, window, inner_cx));
+            .update(cx, |s, inner_cx| s.set_value(url_display, window, inner_cx));
         cx.notify();
     }
 
@@ -7637,7 +7655,7 @@ impl Render for Workbench {
                 || bundle.manifest.sandbox.as_ref().map_or(false, |s| s.framebuffer);
             if is_framebuffer {
                 // Framebuffer/application bundle — open in PolkaVM sandbox.
-                self.open_framebuffer_app(bundle, window, cx);
+                self.open_framebuffer_app(bundle, verification, window, cx);
             } else {
                 self.open_spa_with_verification(bundle, verification, window, cx);
             }

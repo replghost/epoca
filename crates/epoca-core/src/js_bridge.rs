@@ -525,6 +525,8 @@ pub fn dispatch(
             // Publish ring to the remote peer so they auto-create a session.
             if let Err(e) = crate::media_api::publish_ring(app_id, local_id, peer_address) {
                 log::warn!("[media] publish ring failed: {e}");
+            } else {
+                crate::media_api::push_signaling_progress(session_id, "ring_sent");
             }
             // Start signaling relay thread.
             match crate::media_api::start_signaling(session_id, app_id, peer_address, local_id) {

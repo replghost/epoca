@@ -38,6 +38,9 @@ pub enum MediaEventType {
     Error { session_id: u64, error: String },
     /// Evaluate this JS on the webview (signaling thread → render loop).
     EvalJs { js: String },
+    /// Signaling progress for UI feedback during call setup.
+    /// Stages: "ring_sent", "answer_received", "ice_started"
+    SignalingProgress { session_id: u64, stage: String },
 }
 
 struct MediaTrack {
@@ -379,12 +382,27 @@ fn push_eval_js(webview_ptr: usize, js: String) {
     });
 }
 
+/// Push a signaling progress event for UI feedback.
+pub fn push_signaling_progress(session_id: u64, stage: &str) {
+    let mut st = state().lock().unwrap();
+    let webview_ptr = st.sessions.get(&session_id).map(|s| s.webview_ptr);
+    if let Some(wv) = webview_ptr {
+        st.pending_events.push(MediaEvent {
+            webview_ptr: wv,
+            event_type: MediaEventType::SignalingProgress {
+                session_id,
+                stage: stage.to_string(),
+            },
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Signaling relay (Statement Store ↔ WebView JS)
 // ---------------------------------------------------------------------------
 
-/// Parse a signaling statement and return the JS to apply it, if valid.
-fn signal_statement_to_js(session_id: u64, stmt: &crate::statements_api::Statement) -> Option<String> {
+/// Parse a signaling statement and return (signal_type, JS) to apply it, if valid.
+fn signal_statement_to_js(session_id: u64, stmt: &crate::statements_api::Statement) -> Option<(String, String)> {
     let json: serde_json::Value = serde_json::from_str(&stmt.data).ok()?;
     let sig_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let sig_data = json.get("data").and_then(|v| v.as_str()).unwrap_or("");
@@ -392,7 +410,7 @@ fn signal_statement_to_js(session_id: u64, stmt: &crate::statements_api::Stateme
         return None;
     }
     let js = apply_signal_js(session_id, sig_type, sig_data);
-    if js.is_empty() { None } else { Some(js) }
+    if js.is_empty() { None } else { Some((sig_type.to_string(), js)) }
 }
 
 /// Start a signaling relay thread using an existing subscription receiver.
@@ -407,11 +425,21 @@ fn start_signaling_with_rx(
 
     std::thread::spawn(move || {
         log::info!("[media] signaling thread for session={session_id} (live)");
+        let mut seen_ice = false;
         while running_clone.load(Ordering::Acquire) {
             match signal_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(stmt) => {
-                    if let Some(js) = signal_statement_to_js(session_id, &stmt) {
+                    if let Some((sig_type, js)) = signal_statement_to_js(session_id, &stmt) {
                         push_eval_js(webview_ptr, js);
+                        // Emit progress events for key signaling milestones.
+                        match sig_type.as_str() {
+                            "answer" => push_signaling_progress(session_id, "answer_received"),
+                            "candidate" if !seen_ice => {
+                                seen_ice = true;
+                                push_signaling_progress(session_id, "ice_started");
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
@@ -833,7 +861,7 @@ pub fn accept_incoming_call(
         loop {
             match signal_rx.try_recv() {
                 Ok(stmt) => {
-                    if let Some(js) = signal_statement_to_js(session_id, &stmt) {
+                    if let Some((_sig_type, js)) = signal_statement_to_js(session_id, &stmt) {
                         buffered_js.push(js);
                     }
                 }

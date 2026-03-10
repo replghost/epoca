@@ -413,6 +413,36 @@ App identity = `app.id` from manifest. Two `.prod` files with the same `id` are 
 - [ ] Android WebView bridge (WebKit → Android WebView or GeckoView)
 - [ ] Play Store / F-Droid packaging
 
+### iOS / iPad
+GPUI's `Platform` + `PlatformWindow` trait abstraction makes an iOS port feasible without
+forking the framework. The Metal renderer is ~90% portable (MTKView works on iOS as-is).
+
+**GPUI iOS backend (~3000-4000 LOC, 4-6 weeks)**
+- [ ] `UIWindow` / `UIView` replacing `NSWindow` / `NSView`
+- [ ] `CADisplayLink` replacing `CVDisplayLink` for vsync
+- [ ] `UIApplication` lifecycle (`didFinishLaunching`, background/foreground transitions)
+- [ ] Touch → mouse event translation (tap = click, pan = scroll, long-press = right-click)
+- [ ] Software keyboard management (`UITextInput` protocol, `keyboardWillShow` notifications)
+- [ ] Safe area / notch insets piped into GPUI layout
+
+**Epoca-specific adaptations**
+- [ ] WKWebView works on iOS — same API, minor config differences (`allowsInlineMediaPlayback`)
+- [ ] Tab bar / sidebar → bottom tab strip or swipe gestures for mobile form factor
+- [ ] `ASAuthorizationController` WebAuthn works on iOS (same framework as macOS)
+- [ ] `UIDocumentPickerViewController` replacing `NSOpenPanel` for file open dialog
+
+**PolkaVM games on iPad**
+- [ ] PolkaVM sandbox is pure Rust — cross-compiles to `aarch64-apple-ios` trivially
+- [ ] Framebuffer API is platform-agnostic (render to texture, blit via Metal)
+- [ ] Doom, Wolf3D, Cave Story all work unchanged — just need virtual touch controls overlay
+- [ ] Game controller support via `GCController` framework (MFi / Xbox / PS controllers)
+
+**Blockers**
+- [ ] Apple requires `UIApplicationMain` to own the process — GPUI must yield control
+      to UIKit's run loop instead of spinning its own
+- [ ] App Store review: JIT not allowed, but PolkaVM interpreter mode works; WKWebView
+      is the only allowed web engine on iOS
+
 ### Sync (opt-in, E2E encrypted)
 - [ ] History, bookmarks, tab groups sync via user-owned key
 - [ ] No central server required: sync over iCloud Drive / local network / custom S3

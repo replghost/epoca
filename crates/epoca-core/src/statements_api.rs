@@ -288,7 +288,7 @@ pub fn write(
         "data": data,
         "timestamp_ms": now,
     });
-    let priority = (now / 1000) as u32; // seconds as priority (last-write-wins)
+    let priority = now as u32; // milliseconds as priority (wraps every ~49 days, fine for last-write-wins)
 
     let _ = submit_tx().try_send(SubmitJob {
         app_id: app_id.to_string(),

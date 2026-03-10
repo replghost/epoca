@@ -271,7 +271,7 @@ fn main() {
                                     if bundle.manifest.app.app_type == "spa" {
                                         wb.open_spa(bundle, window, cx);
                                     } else {
-                                        wb.open_framebuffer_app(bundle, window, cx);
+                                        wb.open_framebuffer_app(bundle, None, window, cx);
                                     }
                                 }
                                 Err(e) => {
