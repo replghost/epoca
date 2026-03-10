@@ -69,6 +69,12 @@ enum SessionState {
     Closed,
 }
 
+struct PendingIncomingCall {
+    caller_id: String,
+    app_id: String,
+    local_peer_id: String,
+}
+
 struct MediaState {
     tracks: HashMap<u64, MediaTrack>,
     sessions: HashMap<u64, MediaSession>,
@@ -77,6 +83,10 @@ struct MediaState {
     local_tracks: HashMap<usize, Vec<u64>>,
     /// Webviews that already have a ring listener running.
     ring_listeners: std::collections::HashSet<usize>,
+    /// Pending incoming calls that have not yet been accepted by the user.
+    pending_incoming: HashMap<usize, PendingIncomingCall>,
+    /// Stop flags for ring listener threads, keyed by webview_ptr.
+    ring_listener_flags: HashMap<usize, Arc<AtomicBool>>,
 }
 
 static STATE: OnceLock<Mutex<MediaState>> = OnceLock::new();
@@ -89,6 +99,8 @@ fn state() -> &'static Mutex<MediaState> {
             pending_events: Vec::new(),
             local_tracks: HashMap::new(),
             ring_listeners: std::collections::HashSet::new(),
+            pending_incoming: HashMap::new(),
+            ring_listener_flags: HashMap::new(),
         })
     })
 }
@@ -244,6 +256,19 @@ pub fn attach_track_js(track_id: u64, element_id: &str) -> String {
 }})()"#,
         track_id = track_id,
         element_id = safe_element_id,
+    )
+}
+
+/// JS to enable/disable a track (mute audio or disable camera).
+pub fn set_track_enabled_js(track_id: u64, enabled: bool) -> String {
+    format!(
+        r#"(function() {{
+    var entry = window.__epocaMediaTracks && window.__epocaMediaTracks[{track_id}];
+    if (!entry || !entry.track) {{ console.warn('epoca: track {track_id} not found'); return; }}
+    entry.track.enabled = {enabled};
+}})()"#,
+        track_id = track_id,
+        enabled = if enabled { "true" } else { "false" },
     )
 }
 
@@ -473,6 +498,7 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
     try {{
 {get_rtc}
         if (!window.__epocaMediaTracks) window.__epocaMediaTracks = {{}};
+        if (!window.__epocaMediaSessions) window.__epocaMediaSessions = {{}};
         var pc = new _RTC({{
             iceServers: [{{ urls: 'stun:stun.l.google.com:19302' }}]
         }});
@@ -499,7 +525,7 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
             var sess = window.__epocaMediaSessions[{sid}];
             if (!sess) return;
             sess.remoteTrackCount++;
-            var rtid = {sid} * 1000 + sess.remoteTrackCount;
+            var rtid = 1000000 + {sid} * 1000 + sess.remoteTrackCount;
             window.__epocaMediaTracks[rtid] = {{
                 stream: e.streams[0] || new MediaStream([e.track]),
                 track: e.track
@@ -635,8 +661,8 @@ pub fn publish_ring(
 }
 
 /// Start listening for incoming calls on this peer's ring channel.
-/// Only starts once per webview. When a ring arrives, auto-creates a session
-/// as the answerer, starts signaling, and pushes EvalJs to set up WebRTC.
+/// Only starts once per webview. When a ring arrives, stores the pending call
+/// and notifies JS — actual session creation is deferred until the user accepts.
 pub fn start_ring_listener(
     app_id: &str,
     local_peer_id: &str,
@@ -657,9 +683,16 @@ pub fn start_ring_listener(
     let app_id = app_id.to_string();
     let local_id = local_peer_id.to_string();
 
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    {
+        let mut st = state().lock().unwrap();
+        st.ring_listener_flags.insert(webview_ptr, running);
+    }
+
     std::thread::spawn(move || {
         log::info!("[media] ring listener started on {ch}");
-        loop {
+        while running_clone.load(Ordering::Acquire) {
             match ring_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(stmt) => {
                     let json: serde_json::Value = match serde_json::from_str(&stmt.data) {
@@ -679,35 +712,22 @@ pub fn start_ring_listener(
                     }
                     log::info!("[media] incoming call from {caller_id}");
 
-                    // Get local tracks for this webview.
-                    let track_ids = {
-                        let st = state().lock().unwrap();
-                        st.local_tracks.get(&webview_ptr).cloned().unwrap_or_default()
-                    };
-
-                    // Create session as answerer.
-                    let session_id = create_session(
-                        webview_ptr, &app_id, &caller_id, track_ids.clone(), &local_id,
-                    );
-
-                    // Start signaling relay.
-                    match start_signaling(session_id, &app_id, &caller_id, &local_id) {
-                        Ok(handle) => set_signaling_handle(session_id, handle),
-                        Err(e) => {
-                            log::warn!("[media] ring: signaling failed for {caller_id}: {e}");
-                            close_session(session_id, &format!("signaling failed: {e}"));
-                            continue;
-                        }
+                    // Defer session creation until the user accepts — store pending call.
+                    {
+                        let mut st = state().lock().unwrap();
+                        st.pending_incoming.insert(webview_ptr, PendingIncomingCall {
+                            caller_id: caller_id.clone(),
+                            app_id: app_id.clone(),
+                            local_peer_id: local_id.clone(),
+                        });
                     }
 
-                    // Push JS to set up RTCPeerConnection as answerer (not offerer).
-                    let setup_js = setup_session_js(session_id, &track_ids, false);
-                    push_eval_js(webview_ptr, setup_js);
-
-                    // Notify JS about the incoming call.
+                    // Notify JS about the incoming call (no session_id yet).
+                    let safe_caller = caller_id
+                        .replace('\\', "\\\\")
+                        .replace('\'', "\\'");
                     let notify_js = format!(
-                        "window.__epocaPush('mediaIncomingCall', {{sessionId: {}, peer: '{}'}})",
-                        session_id, caller_id,
+                        "window.__epocaPush('mediaIncomingCall', {{peer: '{safe_caller}'}})",
                     );
                     push_eval_js(webview_ptr, notify_js);
                 }
@@ -721,6 +741,37 @@ pub fn start_ring_listener(
 
     log::info!("[media] ring listener registered for {}", local_peer_id);
     Ok(())
+}
+
+/// Accept a pending incoming call: create session, start signaling, return IDs.
+pub fn accept_incoming_call(
+    webview_ptr: usize,
+) -> Result<(u64, String, String, Vec<u64>, String), String> {
+    let pending = {
+        let mut st = state().lock().unwrap();
+        st.pending_incoming.remove(&webview_ptr)
+            .ok_or("no pending incoming call")?
+    };
+
+    let track_ids = {
+        let st = state().lock().unwrap();
+        st.local_tracks.get(&webview_ptr).cloned().unwrap_or_default()
+    };
+
+    let session_id = create_session(
+        webview_ptr, &pending.app_id, &pending.caller_id,
+        track_ids.clone(), &pending.local_peer_id,
+    );
+
+    match start_signaling(session_id, &pending.app_id, &pending.caller_id, &pending.local_peer_id) {
+        Ok(handle) => set_signaling_handle(session_id, handle),
+        Err(e) => {
+            close_session(session_id, &format!("signaling failed: {e}"));
+            return Err(format!("signaling failed: {e}"));
+        }
+    }
+
+    Ok((session_id, pending.caller_id, pending.app_id, track_ids, pending.local_peer_id))
 }
 
 // ---------------------------------------------------------------------------
@@ -746,11 +797,17 @@ pub fn cleanup_for_webview(webview_ptr: usize) {
         }
     }
 
+    // Stop ring listener thread for this webview.
+    if let Some(flag) = st.ring_listener_flags.remove(&webview_ptr) {
+        flag.store(false, Ordering::Release);
+    }
+
     st.tracks.retain(|_, t| t.webview_ptr != webview_ptr);
     st.sessions.retain(|_, s| s.webview_ptr != webview_ptr);
     st.pending_events.retain(|e| e.webview_ptr != webview_ptr);
     st.local_tracks.remove(&webview_ptr);
     st.ring_listeners.remove(&webview_ptr);
+    st.pending_incoming.remove(&webview_ptr);
 }
 
 /// Returns JS to stop all tracks belonging to a webview.

@@ -1268,6 +1268,25 @@ impl Workbench {
                                     );
                                     entity.read(cx).evaluate_script(&setup_js, cx);
                                 }
+                                crate::js_bridge::BridgeAsyncAction::MediaAccept {
+                                    call_id,
+                                    webview_ptr: _wv_ptr,
+                                    session_id,
+                                    peer_address: _,
+                                    ref track_ids,
+                                    local_peer_id: _,
+                                } => {
+                                    // Resolve the promise with the session ID.
+                                    let resolve_js = format!(
+                                        "window.__epocaResolve({call_id}, null, {session_id})"
+                                    );
+                                    entity.read(cx).evaluate_script(&resolve_js, cx);
+                                    // Answerer is never the offerer.
+                                    let setup_js = crate::media_api::setup_session_js(
+                                        session_id, track_ids, false,
+                                    );
+                                    entity.read(cx).evaluate_script(&setup_js, cx);
+                                }
                                 crate::js_bridge::BridgeAsyncAction::MediaClose {
                                     call_id,
                                     webview_ptr: _wv_ptr,

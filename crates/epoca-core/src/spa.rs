@@ -409,6 +409,9 @@ pub const HOST_API_SCRIPT: &str = r#"
             connect: function(peer, trackIds) {
                 return _call('epocaHost', 'mediaConnect', { peer: peer, trackIds: trackIds || [] });
             },
+            accept: function() {
+                return _call('epocaHost', 'mediaAccept', {});
+            },
             close: function(sessionId) {
                 return _call('epocaHost', 'mediaClose', { sessionId: sessionId });
             },
@@ -417,6 +420,12 @@ pub const HOST_API_SCRIPT: &str = r#"
             },
             getPeerId: function() {
                 return _call('epocaHost', 'mediaGetPeerId', {});
+            },
+            startListening: function(address) {
+                return _call('epocaHost', 'mediaStartListening', { address: address });
+            },
+            setTrackEnabled: function(trackId, enabled) {
+                return _call('epocaHost', 'mediaSetTrackEnabled', { trackId: trackId, enabled: enabled });
             }
         }),
 

@@ -17,11 +17,14 @@ pub enum BridgeRequest {
     DataClose { conn_id: u64 },
     DataGetPeerId,
     MediaGetUserMedia { audio: bool, video: bool },
-    MediaConnect { peer_address: String, track_ids: Vec<u64> },
+    MediaConnect { peer_address: String, track_ids: Vec<u64>, from_address: String },
+    MediaAccept,
     MediaClose { session_id: u64 },
     MediaAttachTrack { track_id: u64, element_id: String },
     MediaSignal { session_id: u64, signal_type: String, data: String },
     MediaGetPeerId,
+    MediaStartListening { address: String },
+    MediaSetTrackEnabled { track_id: u64, enabled: bool },
     RequestWssPermission { url: String },
     RequestHttpPermission { origin: String },
 }
@@ -77,6 +80,15 @@ pub enum BridgeAsyncAction {
         peer_address: String,
         track_ids: Vec<u64>,
         author: String,
+    },
+    /// accept: create session for pending incoming call (deferred from ring).
+    MediaAccept {
+        call_id: u64,
+        webview_ptr: usize,
+        session_id: u64,
+        peer_address: String,
+        track_ids: Vec<u64>,
+        local_peer_id: String,
     },
     /// close: tear down RTCPeerConnection and clean up session.
     MediaClose {
@@ -176,6 +188,7 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
             Ok(BridgeRequest::DataClose { conn_id })
         }
         "dataGetPeerId" => Ok(BridgeRequest::DataGetPeerId),
+        "mediaAccept" => Ok(BridgeRequest::MediaAccept),
         "mediaGetUserMedia" => {
             let audio = params.get("audio").and_then(|v| v.as_bool()).unwrap_or(false);
             let video = params.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -192,7 +205,12 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
                 .and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
                 .unwrap_or_default();
-            Ok(BridgeRequest::MediaConnect { peer_address, track_ids })
+            let from_address = params
+                .get("from")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(BridgeRequest::MediaConnect { peer_address, track_ids, from_address })
         }
         "mediaClose" => {
             let session_id = params.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -216,6 +234,15 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
             Ok(BridgeRequest::RequestHttpPermission { origin })
         }
         "mediaGetPeerId" => Ok(BridgeRequest::MediaGetPeerId),
+        "mediaStartListening" => {
+            let address = params.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::MediaStartListening { address })
+        }
+        "mediaSetTrackEnabled" => {
+            let track_id = params.get("trackId").and_then(|v| v.as_u64()).unwrap_or(0);
+            let enabled = params.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+            Ok(BridgeRequest::MediaSetTrackEnabled { track_id, enabled })
+        }
         "mediaSignal" => {
             let session_id = params.get("sessionId").and_then(|v| v.as_u64()).unwrap_or(0);
             let signal_type = params
@@ -436,22 +463,68 @@ pub fn dispatch(
             BridgeResult::Js(resolve_ok(id, &format!("'{peer_id}'")))
         }
 
-        BridgeRequest::MediaConnect { peer_address, track_ids } => {
+        BridgeRequest::MediaSetTrackEnabled { track_id, enabled } => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            let js = crate::media_api::set_track_enabled_js(*track_id, *enabled);
+            // Evaluate on the webview, then resolve the promise.
+            let resolve = resolve_ok(id, "true");
+            BridgeResult::Js(format!("{js}; {resolve}"))
+        }
+
+        BridgeRequest::MediaStartListening { address } => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            if address.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "address is required"));
+            }
+            let _ = crate::media_api::start_ring_listener(app_id, address, webview_ptr);
+            log::info!("[media] ring listener started via mediaStartListening for {}", address);
+            BridgeResult::Js(resolve_ok(id, "true"))
+        }
+
+        BridgeRequest::MediaAccept => {
+            if perms.media.is_empty() {
+                return BridgeResult::Js(resolve_err(id, "media permission not granted"));
+            }
+            match crate::media_api::accept_incoming_call(webview_ptr) {
+                Ok((session_id, peer_address, _app_id, track_ids, local_peer_id)) => {
+                    BridgeResult::Async(BridgeAsyncAction::MediaAccept {
+                        call_id: id,
+                        webview_ptr,
+                        session_id,
+                        peer_address,
+                        track_ids,
+                        local_peer_id,
+                    })
+                }
+                Err(e) => BridgeResult::Js(resolve_err(id, &e)),
+            }
+        }
+
+        BridgeRequest::MediaConnect { peer_address, track_ids, from_address: _ } => {
             if perms.media.is_empty() {
                 return BridgeResult::Js(resolve_err(id, "media permission not granted"));
             }
             if peer_address.is_empty() {
                 return BridgeResult::Js(resolve_err(id, "peer address cannot be empty"));
             }
+            // Always use wallet_address for local identity — never trust from_address from the SPA.
+            let local_id = match &wallet_address {
+                Ok(addr) => addr.as_str(),
+                Err(_) => author,
+            };
             let session_id = crate::media_api::create_session(
-                webview_ptr, app_id, peer_address, track_ids.clone(), author,
+                webview_ptr, app_id, peer_address, track_ids.clone(), local_id,
             );
             // Publish ring to the remote peer so they auto-create a session.
-            if let Err(e) = crate::media_api::publish_ring(app_id, author, peer_address) {
+            if let Err(e) = crate::media_api::publish_ring(app_id, local_id, peer_address) {
                 log::warn!("[media] publish ring failed: {e}");
             }
             // Start signaling relay thread.
-            match crate::media_api::start_signaling(session_id, app_id, peer_address, author) {
+            match crate::media_api::start_signaling(session_id, app_id, peer_address, local_id) {
                 Ok(handle) => {
                     crate::media_api::set_signaling_handle(session_id, handle);
                 }
@@ -465,7 +538,7 @@ pub fn dispatch(
                 session_id,
                 peer_address: peer_address.clone(),
                 track_ids: track_ids.clone(),
-                author: author.to_string(),
+                author: local_id.to_string(),
             })
         }
 
