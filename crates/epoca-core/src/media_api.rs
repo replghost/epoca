@@ -554,17 +554,17 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
         }}
 
         var sess = window.__epocaMediaSessions[{sid}];
-        sess.iceCandidates = [];
 
-        pc.onicecandidate = function(e) {{
-            if (e.candidate) {{
-                sess.iceCandidates.push(e.candidate);
-                window.webkit.messageHandlers.epocaHost.postMessage({{
-                    id: 0, method: 'mediaSignal',
-                    params: {{ sessionId: {sid}, type: 'candidate', data: JSON.stringify(e.candidate) }}
-                }});
-            }}
-        }};
+        // Non-trickle ICE: we wait for gathering to complete, then send the
+        // full SDP (with all a=candidate lines embedded).  This avoids sending
+        // each ICE candidate as a separate gossip message (~3s each).
+        var gatherDone = new Promise(function(resolve) {{
+            pc.onicecandidate = function(e) {{
+                if (!e.candidate) resolve();  // gathering complete
+            }};
+            // Safety: resolve if already complete.
+            if (pc.iceGatheringState === 'complete') resolve();
+        }});
 
         pc.ontrack = function(e) {{
             var sess = window.__epocaMediaSessions[{sid}];
@@ -595,17 +595,18 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
             console.warn('[epoca-rtc] session={sid} connectionState=' + cs + ' iceConnectionState=' + ice);
             var isConnected = (cs === 'connected' || cs === 'completed')
                            || (ice === 'connected' || ice === 'completed');
-            var isFailed = (cs === 'failed' || cs === 'closed')
-                        || (ice === 'failed' || ice === 'closed');
+            var isFailed = (cs === 'failed' || cs === 'closed' || cs === 'disconnected')
+                        || (ice === 'failed' || ice === 'closed' || ice === 'disconnected');
             if (isConnected && !notifiedConnected) {{
                 notifiedConnected = true;
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
-                if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
+                // Keep statePoller running to detect disconnection later.
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
                     params: {{ sessionId: {sid}, type: 'connected', data: '' }}
                 }});
-            }} else if (isFailed && !notifiedClosed) {{
+            }} else if (isFailed && notifiedConnected && !notifiedClosed) {{
+                // Only treat as failed AFTER we were connected (avoids killing during ICE negotiation).
                 notifiedClosed = true;
                 if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
                 if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
@@ -623,24 +624,21 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
         if ({offerer}) {{
             var offer = await pc.createOffer();
             await pc.setLocalDescription(offer);
-            var offerJson = JSON.stringify(offer);
+            // Wait for ICE gathering to complete so all candidates are in the SDP.
+            await gatherDone;
+            // localDescription now contains all a=candidate lines.
+            var fullOffer = JSON.stringify(pc.localDescription);
             window.webkit.messageHandlers.epocaHost.postMessage({{
                 id: 0, method: 'mediaSignal',
-                params: {{ sessionId: {sid}, type: 'offer', data: offerJson }}
+                params: {{ sessionId: {sid}, type: 'offer', data: fullOffer }}
             }});
-            // Retry offer + ICE every 3s until answer received.
+            // Retry offer every 3s until answer received (same bundled SDP).
             sess.offerRetry = setInterval(function() {{
                 if (!sess.pendingOffer) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; return; }}
                 window.webkit.messageHandlers.epocaHost.postMessage({{
                     id: 0, method: 'mediaSignal',
-                    params: {{ sessionId: {sid}, type: 'offer', data: offerJson }}
+                    params: {{ sessionId: {sid}, type: 'offer', data: fullOffer }}
                 }});
-                for (var ci = 0; ci < sess.iceCandidates.length; ci++) {{
-                    window.webkit.messageHandlers.epocaHost.postMessage({{
-                        id: 0, method: 'mediaSignal',
-                        params: {{ sessionId: {sid}, type: 'candidate', data: JSON.stringify(sess.iceCandidates[ci]) }}
-                    }});
-                }}
             }}, 3000);
             sess.pendingOffer = true;
         }}
@@ -680,7 +678,16 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
         await sess.pc.setRemoteDescription(offer);
         var answer = await sess.pc.createAnswer();
         await sess.pc.setLocalDescription(answer);
-        sess.localAnswer = JSON.stringify(answer);
+        // Wait for ICE gathering to complete so answer contains all candidates.
+        await new Promise(function(resolve) {{
+            if (sess.pc.iceGatheringState === 'complete') return resolve();
+            var origHandler = sess.pc.onicecandidate;
+            sess.pc.onicecandidate = function(e) {{
+                if (origHandler) origHandler(e);
+                if (!e.candidate) resolve();
+            }};
+        }});
+        sess.localAnswer = JSON.stringify(sess.pc.localDescription);
         window.webkit.messageHandlers.epocaHost.postMessage({{
             id: 0, method: 'mediaSignal',
             params: {{ sessionId: {sid}, type: 'answer', data: sess.localAnswer }}
