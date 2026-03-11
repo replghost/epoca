@@ -13,7 +13,9 @@ pub enum ChainId {
     PaseoAssetHub,
     Previewnet,
     Ethereum,
+    EthereumSepolia,
     Bitcoin,
+    BitcoinSignet,
 }
 
 /// Which backend to use for a given chain.
@@ -36,7 +38,9 @@ impl ChainId {
             ChainId::PaseoAssetHub => "wss://asset-hub-paseo.dotters.network",
             ChainId::Previewnet => "wss://previewnet.dotsamalabs.com/asset-hub",
             ChainId::Ethereum => "", // Helios uses consensus/execution RPC, not a single endpoint
+            ChainId::EthereumSepolia => "",
             ChainId::Bitcoin => "", // Kyoto connects directly to Bitcoin P2P network
+            ChainId::BitcoinSignet => "",
         }
     }
 
@@ -46,7 +50,9 @@ impl ChainId {
             ChainId::PaseoAssetHub => "Paseo Asset Hub",
             ChainId::Previewnet => "Previewnet",
             ChainId::Ethereum => "Ethereum",
+            ChainId::EthereumSepolia => "Ethereum Sepolia",
             ChainId::Bitcoin => "Bitcoin",
+            ChainId::BitcoinSignet => "Bitcoin Signet",
         }
     }
 
@@ -57,7 +63,9 @@ impl ChainId {
             ChainId::PaseoAssetHub,
             ChainId::Previewnet,
             ChainId::Ethereum,
+            ChainId::EthereumSepolia,
             ChainId::Bitcoin,
+            ChainId::BitcoinSignet,
         ]
     }
 
@@ -75,8 +83,8 @@ impl ChainId {
         match self {
             ChainId::PolkadotAssetHub | ChainId::PaseoAssetHub => ConnectionBackend::Smoldot,
             ChainId::Previewnet => ConnectionBackend::Rpc,
-            ChainId::Ethereum => ConnectionBackend::Helios,
-            ChainId::Bitcoin => ConnectionBackend::Kyoto,
+            ChainId::Ethereum | ChainId::EthereumSepolia => ConnectionBackend::Helios,
+            ChainId::Bitcoin | ChainId::BitcoinSignet => ConnectionBackend::Kyoto,
         }
     }
 
@@ -91,7 +99,11 @@ impl ChainId {
                 include_str!("../chain-specs/paseo.json"),
                 include_str!("../chain-specs/paseo_asset_hub.json"),
             )),
-            ChainId::Previewnet | ChainId::Ethereum | ChainId::Bitcoin => None,
+            ChainId::Previewnet
+            | ChainId::Ethereum
+            | ChainId::EthereumSepolia
+            | ChainId::Bitcoin
+            | ChainId::BitcoinSignet => None,
         }
     }
 }

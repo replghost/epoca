@@ -16,6 +16,11 @@ const CONSENSUS_RPC: &str = "https://ethereum.operationsolarstorm.org";
 /// Public execution RPC aggregator (no key needed).
 const EXECUTION_RPC: &str = "https://eth.llamarpc.com";
 
+/// Public Sepolia consensus RPC.
+const SEPOLIA_CONSENSUS_RPC: &str = "https://ethereum-sepolia-beacon-api.publicnode.com";
+/// Public Sepolia execution RPC.
+const SEPOLIA_EXECUTION_RPC: &str = "https://ethereum-sepolia-rpc.publicnode.com";
+
 /// Run the Helios Ethereum light client on a dedicated thread.
 /// Creates a tokio current-thread runtime internally.
 pub fn run_helios_connection(
@@ -67,14 +72,29 @@ async fn run_helios_async(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use helios_ethereum::{database::FileDB, EthereumClientBuilder};
 
-    let data_dir = chain_data_dir();
+    let is_sepolia = chain == ChainId::EthereumSepolia;
+
+    let dir_suffix = if is_sepolia { "ethereum-sepolia" } else { "ethereum" };
+    let data_dir = chain_data_dir(dir_suffix);
     let _ = std::fs::create_dir_all(&data_dir);
 
-    let client = EthereumClientBuilder::<FileDB>::new()
-        .consensus_rpc(CONSENSUS_RPC)?
-        .execution_rpc(EXECUTION_RPC)?
+    let (consensus_rpc, execution_rpc) = if is_sepolia {
+        (SEPOLIA_CONSENSUS_RPC, SEPOLIA_EXECUTION_RPC)
+    } else {
+        (CONSENSUS_RPC, EXECUTION_RPC)
+    };
+
+    let mut builder = EthereumClientBuilder::<FileDB>::new()
+        .consensus_rpc(consensus_rpc)?
+        .execution_rpc(execution_rpc)?
         .data_dir(data_dir)
-        .load_external_fallback()
+        .load_external_fallback();
+
+    if is_sepolia {
+        builder = builder.network(helios_ethereum::config::networks::Network::Sepolia);
+    }
+
+    let client = builder
         .build()
         .map_err(|e| format!("Helios build error: {e}"))?;
 
@@ -175,19 +195,19 @@ async fn poll_stop_flag(stop: Arc<AtomicBool>) {
     }
 }
 
-fn chain_data_dir() -> std::path::PathBuf {
+fn chain_data_dir(suffix: &str) -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_default();
         std::path::PathBuf::from(home)
-            .join("Library/Application Support/Epoca/chain-db/ethereum")
+            .join(format!("Library/Application Support/Epoca/chain-db/{suffix}"))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
-        std::path::PathBuf::from(home).join(".epoca/chain-db/ethereum")
+        std::path::PathBuf::from(home).join(format!(".epoca/chain-db/{suffix}"))
     }
 }
 

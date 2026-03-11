@@ -63,10 +63,15 @@ async fn run_kyoto_async(
     use bip157::{Builder, Client, Event, Network};
 
     // Data directory for persisting headers + filters across restarts
-    let data_dir = chain_data_dir();
+    let dir_suffix = if chain == ChainId::BitcoinSignet { "bitcoin-signet" } else { "bitcoin" };
+    let data_dir = chain_data_dir(dir_suffix);
     let _ = std::fs::create_dir_all(&data_dir);
 
-    let builder = Builder::new(Network::Bitcoin)
+    let btc_network = match chain {
+        ChainId::BitcoinSignet => Network::Signet,
+        _ => Network::Bitcoin,
+    };
+    let builder = Builder::new(btc_network)
         .data_dir(&data_dir)
         .required_peers(2);
 
@@ -161,18 +166,19 @@ async fn run_kyoto_async(
     Ok(())
 }
 
-fn chain_data_dir() -> std::path::PathBuf {
+fn chain_data_dir(suffix: &str) -> std::path::PathBuf {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var("HOME").unwrap_or_default();
-        std::path::PathBuf::from(home).join("Library/Application Support/Epoca/chain-db/bitcoin")
+        std::path::PathBuf::from(home)
+            .join(format!("Library/Application Support/Epoca/chain-db/{suffix}"))
     }
     #[cfg(not(target_os = "macos"))]
     {
         let home = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .unwrap_or_default();
-        std::path::PathBuf::from(home).join(".epoca/chain-db/bitcoin")
+        std::path::PathBuf::from(home).join(format!(".epoca/chain-db/{suffix}"))
     }
 }
 

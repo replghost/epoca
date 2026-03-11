@@ -4306,9 +4306,19 @@ use crate::chain::ChainGlobal;
 use epoca_chain::{ChainId, ChainState, ConnectionBackend};
 use gpui::prelude::FluentBuilder;
 
+/// Which sub-tab is active in Settings.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SettingsPane {
+    #[default]
+    Browser,
+    Network,
+}
+
 pub struct SettingsTab {
     focus_handle: FocusHandle,
     _refresh_task: gpui::Task<()>,
+    /// Which settings pane is visible.
+    active_pane: SettingsPane,
     /// Input entities for editing context names, keyed by context id.
     context_name_inputs: Vec<(String, Entity<InputState>)>,
     /// Subscriptions for context name input blur events.
@@ -4347,6 +4357,7 @@ impl SettingsTab {
         Self {
             focus_handle: cx.focus_handle(),
             _refresh_task,
+            active_pane: SettingsPane::Browser,
             context_name_inputs: Vec::new(),
             _context_subs: Vec::new(),
             wallet_mnemonic_display: None,
@@ -4546,15 +4557,56 @@ impl Render for SettingsTab {
             .py(px(24.0))
             .flex()
             .flex_col()
-            .gap(px(40.0))
-            .child(
+            .child({
+                let active = self.active_pane;
+                let tab_button = |label: &'static str, pane: SettingsPane| {
+                    let is_active = active == pane;
+                    div()
+                        .id(SharedString::from(label))
+                        .px(px(2.0))
+                        .pb(px(8.0))
+                        .text_sm()
+                        .cursor_pointer()
+                        .when(is_active, |d| d
+                            .text_color(rgba(0xffffffee))
+                            .border_color(rgba(0xffffffcc))
+                            .border_b_2()
+                        )
+                        .when(!is_active, |d| d
+                            .text_color(rgba(0xffffff44))
+                            .border_color(rgba(0xffffff00))
+                            .border_b_2()
+                            .hover(|s| s.text_color(rgba(0xffffff77)))
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.active_pane = pane;
+                            cx.notify();
+                        }))
+                        .child(label)
+                };
                 div()
-                    .text_lg()
-                    .text_color(text_primary)
-                    .child("Settings"),
-            )
+                    .flex()
+                    .flex_col()
+                    .gap(px(16.0))
+                    .mb(px(24.0))
+                    .child(
+                        div()
+                            .text_lg()
+                            .text_color(text_primary)
+                            .child("Settings"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap(px(20.0))
+                            .border_b_1()
+                            .border_color(rgba(0xffffff14))
+                            .child(tab_button("Browser", SettingsPane::Browser))
+                            .child(tab_button("Network", SettingsPane::Network))
+                    )
+            })
             // ── General section ───────────────────────────────────────────────
-            .child(
+            .when(self.active_pane == SettingsPane::Browser, |d| d.child(
                 div()
                     .flex()
                     .flex_col()
@@ -4698,10 +4750,11 @@ impl Render for SettingsTab {
                                     ),
                             ),
                     ),
-            )
+            ))
             // ── Privacy section ───────────────────────────────────────────────
-            .child(
+            .when(self.active_pane == SettingsPane::Browser, |d| d.child(
                 div()
+                    .mt(px(32.0))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -4752,10 +4805,11 @@ impl Render for SettingsTab {
                             .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
                             .child(render_history_retention_row(history_retention, cx)),
                     ),
-            )
+            ))
             // ── Session Contexts ─────────────────────────────────────────────
-            .child(
+            .when(self.active_pane == SettingsPane::Browser, |d| d.child(
                 div()
+                    .mt(px(32.0))
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
@@ -4907,14 +4961,14 @@ impl Render for SettingsTab {
                                     )
                             }),
                     ),
-            )
+            ))
             // ── Experimental section ──────────────────────────────────────────
-            .child(
+            .when(self.active_pane == SettingsPane::Network, |d| d.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.0))
-                    .child(section_header("EXPERIMENTAL"))
+                    .child(section_header("LIGHT CLIENTS & WALLET"))
                     .child(
                         div()
                             .rounded(px(8.0))
@@ -4983,24 +5037,38 @@ impl Render for SettingsTab {
                                 let pol_enabled = enabled_chains.contains("PolkadotAssetHub");
                                 let pas_enabled = enabled_chains.contains("PaseoAssetHub");
                                 let pre_enabled = enabled_chains.contains("Previewnet");
+                                let eth_enabled = enabled_chains.contains("Ethereum");
+                                let eth_sep_enabled = enabled_chains.contains("EthereumSepolia");
+                                let btc_enabled = enabled_chains.contains("Bitcoin");
+                                let btc_sig_enabled = enabled_chains.contains("BitcoinSignet");
 
-                                let pol_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PolkadotAssetHub))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
-                                let pas_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::PaseoAssetHub))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
-                                let pre_state = chain_statuses
-                                    .as_ref()
-                                    .and_then(|v| v.iter().find(|s| s.id == ChainId::Previewnet))
-                                    .map(|s| s.state.clone())
-                                    .unwrap_or(ChainState::Disconnected);
+                                let get_state = |id: ChainId| {
+                                    chain_statuses
+                                        .as_ref()
+                                        .and_then(|v| v.iter().find(|s| s.id == id))
+                                        .map(|s| s.state.clone())
+                                        .unwrap_or(ChainState::Disconnected)
+                                };
+                                let pol_state = get_state(ChainId::PolkadotAssetHub);
+                                let pas_state = get_state(ChainId::PaseoAssetHub);
+                                let pre_state = get_state(ChainId::Previewnet);
+                                let eth_state = get_state(ChainId::Ethereum);
+                                let eth_sep_state = get_state(ChainId::EthereumSepolia);
+                                let btc_state = get_state(ChainId::Bitcoin);
+                                let btc_sig_state = get_state(ChainId::BitcoinSignet);
 
-                                d.child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                d
+                                    // Polkadot group
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(
+                                        div()
+                                            .px(px(16.0))
+                                            .pt(px(12.0))
+                                            .pb(px(4.0))
+                                            .text_xs()
+                                            .text_color(rgba(0xffffff44))
+                                            .child("Polkadot"),
+                                    )
                                     .child(chain_row(
                                         "pol-chain",
                                         "Polkadot Asset Hub",
@@ -5028,6 +5096,66 @@ impl Render for SettingsTab {
                                         status_badge(&pre_state),
                                         ChainId::Previewnet,
                                         &pre_state,
+                                        cx,
+                                    ))
+                                    // Ethereum group
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(
+                                        div()
+                                            .px(px(16.0))
+                                            .pt(px(12.0))
+                                            .pb(px(4.0))
+                                            .text_xs()
+                                            .text_color(rgba(0xffffff44))
+                                            .child("Ethereum"),
+                                    )
+                                    .child(chain_row(
+                                        "eth-chain",
+                                        "Ethereum",
+                                        eth_enabled,
+                                        status_badge(&eth_state),
+                                        ChainId::Ethereum,
+                                        &eth_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "eth-sep-chain",
+                                        "Sepolia",
+                                        eth_sep_enabled,
+                                        status_badge(&eth_sep_state),
+                                        ChainId::EthereumSepolia,
+                                        &eth_sep_state,
+                                        cx,
+                                    ))
+                                    // Bitcoin group
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(
+                                        div()
+                                            .px(px(16.0))
+                                            .pt(px(12.0))
+                                            .pb(px(4.0))
+                                            .text_xs()
+                                            .text_color(rgba(0xffffff44))
+                                            .child("Bitcoin"),
+                                    )
+                                    .child(chain_row(
+                                        "btc-chain",
+                                        "Bitcoin",
+                                        btc_enabled,
+                                        status_badge(&btc_state),
+                                        ChainId::Bitcoin,
+                                        &btc_state,
+                                        cx,
+                                    ))
+                                    .child(div().h(px(1.0)).mx(px(16.0)).bg(border_color))
+                                    .child(chain_row(
+                                        "btc-sig-chain",
+                                        "Signet",
+                                        btc_sig_enabled,
+                                        status_badge(&btc_sig_state),
+                                        ChainId::BitcoinSignet,
+                                        &btc_sig_state,
                                         cx,
                                     ))
                             })
@@ -5361,9 +5489,9 @@ impl Render for SettingsTab {
                                 section
                             }),
                     ),
-            )
+            ))
             // ── Host Infrastructure Status ──────────────────────────────────────
-            .child(render_host_status_section(
+            .when(self.active_pane == SettingsPane::Network, |d| d.child(render_host_status_section(
                 &ss_status,
                 chain_statuses.as_deref(),
                 section_bg,
@@ -5371,7 +5499,7 @@ impl Render for SettingsTab {
                 text_primary,
                 text_secondary,
                 text_muted,
-            ))
+            )))
     }
 }
 
@@ -5387,9 +5515,14 @@ fn chain_row(
     let text_primary = rgba(0xffffffff);
     let check_color = if enabled { rgba(0x8a5cffff) } else { rgba(0x4b5563ff) };
 
-    // Show first-sync hint for smoldot chains that are still connecting or syncing
-    let show_first_sync_hint = chain_id.backend() == ConnectionBackend::Smoldot
-        && matches!(state, ChainState::Connecting | ChainState::Syncing { .. });
+    // Show first-sync hint for light clients that are still connecting or syncing
+    let is_syncing = matches!(state, ChainState::Connecting | ChainState::Syncing { .. });
+    let sync_hint_text = match chain_id.backend() {
+        ConnectionBackend::Smoldot if is_syncing => Some("Initial sync may take a few minutes"),
+        ConnectionBackend::Helios if is_syncing => Some("Syncing via Helios light client"),
+        ConnectionBackend::Kyoto if is_syncing => Some("Syncing via compact block filters"),
+        _ => None,
+    };
 
     // Extract error message for inline display
     let error_msg = match state {
@@ -5463,14 +5596,14 @@ fn chain_row(
                 )
                 .child(badge),
         )
-        .when(show_first_sync_hint, |d| {
+        .when_some(sync_hint_text, |d, hint| {
             d.child(
                 div()
                     .pl(px(28.0))
                     .pt(px(2.0))
                     .text_xs()
                     .text_color(rgba(0xffffff55))
-                    .child("Initial sync may take a few minutes"),
+                    .child(hint),
             )
         })
         .when_some(error_msg, |d, msg| {
@@ -5650,6 +5783,7 @@ fn render_host_status_section(
     }
 
     div()
+        .mt(px(32.0))
         .flex()
         .flex_col()
         .gap(px(2.0))

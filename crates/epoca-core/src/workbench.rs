@@ -12,6 +12,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::theme::ActiveTheme;
 use gpui_component::{Icon, IconName};
 use gpui_component::tooltip::Tooltip;
+use gpui_ui_kit::{Dialog, DialogSize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7040,49 +7041,21 @@ impl Workbench {
         } else {
             req.message.clone()
         };
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("btc-sign-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_btc_wallet_sign(cx);
-                }))
-                .child(
+            Dialog::new("btc-sign")
+                .title("Bitcoin Sign Message")
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_btc_wallet_sign(cx));
+                })
+                .content(
                     div()
-                        .id("btc-sign-dialog")
-                        .w(px(380.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        .on_click(|_, _, _| {})
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new("Bitcoin Sign Message")
-                                        .text_size(px(15.0)),
-                                ),
-                        )
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7108,28 +7081,28 @@ impl Workbench {
                                         .text_size(px(12.0))
                                         .text_color(cx.theme().foreground),
                                 ),
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
+                        .child(
+                            Button::new("btc-sign-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_btc_wallet_sign(cx);
+                                })),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("btc-sign-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_btc_wallet_sign(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("btc-sign-approve")
-                                        .primary()
-                                        .label("Sign")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_btc_wallet_sign(cx);
-                                        })),
-                                ),
+                            Button::new("btc-sign-approve")
+                                .primary()
+                                .label("Sign")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_btc_wallet_sign(cx);
+                                })),
                         ),
                 ),
         )
@@ -7139,52 +7112,21 @@ impl Workbench {
         let req = self.pending_wallet_sign.as_ref()?;
         let origin = req.origin.clone();
         let message = req.display_message.clone();
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("wallet-sign-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_wallet_sign(cx);
-                }))
-                .child(
+            Dialog::new("wallet-sign")
+                .title("Signature Request")
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_wallet_sign(cx));
+                })
+                .content(
                     div()
-                        .id("wallet-sign-dialog")
-                        .w(px(380.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        // Stop click propagation so clicking the dialog doesn't dismiss
-                        .on_click(|_, _, _| {})
-                        // Title
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new("Signature Request")
-                                        .text_size(px(15.0)),
-                                ),
-                        )
-                        // Origin
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7197,33 +7139,31 @@ impl Workbench {
                                         .text_color(cx.theme().muted_foreground),
                                 ),
                         )
-                        // Message
                         .child(
                             gpui_component::label::Label::new(message)
                                 .text_size(px(13.0)),
-                        )
-                        // Buttons
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("wallet-sign-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_wallet_sign(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("wallet-sign-approve")
-                                        .primary()
-                                        .label("Sign")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_wallet_sign(cx);
-                                        })),
-                                ),
+                            Button::new("wallet-sign-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_wallet_sign(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("wallet-sign-approve")
+                                .primary()
+                                .label("Sign")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_wallet_sign(cx);
+                                })),
                         ),
                 ),
         )
@@ -7237,49 +7177,21 @@ impl Workbench {
         } else {
             req.payload.clone()
         };
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("spa-sign-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_spa_sign(cx);
-                }))
-                .child(
+            Dialog::new("spa-sign")
+                .title("Signature Request")
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_spa_sign(cx));
+                })
+                .content(
                     div()
-                        .id("spa-sign-dialog")
-                        .w(px(380.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        .on_click(|_, _, _| {})
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new("Signature Request")
-                                        .text_size(px(15.0)),
-                                ),
-                        )
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7304,28 +7216,28 @@ impl Workbench {
                                         .text_size(px(12.0))
                                         .text_color(cx.theme().muted_foreground),
                                 ),
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
+                        .child(
+                            Button::new("spa-sign-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_spa_sign(cx);
+                                })),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("spa-sign-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_spa_sign(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("spa-sign-approve")
-                                        .primary()
-                                        .label("Sign")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_spa_sign(cx);
-                                        })),
-                                ),
+                            Button::new("spa-sign-approve")
+                                .primary()
+                                .label("Sign")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_spa_sign(cx);
+                                })),
                         ),
                 ),
         )
@@ -7340,49 +7252,21 @@ impl Workbench {
         } else {
             req.call_data.clone()
         };
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("chain-submit-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_chain_submit(cx);
-                }))
-                .child(
+            Dialog::new("chain-submit")
+                .title("Transaction Request")
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_chain_submit(cx));
+                })
+                .content(
                     div()
-                        .id("chain-submit-dialog")
-                        .w(px(400.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        .on_click(|_, _, _| {})
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new("Transaction Request")
-                                        .text_size(px(15.0)),
-                                ),
-                        )
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7408,28 +7292,28 @@ impl Workbench {
                                         .text_size(px(11.0))
                                         .text_color(cx.theme().muted_foreground),
                                 ),
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
+                        .child(
+                            Button::new("chain-submit-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_chain_submit(cx);
+                                })),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("chain-submit-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_chain_submit(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("chain-submit-approve")
-                                        .primary()
-                                        .label("Submit")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_chain_submit(cx);
-                                        })),
-                                ),
+                            Button::new("chain-submit-approve")
+                                .primary()
+                                .label("Submit")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_chain_submit(cx);
+                                })),
                         ),
                 ),
         )
@@ -7443,49 +7327,21 @@ impl Workbench {
         } else {
             req.peer_address.clone()
         };
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("data-connect-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_data_connect(cx);
-                }))
-                .child(
+            Dialog::new("data-connect")
+                .title("Connection Request")
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_data_connect(cx));
+                })
+                .content(
                     div()
-                        .id("data-connect-dialog")
-                        .w(px(380.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        .on_click(|_, _, _| {})
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new("Connection Request")
-                                        .text_size(px(15.0)),
-                                ),
-                        )
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7493,7 +7349,7 @@ impl Workbench {
                                 .rounded(px(6.0))
                                 .bg(cx.theme().secondary)
                                 .child(
-                                    gpui_component::label::Label::new(format!("{app_id}"))
+                                    gpui_component::label::Label::new(app_id)
                                         .text_size(px(13.0))
                                         .text_color(cx.theme().muted_foreground),
                                 ),
@@ -7509,28 +7365,28 @@ impl Workbench {
                                         .text_size(px(12.0))
                                         .text_color(cx.theme().muted_foreground),
                                 ),
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
+                        .child(
+                            Button::new("data-connect-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_data_connect(cx);
+                                })),
                         )
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("data-connect-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_data_connect(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("data-connect-approve")
-                                        .primary()
-                                        .label("Allow")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_data_connect(cx);
-                                        })),
-                                ),
+                            Button::new("data-connect-approve")
+                                .primary()
+                                .label("Allow")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_data_connect(cx);
+                                })),
                         ),
                 ),
         )
@@ -7546,51 +7402,21 @@ impl Workbench {
         } else {
             hex_encode(&req.payload)
         };
+        let entity = cx.entity().clone();
 
         Some(
-            div()
-                .id("hostapi-sign-backdrop")
-                .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
-                .bg(rgba(0x00000088u32))
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.deny_hostapi_sign(cx);
-                }))
-                .child(
+            Dialog::new("hostapi-sign")
+                .title(kind)
+                .size(DialogSize::Sm)
+                .show_close_button(false)
+                .on_close(move |_window, cx| {
+                    let _ = entity.update(cx, |this, cx| this.deny_hostapi_sign(cx));
+                })
+                .content(
                     div()
-                        .id("hostapi-sign-dialog")
-                        .w(px(380.0))
-                        .p(px(20.0))
-                        .rounded(px(12.0))
-                        .bg(cx.theme().background)
-                        .border_1()
-                        .border_color(cx.theme().border)
                         .flex()
                         .flex_col()
                         .gap(px(12.0))
-                        .on_click(|_, _, _| {})
-                        // Title
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    Icon::new(IconName::TriangleAlert)
-                                        .size(px(20.0))
-                                        .text_color(cx.theme().warning),
-                                )
-                                .child(
-                                    gpui_component::label::Label::new(kind)
-                                        .text_size(px(15.0)),
-                                ),
-                        )
-                        // App ID
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7603,7 +7429,6 @@ impl Workbench {
                                         .text_color(cx.theme().muted_foreground),
                                 ),
                         )
-                        // Payload preview
                         .child(
                             div()
                                 .px(px(8.0))
@@ -7616,29 +7441,28 @@ impl Workbench {
                                         .text_size(px(11.0))
                                         .text_color(cx.theme().muted_foreground),
                                 ),
-                        )
-                        // Buttons
+                        ),
+                )
+                .footer(
+                    div()
+                        .flex()
+                        .gap(px(8.0))
+                        .justify_end()
                         .child(
-                            div()
-                                .flex()
-                                .gap(px(8.0))
-                                .justify_end()
-                                .child(
-                                    Button::new("hostapi-sign-deny")
-                                        .ghost()
-                                        .label("Reject")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.deny_hostapi_sign(cx);
-                                        })),
-                                )
-                                .child(
-                                    Button::new("hostapi-sign-approve")
-                                        .primary()
-                                        .label("Sign")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.approve_hostapi_sign(cx);
-                                        })),
-                                ),
+                            Button::new("hostapi-sign-deny")
+                                .ghost()
+                                .label("Reject")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.deny_hostapi_sign(cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("hostapi-sign-approve")
+                                .primary()
+                                .label("Sign")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.approve_hostapi_sign(cx);
+                                })),
                         ),
                 ),
         )
