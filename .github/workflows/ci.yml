@@ -14,12 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout polkavm fork (patched dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: replghost/polkavm
-          path: ../polkavm
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

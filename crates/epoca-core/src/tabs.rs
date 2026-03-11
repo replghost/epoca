@@ -4499,7 +4499,7 @@ impl Render for SettingsTab {
                         .items_center()
                         .gap(px(4.0))
                         .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(0xfbbf24ff)))
-                        .child(div().text_xs().text_color(rgba(0xfbbf24ff)).child("Connecting…"))
+                        .child(div().text_xs().text_color(rgba(0xffffffcc)).child("Connecting…"))
                         .into_any_element();
                 }
                 ChainState::Syncing { best_block, peers } => {
@@ -4524,7 +4524,7 @@ impl Render for SettingsTab {
                         .items_center()
                         .gap(px(4.0))
                         .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(rgba(0xef4444ff)))
-                        .child(div().text_xs().text_color(rgba(0xef4444ff)).child("Error"))
+                        .child(div().text_xs().text_color(rgba(0xffffffcc)).child("Error"))
                         .into_any_element();
                 }
             };
@@ -4533,7 +4533,7 @@ impl Render for SettingsTab {
                 .items_center()
                 .gap(px(4.0))
                 .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color))
-                .child(div().text_xs().text_color(dot_color).child(label))
+                .child(div().text_xs().text_color(rgba(0xffffffcc)).child(label))
                 .into_any_element()
         };
 
@@ -4546,7 +4546,7 @@ impl Render for SettingsTab {
             .py(px(24.0))
             .flex()
             .flex_col()
-            .gap(px(32.0))
+            .gap(px(40.0))
             .child(
                 div()
                     .text_lg()
@@ -5591,7 +5591,7 @@ fn render_host_status_section(
                 .items_center()
                 .gap(px(4.0))
                 .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(ss_dot))
-                .child(div().text_xs().text_color(ss_dot).child(ss_label)),
+                .child(div().text_xs().text_color(rgba(0xffffffcc)).child(ss_label)),
         );
 
     // Active light client rows
@@ -5629,7 +5629,7 @@ fn render_host_status_section(
                             .items_center()
                             .gap(px(4.0))
                             .child(div().w(px(7.0)).h(px(7.0)).rounded_full().bg(dot_color))
-                            .child(div().text_xs().text_color(dot_color).child(label)),
+                            .child(div().text_xs().text_color(rgba(0xffffffcc)).child(label)),
                     ),
             );
         }
