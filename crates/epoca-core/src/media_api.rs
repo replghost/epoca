@@ -556,6 +556,7 @@ pub fn setup_session_js(session_id: u64, track_ids: &[u64], is_offerer: bool) ->
         for (var i = 0; i < trackIds.length; i++) {{
             var entry = window.__epocaMediaTracks[trackIds[i]];
             if (entry && entry.track) {{
+                entry.track.enabled = true;
                 pc.addTrack(entry.track, entry.stream);
             }}
         }}
@@ -762,9 +763,11 @@ pub fn close_session_js(session_id: u64) -> String {
         if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
         if (sess.pc) {{
             try {{
+                // Disable (not stop!) tracks — sends black/silence to remote instantly
+                // but keeps the track alive for reuse in the next call.
                 var senders = sess.pc.getSenders();
                 for (var i = 0; i < senders.length; i++) {{
-                    if (senders[i].track) senders[i].track.stop();
+                    if (senders[i].track) senders[i].track.enabled = false;
                 }}
                 sess.pc.close();
             }} catch(e) {{}}

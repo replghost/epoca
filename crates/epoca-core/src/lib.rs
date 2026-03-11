@@ -22,6 +22,7 @@ pub mod data_api;
 pub mod media_api;
 pub mod bookmarks;
 pub mod extrinsic;
+pub mod app_storage;
 
 #[cfg(feature = "test-server")]
 pub mod test_server;

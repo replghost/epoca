@@ -370,6 +370,19 @@ pub const HOST_API_SCRIPT: &str = r#"
             }
         }),
 
+        // Per-app key-value storage — persisted to ~/.epoca/apps/{app_id}/storage.json.
+        storage: Object.freeze({
+            get: function(key) {
+                return _call('epocaHost', 'storageGet', { key: key });
+            },
+            set: function(key, value) {
+                return _call('epocaHost', 'storageSet', { key: key, value: value });
+            },
+            remove: function(key) {
+                return _call('epocaHost', 'storageRemove', { key: key });
+            }
+        }),
+
         // Data connections — P2P communication via the host.
         data: Object.freeze({
             getPeerId: function() {

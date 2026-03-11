@@ -27,6 +27,9 @@ pub enum BridgeRequest {
     MediaSetTrackEnabled { track_id: u64, enabled: bool },
     RequestWssPermission { url: String },
     RequestHttpPermission { origin: String },
+    StorageGet { key: String },
+    StorageSet { key: String, value: String },
+    StorageRemove { key: String },
 }
 
 /// Permission context needed for dispatch decisions.
@@ -259,6 +262,20 @@ pub fn parse_request(method: &str, params_json: &str) -> Result<BridgeRequest, S
                 .to_string();
             Ok(BridgeRequest::MediaSignal { session_id, signal_type, data })
         }
+        "storageGet" => {
+            let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::StorageGet { key })
+        }
+        "storageSet" => {
+            let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let value =
+                params.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::StorageSet { key, value })
+        }
+        "storageRemove" => {
+            let key = params.get("key").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Ok(BridgeRequest::StorageRemove { key })
+        }
         other => Err(other.to_string()),
     }
 }
@@ -350,6 +367,32 @@ pub fn dispatch(
 
         BridgeRequest::RequestHttpPermission { origin } => {
             BridgeResult::Async(BridgeAsyncAction::HttpPermission { origin: origin.clone() })
+        }
+
+        BridgeRequest::StorageGet { key } => {
+            match crate::app_storage::get(app_id, key) {
+                Some(value) => {
+                    // Serialize the string value as a JSON string so the JS side
+                    // receives a proper string (not a bare identifier).
+                    let json_val = serde_json::to_string(&value).unwrap_or("null".to_string());
+                    BridgeResult::Js(resolve_ok(id, &json_val))
+                }
+                None => BridgeResult::Js(resolve_ok(id, "null")),
+            }
+        }
+
+        BridgeRequest::StorageSet { key, value } => {
+            match crate::app_storage::set(app_id, key, value) {
+                Ok(()) => BridgeResult::Js(resolve_ok(id, "true")),
+                Err(e) => BridgeResult::Js(resolve_err(id, &e)),
+            }
+        }
+
+        BridgeRequest::StorageRemove { key } => {
+            match crate::app_storage::remove(app_id, key) {
+                Ok(()) => BridgeResult::Js(resolve_ok(id, "true")),
+                Err(e) => BridgeResult::Js(resolve_err(id, &e)),
+            }
         }
 
         BridgeRequest::StatementsWrite { channel, data } => {
