@@ -357,7 +357,14 @@ pub fn push_remote_track(session_id: u64, track_id: u64, kind: &str) {
 }
 
 /// Close a session and push event.
+/// Also publishes a "hangup" signal so the remote peer can close immediately
+/// instead of waiting for ICE keepalive timeout (~5s).
 pub fn close_session(session_id: u64, reason: &str) {
+    // Publish hangup signal BEFORE removing the session (publish_signal needs session info).
+    if let Err(e) = publish_signal(session_id, "hangup", "") {
+        log::debug!("[media] hangup signal not sent: {e}");
+    }
+
     let mut st = state().lock().unwrap();
     if let Some(session) = st.sessions.remove(&session_id) {
         if let Some(running) = &session.signaling_running {
@@ -723,11 +730,29 @@ pub fn apply_signal_js(session_id: u64, signal_type: &str, data: &str) -> String
 }})()"#,
             sid = session_id, b64 = b64,
         ),
+        "hangup" => format!(
+            r#"(function() {{
+    var sess = window.__epocaMediaSessions && window.__epocaMediaSessions[{sid}];
+    if (sess) {{
+        if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
+        if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
+        if (sess.pc) {{ try {{ sess.pc.close(); }} catch(e) {{}} }}
+        delete window.__epocaMediaSessions[{sid}];
+    }}
+    window.webkit.messageHandlers.epocaHost.postMessage({{
+        id: 0, method: 'mediaSignal',
+        params: {{ sessionId: {sid}, type: 'closed', data: 'remote hangup' }}
+    }});
+}})()"#,
+            sid = session_id,
+        ),
         _ => String::new(),
     }
 }
 
 /// JS to close a session's RTCPeerConnection.
+/// Stops local tracks first so the remote sees black immediately (RTCP BYE),
+/// then closes the PC.
 pub fn close_session_js(session_id: u64) -> String {
     format!(
         r#"(function() {{
@@ -735,7 +760,15 @@ pub fn close_session_js(session_id: u64) -> String {
     if (sess) {{
         if (sess.offerRetry) {{ clearInterval(sess.offerRetry); sess.offerRetry = null; }}
         if (sess.statePoller) {{ clearInterval(sess.statePoller); sess.statePoller = null; }}
-        if (sess.pc) {{ try {{ sess.pc.close(); }} catch(e) {{}} }}
+        if (sess.pc) {{
+            try {{
+                var senders = sess.pc.getSenders();
+                for (var i = 0; i < senders.length; i++) {{
+                    if (senders[i].track) senders[i].track.stop();
+                }}
+                sess.pc.close();
+            }} catch(e) {{}}
+        }}
         delete window.__epocaMediaSessions[{sid}];
     }}
 }})()"#,
