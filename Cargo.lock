@@ -4198,6 +4198,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "gpui-ui-kit",
  "log",
  "sentry",
 ]
@@ -4270,6 +4271,7 @@ dependencies = [
  "epoca-wallet",
  "gpui",
  "gpui-component",
+ "gpui-ui-kit",
  "image",
  "log",
  "objc2 0.5.2",
@@ -5719,6 +5721,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcb02dd63a2859714ac7b6b476937617c3c744157af1b49f7c904023a79039be"
 dependencies = [
  "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
+name = "gpui-ui-kit"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5f20d7b4ed7d57ac7ecff6706ebbae7c209d82ab13c85eea859f2ce5bd9d838e"
+dependencies = [
+ "gpui",
+ "gpui-ui-kit-macros",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "gpui-ui-kit-macros"
+version = "0.5.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90e24d68e32c926389c7daad60a526bb0b0d7f565d0a7e28e169d5fde14262c5"
+dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",

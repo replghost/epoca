@@ -27,6 +27,7 @@ rust-version = "1.91"
 gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["webview"] }
 gpui-component-assets = "0.5.1"
+gpui-ui-kit = "0.5.10"
 polkavm = { version = "0.31.0", features = ["generic-sandbox"] }
 polkavm-linker = "0.31.0"
 serde = { version = "1", features = ["derive"] }

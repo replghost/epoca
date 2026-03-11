@@ -1,5 +1,6 @@
 use gpui::*;
 use gpui_component::Root;
+use gpui_ui_kit::theme::ThemeState;
 use std::path::PathBuf;
 use epoca_core::workbench::{
     Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
@@ -84,6 +85,25 @@ fn main() {
 
     app.run(move |cx| {
         gpui_component::init(cx);
+
+        // Initialize gpui-ui-kit theme with Epoca's design tokens
+        let mut ui_theme = gpui_ui_kit::Theme::dark();
+        ui_theme.accent = rgb(0x8a5cff);
+        ui_theme.accent_hover = rgb(0x9d78ff);
+        ui_theme.accent_muted = rgba(0x8a5cff33);
+        ui_theme.success = rgb(0x00d4aa);
+        ui_theme.warning = rgb(0xf5a623);
+        ui_theme.error = rgb(0xe5534b);
+        ui_theme.background = rgb(0x111111);
+        ui_theme.surface = rgb(0x1c1c1e);
+        ui_theme.surface_hover = rgb(0x2b2b2b);
+        ui_theme.muted = rgb(0x2b2b2b);
+        ui_theme.text_primary = rgba(0xffffffe0);
+        ui_theme.text_secondary = rgba(0xffffff66);
+        ui_theme.text_muted = rgba(0xffffff33);
+        ui_theme.border = rgba(0xffffff14);
+        ui_theme.border_hover = rgba(0xffffff28);
+        cx.set_global(ThemeState { theme: ui_theme });
 
         // Install NSApp-level event monitor so Cmd+key shortcuts work even
         // when WKWebView is first responder.

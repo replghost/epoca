@@ -17,6 +17,7 @@ epoca-wallet = { path = "../epoca-wallet" }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
+gpui-ui-kit = { workspace = true }
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }

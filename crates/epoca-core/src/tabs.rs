@@ -7,6 +7,7 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::IconName;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::Sizable;
+use gpui_ui_kit::{Toggle, ButtonSet, ButtonSetOption, ButtonSetSize, ButtonSetTheme};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -4475,17 +4476,10 @@ impl Render for SettingsTab {
         // each toggle is built inline below.
 
         let toggle_pill = |on: bool| {
-            div()
-                .w(px(44.0))
-                .h(px(24.0))
-                .rounded_full()
-                .flex()
-                .items_center()
-                .px(px(2.0))
-                .bg(if on { rgba(0x22c55eff) } else { rgba(0x4b5563ff) })
-                .when(on, |d| d.justify_end())
-                .child(div().w(px(20.0)).h(px(20.0)).rounded_full().bg(gpui::white()))
+            Toggle::new("pill").checked(on)
         };
+
+        let button_set_theme = ButtonSetTheme::from(&cx.global::<gpui_ui_kit::ThemeState>().theme);
 
         // ── Chain status badge ────────────────────────────────────────────────
         let status_badge = |state: &ChainState| -> AnyElement {
@@ -4552,7 +4546,7 @@ impl Render for SettingsTab {
             .py(px(24.0))
             .flex()
             .flex_col()
-            .gap(px(24.0))
+            .gap(px(32.0))
             .child(
                 div()
                     .text_lg()
@@ -4564,7 +4558,7 @@ impl Render for SettingsTab {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(6.0))
                     .child(section_header("GENERAL"))
                     .child(
                         div()
@@ -4679,44 +4673,28 @@ impl Render for SettingsTab {
                                             ),
                                     )
                                     .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
-                                            .children(SearchEngine::all().iter().map(|&engine| {
-                                                let is_active = engine == search_engine;
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "engine-{}",
-                                                        engine.display_name()
-                                                    )))
-                                                    .min_w(px(72.0))
-                                                    .text_xs()
-                                                    .px(px(8.0))
-                                                    .py(px(4.0))
-                                                    .rounded(px(4.0))
-                                                    .cursor_pointer()
-                                                    .text_color(if is_active {
-                                                        rgba(0xffffffff)
-                                                    } else {
-                                                        text_secondary
-                                                    })
-                                                    .bg(if is_active {
-                                                        rgba(0x22c55eff)
-                                                    } else {
-                                                        rgba(0xffffff14)
-                                                    })
-                                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                                        cx.update_global::<SettingsGlobal, _>(
-                                                            |g, _| {
-                                                                g.settings.search_engine = engine;
-                                                                g.save();
-                                                            },
-                                                        );
-                                                        cx.notify();
-                                                    }))
-                                                    .child(engine.display_name())
-                                            })),
+                                        ButtonSet::new("search-engine")
+                                            .options(
+                                                SearchEngine::all()
+                                                    .iter()
+                                                    .map(|e| ButtonSetOption::new(e.display_name(), e.display_name()))
+                                                    .collect(),
+                                            )
+                                            .selected(search_engine.display_name())
+                                            .size(ButtonSetSize::Sm)
+                                            .theme(button_set_theme.clone())
+                                            .on_change(move |value, _window, cx| {
+                                                if let Some(&engine) = SearchEngine::all()
+                                                    .iter()
+                                                    .find(|e| e.display_name() == value.as_ref())
+                                                {
+                                                    cx.update_global::<SettingsGlobal, _>(|g, _| {
+                                                        g.settings.search_engine = engine;
+                                                        g.save();
+                                                    });
+                                                }
+                                                cx.refresh_windows();
+                                            }),
                                     ),
                             ),
                     ),
@@ -4726,7 +4704,7 @@ impl Render for SettingsTab {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(6.0))
                     .child(section_header("PRIVACY & BLOCKING"))
                     .child(
                         div()
@@ -4780,7 +4758,7 @@ impl Render for SettingsTab {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(6.0))
                     .child(section_header("SESSION CONTEXTS"))
                     .child(
                         div()
@@ -4935,7 +4913,7 @@ impl Render for SettingsTab {
                 div()
                     .flex()
                     .flex_col()
-                    .gap(px(2.0))
+                    .gap(px(6.0))
                     .child(section_header("EXPERIMENTAL"))
                     .child(
                         div()
@@ -5124,9 +5102,9 @@ impl Render for SettingsTab {
                                                                 .px(px(12.0))
                                                                 .py(px(6.0))
                                                                 .rounded(px(4.0))
-                                                                .bg(rgba(0x44bb66ff))
+                                                                .bg(rgba(0x8a5cffff))
                                                                 .text_xs()
-                                                                .text_color(rgba(0x1a1a2eff))
+                                                                .text_color(rgba(0xffffffff))
                                                                 .cursor_pointer()
                                                                 .on_click(cx.listener(|this, _, _, cx| {
                                                                     if cx.has_global::<crate::wallet::WalletGlobal>() {
@@ -5199,9 +5177,9 @@ impl Render for SettingsTab {
                                                             .px(px(12.0))
                                                             .py(px(6.0))
                                                             .rounded(px(4.0))
-                                                            .bg(rgba(0x44bb66ff))
+                                                            .bg(rgba(0x8a5cffff))
                                                             .text_xs()
-                                                            .text_color(rgba(0x1a1a2eff))
+                                                            .text_color(rgba(0xffffffff))
                                                             .cursor_pointer()
                                                             .on_click(cx.listener(move |this, _, window, cx| {
                                                                 let phrase = if let Some(ref input) = this.wallet_import_input {
@@ -5261,7 +5239,7 @@ impl Render for SettingsTab {
                                                             .rounded(px(6.0))
                                                             .bg(rgba(0x0d1117ff))
                                                             .text_xs()
-                                                            .text_color(rgba(0x44bb66ff))
+                                                            .text_color(rgba(0x8a5cffff))
                                                             .child(phrase.clone()),
                                                     )
                                                     .child(
@@ -5302,9 +5280,9 @@ impl Render for SettingsTab {
                                                         .px(px(12.0))
                                                         .py(px(6.0))
                                                         .rounded(px(4.0))
-                                                        .bg(rgba(0x44bb66ff))
+                                                        .bg(rgba(0x8a5cffff))
                                                         .text_xs()
-                                                        .text_color(rgba(0x1a1a2eff))
+                                                        .text_color(rgba(0xffffffff))
                                                         .cursor_pointer()
                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                             if cx.has_global::<crate::wallet::WalletGlobal>() {
@@ -5339,7 +5317,7 @@ impl Render for SettingsTab {
                                                 .child(
                                                     div()
                                                         .text_xs()
-                                                        .text_color(rgba(0x44bb66ff))
+                                                        .text_color(rgba(0x8a5cffff))
                                                         .child(root_address.clone()),
                                                 )
                                                 .child(
@@ -5407,7 +5385,7 @@ fn chain_row(
     cx: &mut Context<SettingsTab>,
 ) -> impl IntoElement {
     let text_primary = rgba(0xffffffff);
-    let check_color = if enabled { rgba(0x22c55eff) } else { rgba(0x4b5563ff) };
+    let check_color = if enabled { rgba(0x8a5cffff) } else { rgba(0x4b5563ff) };
 
     // Show first-sync hint for smoldot chains that are still connecting or syncing
     let show_first_sync_hint = chain_id.backend() == ConnectionBackend::Smoldot
@@ -5536,31 +5514,29 @@ fn render_history_retention_row(
                 ),
         )
         .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .children(HistoryRetention::all().iter().map(|&variant| {
-                    let is_active = variant == current;
-                    div()
-                        .id(SharedString::from(format!("hist-{}", variant.display_name())))
-                        .text_xs()
-                        .px(px(8.0))
-                        .py(px(4.0))
-                        .rounded(px(4.0))
-                        .cursor_pointer()
-                        .text_color(if is_active { rgba(0xffffffff) } else { text_secondary })
-                        .bg(if is_active { rgba(0x22c55eff) } else { rgba(0xffffff14) })
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.update_global::<SettingsGlobal, _>(|g, _| {
-                                g.settings.history_retention = variant;
-                                g.save();
-                            });
-                            crate::history::init_history(cx);
-                            cx.notify();
-                        }))
-                        .child(variant.display_name())
-                })),
+            ButtonSet::new("history-retention")
+                .options(
+                    HistoryRetention::all()
+                        .iter()
+                        .map(|v| ButtonSetOption::new(v.display_name(), v.display_name()))
+                        .collect(),
+                )
+                .selected(current.display_name())
+                .size(ButtonSetSize::Sm)
+                .theme(ButtonSetTheme::from(&cx.global::<gpui_ui_kit::ThemeState>().theme))
+                .on_change(move |value, _window, cx| {
+                    if let Some(&variant) = HistoryRetention::all()
+                        .iter()
+                        .find(|v| v.display_name() == value.as_ref())
+                    {
+                        cx.update_global::<SettingsGlobal, _>(|g, _| {
+                            g.settings.history_retention = variant;
+                            g.save();
+                        });
+                        crate::history::init_history(cx);
+                    }
+                    cx.refresh_windows();
+                }),
         )
 }
 

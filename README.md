@@ -9,6 +9,8 @@
   <a href="https://gpui.rs">GPUI</a> and
   <a href="https://polkavm.org">PolkaVM</a>.
   <br />
+  UI components by <a href="https://github.com/pierreaubert/sotf/tree/master/crates/gpui-ui-kit">gpui-ui-kit</a>.
+  <br />
   Native on macOS. No Electron.
 </p>
 
