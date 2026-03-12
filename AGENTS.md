@@ -203,7 +203,19 @@ If unsure, ask rather than assume.
 - Effect: metered paywalls reset per-tab (no cross-tab article count), login sessions are tab-local, fingerprinting resets each tab
 - Toggle at runtime via `Workbench::set_isolated_tabs(bool)`; applies to all subsequently opened tabs
 - Existing open tabs are unaffected — they keep their data store until closed and reopened
-- `WebViewTab::new(url, isolated, window, cx)` — `isolated` param is always passed from the owning Workbench
+- `WebViewTab::new(url, context_id, store_uuid, window, cx)` — `store_uuid` enables per-context data store isolation
+
+### Per-Context WebContent Process Isolation
+- Each `SessionContext` has a stable `store_uuid: Option<String>` (hex-encoded 16-byte UUID)
+- `resolve_store_uuid()` in Workbench maps context_id → UUID bytes for WKWebsiteDataStore
+- Default context → `DEFAULT_STORE_UUID` (fixed constant); named contexts → UUID from settings; private → `None` (incognito)
+- `WebViewTab::new()` calls `builder.with_data_store_identifier(uuid)` via `WebViewBuilderExtDarwin` (macOS 14+)
+- Different `WKWebsiteDataStore` identifiers → separate WebContent OS processes (WebKit process cache keys on data store pointer)
+- Prevents cross-context cookie/storage/cache leakage even through renderer exploits
+- Migration: `SettingsGlobal::load()` auto-assigns UUIDs to existing contexts that lack one
+- All 5 WebView creation paths in workbench.rs wired: `open_webview()`, `open_webview_background()`, "Open in Context" menu, "Open Private" menu, `restore_session()`
+- `generate_store_uuid()`, `format_store_uuid()`, `parse_store_uuid()` in settings.rs
+- 12 unit tests covering UUID v4 compliance, uniqueness, hex roundtrip, serde, context resolution
 
 ### Favicon in Tab List
 - `FAVICON_SCRIPT` init script finds the best `<link rel="icon">` URL (prefers higher resolution) and falls back to `/favicon.ico`; posts `{type:'faviconFound', url}` to `epocaFavicon` on DOMContentLoaded and SPA navigations
