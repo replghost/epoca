@@ -8,6 +8,25 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
+- **Per-context WebContent process isolation** — Each browsing context (Work, Personal, etc.)
+  now gets a dedicated `WKWebsiteDataStore` keyed by a stable UUID, ensuring separate WebContent
+  OS processes per context. Prevents cross-context cookie/storage/cache leakage even through
+  renderer exploits. Default (non-context) tabs share a fixed `DEFAULT_STORE_UUID`; private tabs
+  use `nonPersistentDataStore` (incognito). `store_uuid` field on `SessionContext` with migration
+  for existing settings. `resolve_store_uuid()` in workbench.rs maps context → UUID across all 5
+  WebView creation paths. Uses `lb-wry`'s `with_data_store_identifier([u8; 16])` API (macOS 14+).
+  13 unit tests for UUID generation, parsing, serde roundtrip, and context resolution.
+  `settings.rs`, `tabs.rs`, `workbench.rs`. (2026-03-11)
+
+- **Process isolation hardening (Oracle audit fixes)** — UUID generation upgraded from
+  `DefaultHasher` to OS CSPRNG via `getrandom` crate for collision resistance. `data_store_uuid()`
+  changed from generate-on-read to parse-only (`Option<[u8; 16]>`) so callers fail closed on
+  missing/malformed UUIDs. Unknown or deleted contexts now fall to incognito instead of the shared
+  default store. Migration repairs malformed hex strings (not just missing). macOS 14+ runtime gate
+  added — older macOS degrades named contexts to incognito with log warning. `isolated_tabs` now
+  takes precedence over named contexts (privacy-first). `settings.rs`, `tabs.rs`, `workbench.rs`.
+  (2026-03-11)
+
 - **Media API Phase A (functional getUserMedia + attachTrack)** — `window.epoca.media.getUserMedia()`
   now allocates opaque track IDs via `media_api.rs`, resolves the JS promise with `{audioTrackId, videoTrackId}`,
   then evaluates getUserMedia JS in the WKWebView (browser native stack, no ObjC/AVFoundation).

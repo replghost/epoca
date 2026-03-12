@@ -4269,6 +4269,7 @@ dependencies = [
  "epoca-sandbox",
  "epoca-shield",
  "epoca-wallet",
+ "getrandom 0.2.17",
  "gpui",
  "gpui-component",
  "gpui-ui-kit",

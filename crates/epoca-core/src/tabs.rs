@@ -2929,9 +2929,10 @@ pub struct WebViewTab {
 }
 
 impl WebViewTab {
-    pub fn new(url: String, context_id: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        // None = isolated (private), Some = shared named context (persistent store)
-        let isolated = context_id.is_none();
+    pub fn new(url: String, _context_id: Option<String>, store_uuid: Option<[u8; 16]>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // Fail-closed: no store UUID → incognito. Covers private tabs, deleted contexts,
+        // and macOS <14 fallback (where dataStoreForIdentifier is unavailable).
+        let isolated = store_uuid.is_none();
         // Observe OverlayLeftInset so this entity is marked dirty — and therefore
         // re-painted by GPUI — whenever the sidebar animation moves. Without this,
         // GPUI may skip re-rendering the entity and the native WKWebView frame
@@ -3026,7 +3027,22 @@ impl WebViewTab {
         let mut builder = gpui_component::wry::WebViewBuilder::new()
             .with_url(&url)
             .with_incognito(isolated)
-            .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Epoca/1.0")
+            .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15 Epoca/1.0");
+
+        // Per-context data store isolation (macOS 14+ only).
+        // On older macOS, dataStoreForIdentifier is unavailable — fail closed to incognito.
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        if let Some(uuid) = store_uuid {
+            if macos_14_or_later() {
+                use gpui_component::wry::WebViewBuilderExtDarwin;
+                builder = builder.with_data_store_identifier(uuid);
+            } else {
+                log::warn!("macOS <14: per-context data store isolation unavailable, using incognito");
+                builder = builder.with_incognito(true);
+            }
+        }
+
+        let mut builder = builder
             .with_initialization_script(CONSOLE_RELAY_SCRIPT)
             .with_initialization_script(SCROLLBAR_CSS_SCRIPT)
             .with_initialization_script(TITLE_TRACKER_SCRIPT)
@@ -4949,10 +4965,12 @@ impl Render for SettingsTab {
                                                     let idx = g.settings.contexts.len();
                                                     let name = format!("Context {}", idx + 1);
                                                     let id = format!("ctx-{}", uuid_v4_simple());
+                                                    let uuid = crate::settings::format_store_uuid(&crate::settings::generate_store_uuid());
                                                     g.settings.contexts.push(crate::settings::SessionContext {
                                                         id,
                                                         name,
                                                         color,
+                                                        store_uuid: Some(uuid),
                                                     });
                                                     g.save();
                                                 });
@@ -5814,4 +5832,22 @@ fn uuid_v4_simple() -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{:016x}", t)
+}
+
+/// `WKWebsiteDataStore.dataStoreForIdentifier:` requires macOS 14+.
+/// Cached after first call.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn macos_14_or_later() -> bool {
+    use std::sync::OnceLock;
+    static RESULT: OnceLock<bool> = OnceLock::new();
+    *RESULT.get_or_init(|| {
+        std::process::Command::new("sw_vers")
+            .arg("-productVersion")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|v| v.trim().split('.').next()?.parse::<u32>().ok())
+            .map(|major| major >= 14)
+            .unwrap_or(false)
+    })
 }

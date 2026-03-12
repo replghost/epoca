@@ -996,7 +996,8 @@ impl Workbench {
                     let title = url_to_title(&url);
                     let url_clone = url.clone();
                     let ctx = Some(context_id);
-                    let entity = cx.new(|cx| WebViewTab::new(url, ctx.clone(), window, cx));
+                    let suuid = self.resolve_store_uuid(&ctx, cx);
+                    let entity = cx.new(|cx| WebViewTab::new(url, ctx.clone(), suuid, window, cx));
                     let nav = WebViewTab::nav_handler(entity.clone());
                     self.tabs.push(TabEntry {
                         id,
@@ -1019,7 +1020,7 @@ impl Workbench {
                     let id = self.alloc_id();
                     let title = url_to_title(&url);
                     let url_clone = url.clone();
-                    let entity = cx.new(|cx| WebViewTab::new(url, None, window, cx));
+                    let entity = cx.new(|cx| WebViewTab::new(url, None, None, window, cx));
                     let nav = WebViewTab::nav_handler(entity.clone());
                     self.tabs.push(TabEntry {
                         id,
@@ -2521,7 +2522,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let title = url_to_title(&url);
         let url_clone = url.clone();
         let context_id = self.resolve_context_id(cx);
-        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), window, cx));
+        let store_uuid = self.resolve_store_uuid(&context_id, cx);
+        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), store_uuid, window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -2590,7 +2592,8 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let url_clone = url.clone();
         // Background tabs (cmd-click) inherit context from the source (active) tab.
         let context_id = self.active_tab_context_id();
-        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), window, cx));
+        let store_uuid = self.resolve_store_uuid(&context_id, cx);
+        let entity = cx.new(|cx| WebViewTab::new(url, context_id.clone(), store_uuid, window, cx));
         let nav = WebViewTab::nav_handler(entity.clone());
         self.tabs.push(TabEntry {
             id,
@@ -2622,16 +2625,18 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
     /// When `experimental_contexts` is on: use `active_context`.
     /// When off: `None` if `isolated_tabs` is true, otherwise `Some("default")` for shared.
     fn resolve_context_id(&self, cx: &App) -> Option<String> {
+        // isolated_tabs always wins — every new tab gets incognito.
+        if self.isolated_tabs {
+            return None;
+        }
         let experimental = cx
             .try_global::<crate::settings::SettingsGlobal>()
             .map(|g| g.settings.experimental_contexts)
             .unwrap_or(false);
         if experimental {
             self.active_context.clone()
-        } else if self.isolated_tabs {
-            None // isolated → incognito
         } else {
-            Some("default".to_string()) // shared persistent store
+            Some("default".to_string())
         }
     }
 
@@ -2640,6 +2645,26 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         self.active_tab_id.and_then(|id| {
             self.tabs.iter().find(|t| t.id == id).and_then(|t| t.context_id.clone())
         })
+    }
+
+    /// Map a context_id to a WKWebsiteDataStore UUID for process isolation.
+    /// - `None` → `None` (incognito / nonPersistentDataStore)
+    /// - `Some("default")` → fixed DEFAULT_STORE_UUID
+    /// - `Some("ctx-N")` → UUID from SessionContext settings
+    fn resolve_store_uuid(&self, context_id: &Option<String>, cx: &App) -> Option<[u8; 16]> {
+        let ctx_id = context_id.as_deref()?;
+        if ctx_id == "default" {
+            return Some(crate::settings::DEFAULT_STORE_UUID);
+        }
+        // Fail-closed: unknown/deleted context → None → incognito (via tabs.rs).
+        cx.try_global::<crate::settings::SettingsGlobal>()
+            .and_then(|g| {
+                g.settings
+                    .contexts
+                    .iter()
+                    .find(|c| c.id == ctx_id)
+                    .and_then(|c| c.data_store_uuid())
+            })
     }
 
     /// Switch the active context. If the active tab already has a URL loaded,
@@ -2715,6 +2740,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             id: id.clone(),
             name,
             color: color.to_string(),
+            store_uuid: Some(crate::settings::format_store_uuid(
+                &crate::settings::generate_store_uuid(),
+            )),
         };
 
         cx.update_global::<crate::settings::SettingsGlobal, _>(|g, _| {
@@ -3720,8 +3748,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 TabKind::WebView { url } => {
                     let id = self.alloc_id();
                     let ctx = stab.context_id.clone();
+                    let suuid = self.resolve_store_uuid(&ctx, cx);
                     let entity = cx.new(|cx| {
-                        WebViewTab::new(url.clone(), ctx.clone(), window, cx)
+                        WebViewTab::new(url.clone(), ctx.clone(), suuid, window, cx)
                     });
                     let nav = WebViewTab::nav_handler(entity.clone());
                     self.tabs.push(TabEntry {

@@ -24,6 +24,7 @@ image = { workspace = true }
 smallvec = { workspace = true }
 rusqlite = { workspace = true }
 blake2 = "0.10"
+getrandom = "0.2"
 zip = { workspace = true }
 ureq = "3"
 str0m = "0.16"

@@ -51,6 +51,7 @@ Three interlocking advantages no other browser can replicate:
 - [x] ~~**Omnibox focus**: ensure omnibox input auto-focuses when opened~~ (done — `new_tab()` calls `window.focus(&focus_handle)`)
 - [x] ~~**WelcomeTab startup**: app should open omnibox immediately on launch~~ (done — `new_tab(window, cx)` called on startup)
 - [x] ~~**Crash on fast sidebar toggle**~~ (resolved — generation counter `sidebar_anim_gen` prevents concurrent animation loops)
+- [ ] **Omnibox Escape key**: ⌘T opens omnibox but Escape doesn't close it — only clicking off works. Escape should dismiss the omnibox and return focus to the active tab.
 
 ---
 
