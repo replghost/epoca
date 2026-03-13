@@ -13,6 +13,8 @@ members = [
     "crates/epoca-chain",
     "crates/epoca-wallet",
     "crates/epoca-hostapi",
+    "crates/gpui-ui-kit",
+    "crates/gpui-ui-kit-macros",
     "tools/prod-pack",
 ]
 exclude = []
@@ -27,7 +29,7 @@ rust-version = "1.91"
 gpui = "0.2.2"
 gpui-component = { version = "0.5.1", features = ["webview"] }
 gpui-component-assets = "0.5.1"
-gpui-ui-kit = "0.5.10"
+gpui-ui-kit = { path = "crates/gpui-ui-kit" }
 polkavm = { version = "0.31.0", features = ["generic-sandbox"] }
 polkavm-linker = "0.31.0"
 serde = { version = "1", features = ["derive"] }

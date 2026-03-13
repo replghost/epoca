@@ -1,4 +1,4 @@
-//! JS bridge dispatch — typed routing for `window.epoca.*` calls.
+//! JS bridge dispatch — typed routing for `window.host.*` calls.
 //!
 //! Extracts the untyped string-match dispatch from the workbench render loop
 //! into a standalone, testable module. No GPUI dependency.

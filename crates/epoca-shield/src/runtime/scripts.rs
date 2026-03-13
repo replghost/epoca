@@ -55,6 +55,26 @@ if(!_epochConsent()){{
   setTimeout(function(){{_conObs.disconnect();}},15000);
 }}
 
+// === YouTube ad segment skip ===
+if(location.hostname==='www.youtube.com'||location.hostname==='youtube.com'){{
+  function _epochYtSkip(){{
+    var p=document.querySelector('video');
+    if(!p)return;
+    // Skip overlay ads
+    var skip=document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button');
+    if(skip){{skip.click();return;}}
+    // If an ad is playing and player shows ad UI, skip to end
+    var adOverlay=document.querySelector('.ad-showing,.ad-interrupting');
+    if(adOverlay&&p.duration&&p.duration<300&&p.currentTime<p.duration){{
+      p.currentTime=p.duration;
+    }}
+  }}
+  setInterval(_epochYtSkip,500);
+  var _ytObs=new MutationObserver(function(){{_epochYtSkip();}});
+  var _ytTarget=document.querySelector('#movie_player')||document.body;
+  if(_ytTarget)_ytObs.observe(_ytTarget,{{childList:true,subtree:true,attributes:true}});
+}}
+
 // Report cosmetic count to native
 if(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.epocaShield){{
   window.webkit.messageHandlers.epocaShield.postMessage({{type:'cosmeticReady',count:document.querySelectorAll('#__epoca_cosmetic__').length}});

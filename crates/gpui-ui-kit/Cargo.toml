@@ -1,0 +1,30 @@
+[package]
+name = "gpui-ui-kit"
+version = "0.6.12"
+edition = "2024"
+description = "A reusable UI component library for GPUI applications"
+license = "ISC"
+
+[dependencies]
+# GPUI framework — pinned to match Epoca's version from crates.io
+gpui = "0.2.2"
+
+# Serialization for Color type
+serde = "1"
+serde_json = "1"
+
+# UUID for node/connection IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Proc macros for theme generation
+gpui-ui-kit-macros = { path = "../gpui-ui-kit-macros" }
+
+# QR code generation
+qrcode = "0.14"
+
+# Async timer used by AnimatedQrCode
+smol = "2"
+
+[lib]
+name = "gpui_ui_kit"
+path = "src/lib.rs"

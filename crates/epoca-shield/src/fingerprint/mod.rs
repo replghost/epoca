@@ -38,6 +38,25 @@ if(window.WebGL2RenderingContext){{
 try{{Object.defineProperty(navigator,'hardwareConcurrency',{{get:function(){{return 4;}}}});}}catch(e){{}}
 try{{Object.defineProperty(navigator,'deviceMemory',{{get:function(){{return 8;}}}});}}catch(e){{}}
 
+// Audio oscillator noise: add subtle frequency offset to prevent AudioContext fingerprinting
+try{{
+  var _oCreateOsc=AudioContext.prototype.createOscillator;
+  AudioContext.prototype.createOscillator=function(){{
+    var osc=_oCreateOsc.call(this);
+    var _oSetFreq=Object.getOwnPropertyDescriptor(OscillatorNode.prototype.__proto__,'frequency');
+    // Slightly perturb the frequency value read-back (±0.01%)
+    if(osc.frequency&&osc.frequency.value!==undefined){{
+      var _origFreqGet=Object.getOwnPropertyDescriptor(AudioParam.prototype,'value').get;
+      Object.defineProperty(osc.frequency,'value',{{
+        get:function(){{var v=_origFreqGet.call(this);return v*(1+(_r(v*1000)-0.5)*0.0002);}},
+        set:function(v){{AudioParam.prototype.value=v;}},
+        configurable:true
+      }});
+    }}
+    return osc;
+  }};
+}}catch(e){{}}
+
 // Screen size rounding to nearest 100px
 try{{
   Object.defineProperty(screen,'width',{{get:function(){{return Math.round(window.outerWidth/100)*100;}}}});
@@ -45,6 +64,17 @@ try{{
   Object.defineProperty(screen,'availWidth',{{get:function(){{return screen.width;}}}});
   Object.defineProperty(screen,'availHeight',{{get:function(){{return screen.height;}}}});
 }}catch(e){{}}
+
+// Exit-intent popup suppression: block mouseleave/beforeunload popups
+var _oAEL=EventTarget.prototype.addEventListener;
+EventTarget.prototype.addEventListener=function(type,fn,opts){{
+  if(type==='beforeunload'&&this===window)return;
+  if(type==='mouseleave'&&this===document)return;
+  if(type==='mouseout'&&this===document)return;
+  return _oAEL.call(this,type,fn,opts);
+}};
+// Neutralize onbeforeunload assignment
+try{{Object.defineProperty(window,'onbeforeunload',{{set:function(){{}},get:function(){{return null;}}}});}}catch(e){{}}
 
 // window.open interception
 var _oOpen=window.open;

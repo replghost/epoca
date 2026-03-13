@@ -73,7 +73,7 @@ Scope by crate or module: `feat(sandbox): add asset caching`, `fix(shield): cosm
 crates/
   epoca/            binary entry point (main.rs)
   epoca-core/       workbench shell, tabs, view_bridge, declarative parser
-    js_bridge.rs    — typed dispatch for window.epoca.* JSON host API calls
+    js_bridge.rs    — typed dispatch for window.host.* JSON host API calls
     spa.rs          — WKWebView transport: scheme handler, JS injection, block-all rules
     host.rs         — WKWebView transport: SCALE binary path (base64 encoding, ObjC bridge)
     chain_api.rs    — chain query/submit routing to smoldot
@@ -106,11 +106,11 @@ Two app types, two transports, same conceptual API:
 | Screen (framebuffer) | Direct host imports (sync) | Canvas/WebGL (native) |
 | Input (keyboard/mouse) | Direct host imports (sync) | DOM events (native) |
 | Assets (bundled files) | Direct host imports (sync) | `epocaapp://` scheme |
-| Wallet (accounts, signing) | Message-based (async) | `window.epoca.*` |
-| Chain (RPC, submit) | Message-based (async) | `window.epoca.chain.*` |
-| Storage (local KV) | Message-based (async) | `window.epoca.storage.*` |
-| Statements (pub/sub) | Message-based (async) | `window.epoca.statements.*` |
-| Data (P2P) | Message-based (async) | `window.epoca.data.*` |
+| Wallet (accounts, signing) | Message-based (async) | `window.host.*` |
+| Chain (RPC, submit) | Message-based (async) | `window.host.chain.*` |
+| Storage (local KV) | Message-based (async) | `window.host.storage.*` |
+| Statements (pub/sub) | Message-based (async) | `window.host.statements.*` |
+| Data (P2P) | Message-based (async) | `window.host.data.*` |
 
 Screen/Input/Assets are direct host imports for PolkaVM (performance-critical).
 Wallet/Chain/Storage/Statements/Data are async message-based on both transports.
@@ -122,7 +122,7 @@ Wallet/Chain/Storage/Statements/Data are async message-based on both transports.
 - When PolkaVM apps need wallet/chain/storage, they get the same API via message protocol
 
 **Key principle:** new host API features should be designed transport-agnostic, then bound
-to both JS (`window.epoca`) and PolkaVM (host imports or message protocol) as needed.
+to both JS (`window.host`) and PolkaVM (host imports or message protocol) as needed.
 
 ## Key Architecture Note — WKWebView Positioning
 `WebViewTab` observes `OverlayLeftInset` via `cx.observe_global` so GPUI marks it dirty

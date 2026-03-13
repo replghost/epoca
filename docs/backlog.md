@@ -260,7 +260,7 @@ media = ["camera", "audio"]
 ```
 - Hosts a bundled client-side SPA (HTML/JS/CSS) in a WKWebView, loaded via `epocaapp://` custom URL scheme
 - **No network access** — `WKURLSchemeHandler` serves assets from bundle; `block-all` WKContentRuleList prevents outbound HTTP
-- **Host API injection** — `window.epoca` injected at `documentStart` provides signing, Statement Store, and WebSocket proxy
+- **Host API injection** — `window.host` injected at `documentStart` provides signing, Statement Store, and WebSocket proxy
 - **Per-request signing confirmation** — user sees payload summary + approve/reject dialog (reuses `PendingPermission` pattern)
 - **Isolated data store** — each SpaTab uses `nonPersistentDataStore`, never shared default store
 - Use cases: video conferencing (ss-meet), chat, collaborative editors, dashboards — any client-side web app that talks to Substrate
@@ -268,7 +268,7 @@ media = ["camera", "audio"]
 - [x] **`ProdBundle` extended** — `program_bytes` optional for `type = "spa"`, `WebAppMeta` parsed from `[webapp]` section
 - [x] **`open_webapp()` in Workbench** — dispatches `.prod` bundles with `type = "spa"` to `SpaTab`
 - [x] **`WKURLSchemeHandler` for `epocaapp://`** — `with_custom_protocol` serves assets from `SPA_ASSETS` registry (eager or lazy IPFS)
-- [x] **`window.epoca` injection** — `HOST_API_SCRIPT` at `documentStart`; Promise-based API with correlation IDs via `__epocaResolve`
+- [x] **`window.host` injection** — `HOST_API_SCRIPT` at `documentStart`; Promise-based API with correlation IDs via `__epocaResolve`
 - [x] **Signing relay** — `epocaHost` WKScriptMessageHandler → `PendingSpaSign` → GPUI confirmation dialog → host signs → JS Promise resolves
 - [x] ~~**Statements pub/sub** — `epoca.statements.write/subscribe`, local in-memory pub/sub, namespaced by app_id, drain loop pushes events to webviews~~ (2026-03-06)
 - [x] ~~**Chain query/submit** — `epoca.chain.query` (method allowlist) + `epoca.chain.submit` (approval dialog), chain read from manifest~~ (2026-03-06)
@@ -278,7 +278,7 @@ media = ["camera", "audio"]
 - [ ] **str0m WebRTC transport** — P2P data connections via str0m, SDP signaling over statements
 - [x] **`block-all` WKContentRuleList** — `install_block_all_rule()` in `spa.rs` (skipped at runtime due to startup race; CSP headers enforce instead)
 - [x] ~~**Bundle signature verification** — required for apps requesting `sign = true`~~ (2026-03-06)
-- [x] ~~**TypeScript type definitions** — `types/epoca-host-api.d.ts` with full `window.epoca` types~~ (2026-03-06)
+- [x] ~~**TypeScript type definitions** — `types/epoca-host-api.d.ts` with full `window.host` types~~ (2026-03-06)
 
 ### Guest Host API (all app types)
 Expand the host function surface beyond current `host_set_view`/`host_poll_event`/`host_fetch`/`host_log`:

@@ -1,7 +1,7 @@
 /**
  * Epoca Host API — TypeScript type definitions.
  *
- * Available as `window.epoca` inside sandboxed SPA tabs.
+ * Available as `window.host` inside sandboxed SPA tabs.
  * All methods return Promises that resolve/reject via the host.
  *
  * Requires corresponding permissions in manifest.toml:
@@ -148,7 +148,7 @@ interface Epoca {
 
 declare global {
   interface Window {
-    epoca: Epoca;
+    host: Epoca;
   }
 }
 

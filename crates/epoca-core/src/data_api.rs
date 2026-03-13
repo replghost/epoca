@@ -1,8 +1,8 @@
 //! Data Connection API for sandboxed SPA tabs.
 //!
-//! Apps call `window.epoca.data.connect(peerAddress)`,
-//! `window.epoca.data.send(connId, data)`, and
-//! `window.epoca.data.close(connId)` for peer-to-peer data exchange.
+//! Apps call `window.host.data.connect(peerAddress)`,
+//! `window.host.data.send(connId, data)`, and
+//! `window.host.data.close(connId)` for peer-to-peer data exchange.
 //!
 //! Transport: str0m (Sans-I/O WebRTC) with SDP signaling over the Statement Store.
 //!

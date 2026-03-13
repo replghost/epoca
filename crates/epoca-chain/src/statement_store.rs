@@ -3,7 +3,7 @@
 //! Implements the `sp-statement-store` binary encoding format and connects
 //! via WebSocket to a Substrate node with the statement store pallet.
 //!
-//! Used for cross-host pub/sub: SPA apps call `window.epoca.statements.write()`
+//! Used for cross-host pub/sub: SPA apps call `window.host.statements.write()`
 //! and the host submits the statement to the chain for gossip to other nodes.
 //!
 //! The statement store is a last-write-wins channel system:

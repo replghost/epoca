@@ -13,6 +13,7 @@ bs58 = "0.5"
 anyhow = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 
 # secp256k1 / BIP-44 (ETH + BTC key derivation)
 k256 = { version = "0.13", features = ["ecdsa"] }
@@ -22,6 +23,9 @@ sha3 = "0.10"
 ripemd = "0.1"
 bech32 = "0.11"
 base64 = "0.22"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+chacha20poly1305 = "0.10"
+hex = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = { version = "3", features = ["OSX_10_15"] }

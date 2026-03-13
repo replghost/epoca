@@ -7,7 +7,9 @@ use gpui_component::theme::ActiveTheme;
 use gpui_component::IconName;
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::Sizable;
-use gpui_ui_kit::{Toggle, ButtonSet, ButtonSetOption, ButtonSetSize, ButtonSetTheme};
+use gpui_ui_kit::{Toggle, ButtonSet, ButtonSetOption, ButtonSetSize, ButtonSetTheme, QrCode, EmptyState, Tag, TagVariant, TagSize, StepIndicator, StepItem, StepItemStatus, StepIndicatorSize};
+use epoca_wallet::pairing::{PairingConfig, PairingSession, PairingState, start_pairing};
+use epoca_wallet::WalletSource;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1721,21 +1723,8 @@ impl Render for AppLibraryTab {
             );
 
         let cards = if self.apps.is_empty() {
-            div()
-                .px_6()
-                .py_12()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .child(
-                    Label::new("No apps installed")
-                        .text_color(muted),
-                )
-                .child(
-                    Label::new("Use File > Open App to install a .prod bundle")
-                        .text_color(muted),
-                )
+            EmptyState::new("No apps installed")
+                .description("Use File > Open App to install a .prod bundle")
                 .into_any_element()
         } else {
             div()
@@ -1907,15 +1896,8 @@ impl Render for BookmarksTab {
             );
 
         let items = if self.bookmarks.is_empty() {
-            div()
-                .px_6()
-                .py_12()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap_2()
-                .child(Label::new("No bookmarks yet").text_color(muted))
-                .child(Label::new("Use the star icon in the URL bar to bookmark pages").text_color(muted))
+            EmptyState::new("No bookmarks yet")
+                .description("Use the star icon in the URL bar to bookmark pages")
                 .into_any_element()
         } else {
             div()
@@ -3279,7 +3261,7 @@ impl Render for WebViewTab {
 
 /// A sandboxed single-page application tab. The SPA's HTML/JS/CSS is loaded
 /// from a `.prod` bundle via a custom `epocaapp://` URL scheme. Network access
-/// is blocked; the app communicates with the host through `window.epoca.*` APIs
+/// is blocked; the app communicates with the host through `window.host.*` APIs
 /// injected at document start.
 pub struct SpaTab {
     focus_handle: FocusHandle,
@@ -4126,14 +4108,9 @@ impl Render for DotLoadingTab {
                                         )
                                         .when(!self.has_manifest, |d| {
                                             d.child(
-                                                div()
-                                                    .text_size(px(9.0))
-                                                    .px(px(6.0))
-                                                    .py(px(2.0))
-                                                    .rounded(px(4.0))
-                                                    .bg(rgba(0xf5a62320))
-                                                    .text_color(amber_color)
-                                                    .child("Unverified"),
+                                                Tag::new("unverified", "Unverified")
+                                                    .variant(TagVariant::Warning)
+                                                    .size(TagSize::Sm),
                                             )
                                         }),
                                 )
@@ -4331,6 +4308,12 @@ pub struct SettingsTab {
     wallet_import_input: Option<Entity<InputState>>,
     /// Error message from a failed wallet operation.
     wallet_error: Option<String>,
+    /// Active QR pairing session (background thread handle).
+    pairing_session: Option<PairingSession>,
+    /// QR URI to display once the pairing session emits AwaitingScan.
+    pairing_qr_uri: Option<String>,
+    /// Error from a failed or cancelled pairing attempt.
+    pairing_error: Option<String>,
 }
 
 impl SettingsTab {
@@ -4343,7 +4326,10 @@ impl SettingsTab {
             let done = cx
                 .update(|cx| {
                     if let Some(entity) = this.upgrade() {
-                        entity.update(cx, |_, cx| cx.notify());
+                        entity.update(cx, |this, cx| {
+                            this.poll_pairing_session(cx);
+                            cx.notify();
+                        });
                         false
                     } else {
                         true
@@ -4364,6 +4350,44 @@ impl SettingsTab {
             wallet_show_import: false,
             wallet_import_input: None,
             wallet_error: None,
+            pairing_session: None,
+            pairing_qr_uri: None,
+            pairing_error: None,
+        }
+    }
+}
+
+impl SettingsTab {
+    /// Drain state updates from the pairing session background thread.
+    /// Called from the 2-second refresh task so the UI reflects the latest state.
+    fn poll_pairing_session(&mut self, cx: &mut Context<Self>) {
+        let Some(ref session) = self.pairing_session else { return };
+        // Drain all pending states; last one wins for terminal transitions.
+        let mut last_state: Option<PairingState> = None;
+        while let Ok(state) = session.state_rx.try_recv() {
+            last_state = Some(state);
+        }
+        let Some(state) = last_state else { return };
+        match state {
+            PairingState::AwaitingScan { qr_uri } => {
+                self.pairing_qr_uri = Some(qr_uri);
+            }
+            PairingState::Established { address, display_name } => {
+                // The pairing thread has already stored the session key in Keychain.
+                // Update the in-memory WalletManager source.
+                if cx.has_global::<crate::wallet::WalletGlobal>() {
+                    cx.global_mut::<crate::wallet::WalletGlobal>().manager.source =
+                        WalletSource::Paired { address, display_name };
+                }
+                self.pairing_session = None;
+                self.pairing_qr_uri = None;
+                self.pairing_error = None;
+            }
+            PairingState::Failed(msg) => {
+                self.pairing_error = Some(msg);
+                self.pairing_session = None;
+                self.pairing_qr_uri = None;
+            }
         }
     }
 }
@@ -5431,46 +5455,276 @@ impl Render for SettingsTab {
                                         );
                                     }
                                     epoca_wallet::WalletState::Unlocked { root_address } => {
-                                        section = section.child(
-                                            div()
-                                                .px(px(16.0))
-                                                .py(px(10.0))
-                                                .flex()
-                                                .flex_col()
-                                                .gap(px(4.0))
+                                        // Read the wallet source to decide which UI to show.
+                                        let wallet_source = cx
+                                            .try_global::<crate::wallet::WalletGlobal>()
+                                            .map(|wg| wg.manager.source.clone())
+                                            .unwrap_or(WalletSource::Local);
+
+                                        match &wallet_source {
+                                            WalletSource::Paired { address, display_name } => {
+                                                // Show paired wallet info + Unpair button.
+                                                let addr = address.clone();
+                                                let name = display_name.clone();
+                                                let addr_display = if addr.len() > 20 {
+                                                    format!("{}…{}", &addr[..8], &addr[addr.len()-6..])
+                                                } else {
+                                                    addr.clone()
+                                                };
+                                                let label = if !name.is_empty() {
+                                                    format!("Paired: {}", name)
+                                                } else {
+                                                    "Paired wallet".to_string()
+                                                };
+                                                section = section.child(
+                                                    div()
+                                                        .px(px(16.0))
+                                                        .py(px(10.0))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(4.0))
+                                                        .child(
+                                                            div().text_xs().text_color(rgba(0x00d4aaff))
+                                                                .child(label),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgba(0x8a5cffff))
+                                                                .child(addr_display),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("wallet-unpair")
+                                                                .mt(px(4.0))
+                                                                .px(px(12.0))
+                                                                .py(px(6.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgba(0xe5534b28))
+                                                                .text_xs()
+                                                                .text_color(rgba(0xe5534bff))
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                        cx.global_mut::<crate::wallet::WalletGlobal>()
+                                                                            .manager
+                                                                            .unpair();
+                                                                        this.wallet_error = None;
+                                                                        this.pairing_error = None;
+                                                                    }
+                                                                    cx.notify();
+                                                                }))
+                                                                .child("Unpair"),
+                                                        ),
+                                                );
+                                            }
+                                            WalletSource::Local => {
+                                                // Show local address, Lock button, and pairing UI.
+                                                section = section.child(
+                                                    div()
+                                                        .px(px(16.0))
+                                                        .py(px(10.0))
+                                                        .flex()
+                                                        .flex_col()
+                                                        .gap(px(4.0))
+                                                        .child(
+                                                            div().text_xs().text_color(text_secondary)
+                                                                .child("Root address"),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .text_color(rgba(0x8a5cffff))
+                                                                .child(root_address.clone()),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .id("wallet-lock")
+                                                                .mt(px(4.0))
+                                                                .px(px(12.0))
+                                                                .py(px(6.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgba(0xffffff18))
+                                                                .text_xs()
+                                                                .text_color(text_primary)
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    if cx.has_global::<crate::wallet::WalletGlobal>() {
+                                                                        cx.global_mut::<crate::wallet::WalletGlobal>()
+                                                                            .manager
+                                                                            .lock();
+                                                                        this.wallet_error = None;
+                                                                    }
+                                                                    cx.notify();
+                                                                }))
+                                                                .child("Lock"),
+                                                        ),
+                                                );
+
+                                                // Pairing UI: show QR, pending state, or "Pair" button.
+                                                if self.pairing_session.is_some() || self.pairing_qr_uri.is_some() {
+                                                    let (s1, s2, s3) = if self.pairing_qr_uri.is_some() {
+                                                        (StepItemStatus::Completed, StepItemStatus::Active, StepItemStatus::NotVisited)
+                                                    } else {
+                                                        (StepItemStatus::Active, StepItemStatus::NotVisited, StepItemStatus::NotVisited)
+                                                    };
+                                                    section = section.child(
+                                                        div()
+                                                            .px(px(16.0))
+                                                            .py(px(8.0))
+                                                            .child(
+                                                                StepIndicator::new("pairing-steps", vec![
+                                                                    StepItem::new("Start").status(s1),
+                                                                    StepItem::new("Scan").status(s2),
+                                                                    StepItem::new("Paired").status(s3),
+                                                                ])
+                                                                .size(StepIndicatorSize::Sm),
+                                                            ),
+                                                    );
+                                                }
+                                                if let Some(ref qr_uri) = self.pairing_qr_uri {
+                                                    // Awaiting scan — show QR code.
+                                                    let qr_uri_clone = qr_uri.clone();
+                                                    section = section.child(
+                                                        div()
+                                                            .px(px(16.0))
+                                                            .pb(px(10.0))
+                                                            .flex()
+                                                            .flex_col()
+                                                            .gap(px(8.0))
+                                                            .child(
+                                                                div().text_xs().text_color(text_secondary)
+                                                                    .child("Scan with your mobile wallet"),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex()
+                                                                    .justify_center()
+                                                                    .child(
+                                                                        QrCode::new(qr_uri_clone)
+                                                                            .size(px(180.0))
+                                                                            .fg(rgba(0xffffffff))
+                                                                            .bg(rgba(0x1c1c1eff)),
+                                                                    ),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .id("wallet-pair-cancel")
+                                                                    .px(px(12.0))
+                                                                    .py(px(6.0))
+                                                                    .rounded(px(4.0))
+                                                                    .bg(rgba(0xffffff18))
+                                                                    .text_xs()
+                                                                    .text_color(text_primary)
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                                        if let Some(ref session) = this.pairing_session {
+                                                                            session.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                                        }
+                                                                        this.pairing_session = None;
+                                                                        this.pairing_qr_uri = None;
+                                                                        this.pairing_error = None;
+                                                                        cx.notify();
+                                                                    }))
+                                                                    .child("Cancel"),
+                                                            ),
+                                                    );
+                                                } else if self.pairing_session.is_some() {
+                                                    // Session started but QR not ready yet.
+                                                    section = section.child(
+                                                        div()
+                                                            .px(px(16.0))
+                                                            .pb(px(8.0))
+                                                            .text_xs()
+                                                            .text_color(text_secondary)
+                                                            .child("Generating QR code…"),
+                                                    );
+                                                } else {
+                                                    // No active session — show Pair button.
+                                                    section = section.child(
+                                                        div()
+                                                            .px(px(16.0))
+                                                            .pb(px(10.0))
+                                                            .child(
+                                                                div()
+                                                                    .id("wallet-pair-btn")
+                                                                    .px(px(12.0))
+                                                                    .py(px(6.0))
+                                                                    .rounded(px(4.0))
+                                                                    .bg(rgba(0x00d4aa28))
+                                                                    .text_xs()
+                                                                    .text_color(rgba(0x00d4aaff))
+                                                                    .cursor_pointer()
+                                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                                        // Build PairingConfig with statements_api callbacks.
+                                                                        let subscribe = Box::new(|channel: &str| -> Result<(u64, std::sync::mpsc::Receiver<(String, String)>), String> {
+                                                                            let (sub_id, stmt_rx) = crate::statements_api::subscribe_direct("__host__", channel)
+                                                                                .map_err(|e| e.to_string())?;
+                                                                            // Bridge Statement → (author, data) for the pairing thread.
+                                                                            let (tx, rx) = std::sync::mpsc::sync_channel::<(String, String)>(64);
+                                                                            std::thread::spawn(move || {
+                                                                                while let Ok(stmt) = stmt_rx.recv() {
+                                                                                    if tx.send((stmt.author.clone(), stmt.data.clone())).is_err() {
+                                                                                        break;
+                                                                                    }
+                                                                                }
+                                                                            });
+                                                                            Ok((sub_id, rx))
+                                                                        });
+                                                                        let unsubscribe = Box::new(|sub_id: u64| {
+                                                                            crate::statements_api::unsubscribe(sub_id);
+                                                                        });
+                                                                        let config = PairingConfig {
+                                                                            subscribe,
+                                                                            unsubscribe,
+                                                                            network: "people-paseo".to_string(),
+                                                                        };
+                                                                        this.pairing_session = Some(start_pairing(config));
+                                                                        this.pairing_qr_uri = None;
+                                                                        this.pairing_error = None;
+                                                                        cx.notify();
+                                                                    }))
+                                                                    .child("Pair Mobile Wallet"),
+                                                            ),
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // Show pairing error if any.
+                                        if let Some(ref pair_err) = self.pairing_error {
+                                            let err_text = pair_err.clone();
+                                            section = section
                                                 .child(
-                                                    div().text_xs().text_color(text_secondary)
-                                                        .child("Root address"),
+                                                    div()
+                                                        .px(px(16.0))
+                                                        .pb(px(4.0))
+                                                        .text_xs()
+                                                        .text_color(rgba(0xe5534bff))
+                                                        .child(err_text),
                                                 )
                                                 .child(
                                                     div()
-                                                        .text_xs()
-                                                        .text_color(rgba(0x8a5cffff))
-                                                        .child(root_address.clone()),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .id("wallet-lock")
-                                                        .mt(px(4.0))
-                                                        .px(px(12.0))
-                                                        .py(px(6.0))
-                                                        .rounded(px(4.0))
-                                                        .bg(rgba(0xffffff18))
-                                                        .text_xs()
-                                                        .text_color(text_primary)
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(|this, _, _, cx| {
-                                                            if cx.has_global::<crate::wallet::WalletGlobal>() {
-                                                                cx.global_mut::<crate::wallet::WalletGlobal>()
-                                                                    .manager
-                                                                    .lock();
-                                                                this.wallet_error = None;
-                                                            }
-                                                            cx.notify();
-                                                        }))
-                                                        .child("Lock"),
-                                                ),
-                                        );
+                                                        .px(px(16.0))
+                                                        .pb(px(8.0))
+                                                        .child(
+                                                            div()
+                                                                .id("wallet-pair-retry")
+                                                                .px(px(12.0))
+                                                                .py(px(6.0))
+                                                                .rounded(px(4.0))
+                                                                .bg(rgba(0x00d4aa28))
+                                                                .text_xs()
+                                                                .text_color(rgba(0x00d4aaff))
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                                    this.pairing_error = None;
+                                                                    cx.notify();
+                                                                }))
+                                                                .child("Try Again"),
+                                                        ),
+                                                );
+                                        }
                                     }
                                 }
 

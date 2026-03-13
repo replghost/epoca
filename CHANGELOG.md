@@ -8,17 +8,17 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased] — ongoing
 
 ### Added
-- **Media API Phase A (functional getUserMedia + attachTrack)** — `window.epoca.media.getUserMedia()`
+- **Media API Phase A (functional getUserMedia + attachTrack)** — `window.host.media.getUserMedia()`
   now allocates opaque track IDs via `media_api.rs`, resolves the JS promise with `{audioTrackId, videoTrackId}`,
   then evaluates getUserMedia JS in the WKWebView (browser native stack, no ObjC/AVFoundation).
-  `window.epoca.media.attachTrack(trackId, elementId)` wires a track to a DOM element via `srcObject`.
+  `window.host.media.attachTrack(trackId, elementId)` wires a track to a DOM element via `srcObject`.
   `RTCPeerConnection`/`RTCSessionDescription`/`RTCIceCandidate` remain frozen; `getUserMedia` is
   intentionally left unblocked (harmless without PeerConnection). `cleanup_for_webview()` added to
   `SpaTab::drop`. Push events `mediaTrackReady`, `mediaConnected`, `mediaRemoteTrack`, `mediaClosed`,
   `mediaError` drain loop added to workbench render path. New `BridgeAsyncAction::MediaGetUserMedia`
   and `MediaAttachTrack` variants. `media_api.rs`, `js_bridge.rs`, `spa.rs`, `tabs.rs`, `workbench.rs`. (2026-03-07)
 
-- **Media API scaffold (Phase A)** — `window.epoca.media` namespace injected into SPA WebViews
+- **Media API scaffold (Phase A)** — `window.host.media` namespace injected into SPA WebViews
   with `getUserMedia`, `connect`, `close`, and `attachTrack` methods. Native WebRTC globals
   (`RTCPeerConnection`, `RTCSessionDescription`, `RTCIceCandidate`, `navigator.mediaDevices.getUserMedia`)
   are nulled at document_start so apps must go through the host API. Bridge variants

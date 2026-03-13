@@ -8,6 +8,7 @@
 
 pub mod derive;
 pub mod keystore;
+pub mod pairing;
 
 use anyhow::{anyhow, Result};
 use k256::ecdsa::SigningKey;
@@ -29,6 +30,28 @@ const SIGNING_CTX: &[u8] = b"substrate";
 
 /// Default auto-lock timeout: 15 minutes of inactivity.
 const DEFAULT_AUTO_LOCK_SECS: u64 = 15 * 60;
+
+/// Which credential backs the active signing session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalletSource {
+    /// Using a local keypair derived from the stored mnemonic.
+    Local,
+    /// Using a paired mobile wallet over Statement Store.
+    Paired {
+        address: String,
+        display_name: String,
+    },
+}
+
+/// Signing capabilities available for the current wallet session.
+pub struct SigningCapabilities {
+    /// sr25519 signing — always true when the wallet is unlocked or paired.
+    pub sr25519: bool,
+    /// Ethereum personal_sign — only available when Local (requires eth_key).
+    pub eth: bool,
+    /// Bitcoin BIP-137 sign — only available when Local (requires btc_key).
+    pub btc: bool,
+}
 
 /// The wallet's current state.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,12 +88,27 @@ pub struct WalletManager {
     last_activity: Option<Instant>,
     /// Auto-lock timeout. `None` = never auto-lock.
     auto_lock_timeout: Option<Duration>,
+    /// Whether we are using a local mnemonic or a paired mobile wallet.
+    /// Set at construction time from Keychain (no auth prompt), updated by
+    /// `accept_pairing` and `unpair`.
+    pub source: WalletSource,
 }
 
 impl WalletManager {
     pub fn new() -> Self {
-        // Single Keychain check at construction time.
+        // Single Keychain existence-check at construction (no biometric prompt).
         let has = keystore::has_mnemonic();
+        // Detect a paired wallet presence without loading secrets.
+        let source = if keystore::has_paired_wallet() {
+            // Actual address/name loaded on first `accept_pairing` call after
+            // biometric auth — use a placeholder until then.
+            WalletSource::Paired {
+                address: String::new(),
+                display_name: String::new(),
+            }
+        } else {
+            WalletSource::Local
+        };
         Self {
             root_keypair: None,
             app_keys: HashMap::new(),
@@ -79,6 +117,7 @@ impl WalletManager {
             has_mnemonic: has,
             last_activity: None,
             auto_lock_timeout: Some(Duration::from_secs(DEFAULT_AUTO_LOCK_SECS)),
+            source,
         }
     }
 
@@ -88,6 +127,12 @@ impl WalletManager {
         if self.root_keypair.is_some() {
             WalletState::Unlocked {
                 root_address: self.root_address().unwrap_or_default(),
+            }
+        } else if let WalletSource::Paired { address, .. } = &self.source {
+            // A paired wallet is always "unlocked" from the UI's perspective —
+            // signing is delegated to the mobile device.
+            WalletState::Unlocked {
+                root_address: address.clone(),
             }
         } else if self.has_mnemonic {
             WalletState::Locked
@@ -391,13 +436,74 @@ impl WalletManager {
         Ok(sig.to_bytes().to_vec())
     }
 
-    /// Delete the wallet entirely — removes the mnemonic from Keychain.
+    /// Delete the wallet entirely — removes the mnemonic and any paired data from Keychain.
     pub fn delete(&mut self) -> Result<()> {
         self.lock();
         keystore::delete_mnemonic()?;
+        keystore::delete_paired_data();
         self.has_mnemonic = false;
+        self.source = WalletSource::Local;
         log::info!("Wallet deleted");
         Ok(())
+    }
+
+    /// Return the active signing address.
+    ///
+    /// If `source` is `Paired`, returns the paired address. Otherwise returns
+    /// the root sr25519 address derived from the local mnemonic.
+    pub fn active_address(&self) -> Result<String> {
+        match &self.source {
+            WalletSource::Paired { address, .. } => {
+                if address.is_empty() {
+                    Err(anyhow!("Paired wallet address not yet loaded"))
+                } else {
+                    Ok(address.clone())
+                }
+            }
+            WalletSource::Local => self.root_address(),
+        }
+    }
+
+    /// Commit a completed pairing session to Keychain and update source.
+    ///
+    /// Called by the workbench after `PairingState::Established` is received.
+    /// `session_key` is the 32-byte ChaCha20-Poly1305 key shared with the mobile
+    /// wallet. `rendezvous` is the 32-byte topic hash used for future sign requests.
+    pub fn accept_pairing(
+        &mut self,
+        address: String,
+        display_name: String,
+        session_key: &[u8; 32],
+        rendezvous: &[u8; 32],
+    ) -> Result<()> {
+        keystore::store_paired_data(&address, session_key, rendezvous)?;
+        self.source = WalletSource::Paired {
+            address,
+            display_name,
+        };
+        log::info!("Paired wallet accepted");
+        Ok(())
+    }
+
+    /// Remove the paired mobile wallet and return to Local mode.
+    pub fn unpair(&mut self) {
+        keystore::delete_paired_data();
+        self.source = WalletSource::Local;
+        log::info!("Paired wallet removed");
+    }
+
+    /// Return the signing capabilities for the current wallet session.
+    ///
+    /// `sr25519` is always true if the wallet is unlocked or paired.
+    /// `eth` and `btc` are only available for Local wallets with in-memory keys.
+    pub fn signing_capabilities(&self) -> SigningCapabilities {
+        let is_local_unlocked = self.root_keypair.is_some();
+        let is_paired = matches!(self.source, WalletSource::Paired { .. });
+        SigningCapabilities {
+            sr25519: is_local_unlocked || is_paired,
+            eth: is_local_unlocked && self.eth_key.is_some(),
+            btc: is_local_unlocked && self.btc_key.is_some(),
+        }
     }
 
     /// Get or derive the keypair for a given app_id.

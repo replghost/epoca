@@ -183,16 +183,16 @@
   }
 
   log('SPA loaded');
-  log('window.epoca exists: ' + (typeof window.epoca !== 'undefined'));
-  if (window.epoca) {
-    log('APIs: sign=' + typeof window.epoca.sign +
-        ' chain=' + typeof window.epoca.chain +
-        ' statements=' + typeof window.epoca.statements +
-        ' data=' + typeof window.epoca.data +
-        ' media=' + typeof window.epoca.media);
+  log('window.host exists: ' + (typeof window.host !== 'undefined'));
+  if (window.host) {
+    log('APIs: sign=' + typeof window.host.sign +
+        ' chain=' + typeof window.host.chain +
+        ' statements=' + typeof window.host.statements +
+        ' data=' + typeof window.host.data +
+        ' media=' + typeof window.host.media);
 
     // Listen for statement events
-    window.epoca.on('statement', function(data) {
+    window.host.on('statement', function(data) {
       log('[event:statement] ch=' + data.channel + ' data=' + data.data + ' by=' + data.author);
       var el = document.getElementById('stmt');
       el.className = 'result';
@@ -206,7 +206,7 @@
     el.textContent = 'calling...';
     log('getAddress() called');
     try {
-      const addr = await window.epoca.getAddress();
+      const addr = await window.host.getAddress();
       el.className = 'result';
       el.textContent = addr;
       log('getAddress() resolved: ' + addr);
@@ -223,7 +223,7 @@
     el.textContent = 'calling...';
     log('sign("hello") called');
     try {
-      const sig = await window.epoca.sign('hello');
+      const sig = await window.host.sign('hello');
       el.className = 'result';
       el.textContent = sig;
       log('sign() resolved: ' + sig);
@@ -252,11 +252,11 @@
 
     try {
       el.textContent = 'getting address...';
-      const addr = await window.epoca.getAddress();
+      const addr = await window.host.getAddress();
       log('Signer: ' + addr);
 
       el.textContent = 'signing...';
-      const sig = await window.epoca.sign(callDataHex);
+      const sig = await window.host.sign(callDataHex);
       log('Signature: ' + sig);
 
       el.className = 'result';
@@ -279,7 +279,7 @@
     el.textContent = 'querying...';
     log('chain.query("system_chain") called');
     try {
-      var result = await window.epoca.chain.query('system_chain', []);
+      var result = await window.host.chain.query('system_chain', []);
       el.className = 'result';
       el.textContent = JSON.stringify(result);
       log('chain.query resolved: ' + JSON.stringify(result));
@@ -296,7 +296,7 @@
     el.textContent = 'querying...';
     log('chain.query("state_getRuntimeVersion") called');
     try {
-      var result = await window.epoca.chain.query('state_getRuntimeVersion', []);
+      var result = await window.host.chain.query('state_getRuntimeVersion', []);
       el.className = 'result';
       el.textContent = JSON.stringify(result).slice(0, 200);
       log('getRuntimeVersion resolved');
@@ -315,7 +315,7 @@
     el.textContent = 'submitting (check approval dialog)...';
     log('chain.submit called with: ' + callData);
     try {
-      var result = await window.epoca.chain.submit(callData);
+      var result = await window.host.chain.submit(callData);
       el.className = 'result';
       el.textContent = JSON.stringify(result);
       log('chain.submit resolved: ' + JSON.stringify(result));
@@ -334,7 +334,7 @@
     el.textContent = 'subscribing...';
     log('statements.subscribe("' + channel + '") called');
     try {
-      await window.epoca.statements.subscribe(channel);
+      await window.host.statements.subscribe(channel);
       el.className = 'result';
       el.textContent = 'Subscribed to: ' + channel;
       log('statements.subscribe resolved');
@@ -354,7 +354,7 @@
     el.textContent = 'writing...';
     log('statements.write("' + channel + '", "' + data + '") called');
     try {
-      await window.epoca.statements.write(channel, data);
+      await window.host.statements.write(channel, data);
       el.className = 'result';
       el.textContent = 'Written to: ' + channel;
       log('statements.write resolved');
@@ -372,7 +372,7 @@
     var label = (audio && video) ? 'audio+video' : audio ? 'audio' : 'video';
     log('media.getUserMedia({audio:' + audio + ', video:' + video + '}) called');
     try {
-      var result = await window.epoca.media.getUserMedia({ audio: audio, video: video });
+      var result = await window.host.media.getUserMedia({ audio: audio, video: video });
       el.className = 'result';
       el.textContent = label + ' tracks: ' + JSON.stringify(result);
       log('getUserMedia resolved: ' + JSON.stringify(result));
@@ -386,7 +386,7 @@
         var vid = document.getElementById('local-video');
         vid.style.display = 'block';
         log('attaching video track ' + result.videoTrackId + ' to local-video');
-        await window.epoca.media.attachTrack(result.videoTrackId, 'local-video');
+        await window.host.media.attachTrack(result.videoTrackId, 'local-video');
         log('attachTrack resolved');
       }
     } catch (e) {
@@ -411,7 +411,7 @@
     el.textContent = 'connecting to ' + peer + '...';
     log('media.connect("' + peer + '", ' + JSON.stringify(localTrackIds) + ') called');
     try {
-      var sessionId = await window.epoca.media.connect(peer, localTrackIds);
+      var sessionId = await window.host.media.connect(peer, localTrackIds);
       currentSessionId = sessionId;
       el.className = 'result';
       el.textContent = 'Session ' + sessionId + ' signaling...';
@@ -428,7 +428,7 @@
     if (!currentSessionId) { el.className = 'result error'; el.textContent = 'No active session'; return; }
     log('media.close(' + currentSessionId + ') called');
     try {
-      await window.epoca.media.close(currentSessionId);
+      await window.host.media.close(currentSessionId);
       el.className = 'result';
       el.textContent = 'Session ' + currentSessionId + ' closed';
       currentSessionId = null;
@@ -439,18 +439,18 @@
   }
 
   // Listen for media events
-  if (window.epoca) {
-    window.epoca.on('mediaTrackReady', function(data) {
+  if (window.host) {
+    window.host.on('mediaTrackReady', function(data) {
       log('[event:mediaTrackReady] trackId=' + data.trackId + ' kind=' + data.kind);
     });
-    window.epoca.on('mediaError', function(data) {
+    window.host.on('mediaError', function(data) {
       log('[event:mediaError] sessionId=' + data.sessionId + ' error=' + data.error);
       var el = document.getElementById('media');
       el.className = 'result error';
       el.textContent = 'Error: ' + data.error;
     });
     // Show local peer ID for copy-paste into the other instance.
-    window.epoca.media.getPeerId().then(function(pid) {
+    window.host.media.getPeerId().then(function(pid) {
       document.getElementById('peer-id').className = 'result';
       document.getElementById('peer-id').textContent = 'Your peer ID: ' + pid;
       log('peer ID: ' + pid);
@@ -459,21 +459,21 @@
       document.getElementById('peer-id').textContent = 'peer ID error: ' + e.message;
     });
 
-    window.epoca.on('mediaConnected', function(data) {
+    window.host.on('mediaConnected', function(data) {
       log('[event:mediaConnected] sessionId=' + data.sessionId + ' peer=' + data.peer);
       var el = document.getElementById('connect');
       el.className = 'result';
       el.textContent = 'Connected! Session ' + data.sessionId + ' peer=' + data.peer;
     });
-    window.epoca.on('mediaRemoteTrack', function(data) {
+    window.host.on('mediaRemoteTrack', function(data) {
       log('[event:mediaRemoteTrack] sessionId=' + data.sessionId + ' trackId=' + data.trackId + ' kind=' + data.kind);
       if (data.kind === 'video') {
         var vid = document.getElementById('remote-video');
         vid.style.display = 'block';
-        window.epoca.media.attachTrack(data.trackId, 'remote-video');
+        window.host.media.attachTrack(data.trackId, 'remote-video');
       }
     });
-    window.epoca.on('mediaClosed', function(data) {
+    window.host.on('mediaClosed', function(data) {
       log('[event:mediaClosed] sessionId=' + data.sessionId + ' reason=' + data.reason);
       var el = document.getElementById('connect');
       el.className = 'result';

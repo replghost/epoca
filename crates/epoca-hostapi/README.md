@@ -133,7 +133,7 @@ a `MessageChannel` between the app SDK and the native host. It:
    `webkit.messageHandlers.epocaHostApi.postMessage(base64)`
 4. Receives native replies via `window.__epocaHostApiReply(base64)`
 
-This is the low-level binary transport bridge. The higher-level `window.epoca`
+This is the low-level binary transport bridge. The higher-level `window.host`
 JS API (with `sign()`, `getAddress()`, `chain.query()`, etc.) is
 application-specific and lives outside this crate.
 

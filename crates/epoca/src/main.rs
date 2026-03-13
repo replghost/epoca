@@ -1,7 +1,10 @@
+mod http;
+
 use gpui::*;
 use gpui_component::Root;
 use gpui_ui_kit::theme::ThemeState;
 use std::path::PathBuf;
+use std::sync::Arc;
 use epoca_core::workbench::{
     Workbench, WorkbenchRef, NewTab, CloseActiveTab, FocusUrlBar, Reload, HardReload,
     OpenSettings, OpenAppLibrary, OpenApp, FindInPage, ToggleReaderMode, OpenBookmarks, AddBookmark,
@@ -57,7 +60,19 @@ fn main() {
 
     env_logger::init();
 
-    let app = Application::new().with_assets(gpui_component_assets::Assets);
+    let http_client: Arc<dyn gpui::http_client::HttpClient> =
+        match http::UreqHttpClient::new() {
+            Ok(c) => Arc::new(c),
+            Err(e) => {
+                log::warn!("Failed to create HTTP client, favicons will not load: {e}");
+                // Fall back to a client that always fails; GPUI won't panic on images.
+                Arc::new(gpui::http_client::BlockedHttpClient::new())
+            }
+        };
+
+    let app = Application::new()
+        .with_assets(gpui_component_assets::Assets)
+        .with_http_client(http_client);
 
     // Parse CLI arguments
     let args: Vec<String> = std::env::args().collect();
@@ -101,8 +116,16 @@ fn main() {
         ui_theme.text_primary = rgba(0xffffffe0);
         ui_theme.text_secondary = rgba(0xffffff66);
         ui_theme.text_muted = rgba(0xffffff33);
+        ui_theme.text_on_accent = rgb(0xffffff);
+        ui_theme.icon_on_accent = rgb(0x1c1c1e);
         ui_theme.border = rgba(0xffffff14);
         ui_theme.border_hover = rgba(0xffffff28);
+        ui_theme.font_family = ".SystemUI".into();
+        ui_theme.alert_info_bg = rgb(0x1a2a3a);
+        ui_theme.alert_success_bg = rgba(0x00d4aa1a);
+        ui_theme.alert_warning_bg = rgba(0xf5a6231a);
+        ui_theme.alert_error_bg = rgba(0xe5534b1a);
+        ui_theme.code_text = rgb(0x00d4aa);
         cx.set_global(ThemeState { theme: ui_theme });
 
         // Install NSApp-level event monitor so Cmd+key shortcuts work even

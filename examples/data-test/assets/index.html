@@ -119,7 +119,7 @@
   // Get our peer ID
   async function init() {
     try {
-      const id = await window.epoca.data.getPeerId();
+      const id = await window.host.data.getPeerId();
       peerEl.textContent = id;
       log('Local peer ID: ' + id, 'log-ok');
     } catch (e) {
@@ -139,7 +139,7 @@
     connectBtn.disabled = true;
 
     try {
-      const result = await window.epoca.data.connect(peer);
+      const result = await window.host.data.connect(peer);
       connId = result;
       log('Connect initiated, conn_id=' + connId + ' (awaiting approval & signaling)', 'log-ok');
     } catch (e) {
@@ -156,7 +156,7 @@
     if (connId === null) { log('Not connected', 'log-err'); return; }
 
     try {
-      await window.epoca.data.send(connId, msg);
+      await window.host.data.send(connId, msg);
       log('Sent: ' + msg, 'log-msg');
       msgInput.value = '';
     } catch (e) {
@@ -168,7 +168,7 @@
   async function doClose() {
     if (connId === null) return;
     try {
-      await window.epoca.data.close(connId);
+      await window.host.data.close(connId);
       log('Connection closed', 'log-info');
     } catch (e) {
       log('Close failed: ' + e.message, 'log-err');
@@ -181,7 +181,7 @@
   }
 
   // Listen for data events
-  window.epoca.on('dataConnected', function(data) {
+  window.host.on('dataConnected', function(data) {
     log('Connected to peer: ' + data.peerAddress, 'log-ok');
     connId = data.connId;
     setStatus('on');
@@ -190,11 +190,11 @@
     sendBtn.disabled = false;
   });
 
-  window.epoca.on('dataMessage', function(data) {
+  window.host.on('dataMessage', function(data) {
     log('Received: ' + data.data, 'log-recv');
   });
 
-  window.epoca.on('dataClosed', function(data) {
+  window.host.on('dataClosed', function(data) {
     log('Connection closed: ' + (data.reason || 'unknown'), 'log-info');
     connId = null;
     setStatus('off');
@@ -203,7 +203,7 @@
     sendBtn.disabled = true;
   });
 
-  window.epoca.on('dataError', function(data) {
+  window.host.on('dataError', function(data) {
     log('Error: ' + data.error, 'log-err');
     connId = null;
     setStatus('off');

@@ -4,7 +4,7 @@
 //! Assets are served from the in-memory `.prod` bundle via the `epocaapp://` scheme.
 //! The page origin is `epocaapp://<app_id>/` — no HTTP origin to escape from.
 //! A `block-all` WKContentRuleList prevents any outbound HTTP(S) requests.
-//! The host API (`window.epoca`) is injected at document start.
+//! The host API (`window.host`) is injected at document start.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -273,11 +273,11 @@ pub fn install_block_all_rule(uc: *mut objc2::runtime::AnyObject) {
 }
 
 // ---------------------------------------------------------------------------
-// Host API injection script — window.epoca
+// Host API injection script — window.host
 // ---------------------------------------------------------------------------
 
 /// JavaScript injected at document start into every SPA WebView.
-/// Provides `window.epoca` with methods that communicate back to the Rust host
+/// Provides `window.host` with methods that communicate back to the Rust host
 /// via WKScriptMessageHandler.
 pub const HOST_API_SCRIPT: &str = r#"
 (function() {
@@ -304,7 +304,7 @@ pub const HOST_API_SCRIPT: &str = r#"
 
     if (window.__epocaHostApi) return;
     window.__epocaHostApi = true;
-    console.log('[epoca-host-api] window.epoca being defined');
+    console.log('[epoca-host-api] window.host being defined');
 
     // Correlation ID counter for request/response matching.
     let _nextId = 1;
@@ -348,7 +348,7 @@ pub const HOST_API_SCRIPT: &str = r#"
         configurable: false
     });
 
-    window.epoca = Object.freeze({
+    window.host = Object.freeze({
         // Request the host to sign a payload. Returns the signature.
         // The user will see a confirmation dialog before signing proceeds.
         sign: function(payload) {
@@ -485,7 +485,7 @@ pub const HOST_API_SCRIPT: &str = r#"
 "#;
 
 // ---------------------------------------------------------------------------
-// epocaHost WKScriptMessageHandler — receives calls from window.epoca
+// epocaHost WKScriptMessageHandler — receives calls from window.host
 // ---------------------------------------------------------------------------
 
 /// Channel for host API calls from SPA WebViews.

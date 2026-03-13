@@ -241,14 +241,14 @@
     try { var _pc = new _f.contentWindow.RTCPeerConnection({iceServers:[]}); _pc.close(); log('iframe RTC constructor: OK'); } catch(e) { log('iframe RTC constructor: ' + e.message); }
     _f.remove();
 
-    if (!window.epoca) {
-      setStatus('window.epoca not available', 'err');
+    if (!window.host) {
+      setStatus('window.host not available', 'err');
       return;
     }
 
     // 1. Get identity
     try {
-      myAddr = await window.epoca.getAddress();
+      myAddr = await window.host.getAddress();
       var short = myAddr.slice(0, 8) + '...' + myAddr.slice(-6);
       document.getElementById('identity').textContent = short;
       document.getElementById('identity').title = myAddr;
@@ -264,7 +264,7 @@
     log('peer ID: ' + myPeerId);
 
     // 3. Listen for events
-    window.epoca.on('statement', function(data) {
+    window.host.on('statement', function(data) {
       log('stmt: ' + (data.author||'?').slice(0,8) + ' ' + data.data.slice(0,60));
       var isSelf = data.author === myAddr;
       try {
@@ -280,17 +280,17 @@
       }
     });
 
-    window.epoca.on('mediaTrackReady', function(data) {
+    window.host.on('mediaTrackReady', function(data) {
       log('track ready: ' + data.trackId + ' ' + data.kind);
       if (data.trackId === pendingVideoTrackId && data.kind === 'video') {
         pendingVideoTrackId = null;
-        window.epoca.media.attachTrack(data.trackId, 'local-video');
+        window.host.media.attachTrack(data.trackId, 'local-video');
         setVideoStatus('Camera ready — enter a peer ID and click Call');
         document.getElementById('call-btn').disabled = false;
       }
     });
 
-    window.epoca.on('mediaIncomingCall', function(data) {
+    window.host.on('mediaIncomingCall', function(data) {
       log('incoming call from ' + data.peer + ' session=' + data.sessionId);
       currentSessionId = data.sessionId;
       setVideoStatus('Incoming call from ' + data.peer);
@@ -298,7 +298,7 @@
       document.getElementById('call-btn').disabled = true;
     });
 
-    window.epoca.on('mediaConnected', function(data) {
+    window.host.on('mediaConnected', function(data) {
       log('connected! session=' + data.sessionId + ' peer=' + data.peer);
       currentSessionId = data.sessionId;
       setVideoStatus('Connected to ' + data.peer);
@@ -306,17 +306,17 @@
       document.getElementById('call-btn').disabled = true;
     });
 
-    window.epoca.on('mediaRemoteTrack', function(data) {
+    window.host.on('mediaRemoteTrack', function(data) {
       log('remote track: ' + data.trackId + ' ' + data.kind);
       if (data.kind === 'video') {
         document.getElementById('remote-box').style.display = '';
         document.getElementById('remote-label').textContent = 'Remote';
-        window.epoca.media.attachTrack(data.trackId, 'remote-video');
+        window.host.media.attachTrack(data.trackId, 'remote-video');
         setVideoStatus('Video connected');
       }
     });
 
-    window.epoca.on('mediaClosed', function(data) {
+    window.host.on('mediaClosed', function(data) {
       log('session closed: ' + data.reason);
       setVideoStatus('Call ended: ' + data.reason);
       document.getElementById('remote-box').style.display = 'none';
@@ -325,14 +325,14 @@
       currentSessionId = null;
     });
 
-    window.epoca.on('mediaError', function(data) {
+    window.host.on('mediaError', function(data) {
       log('media error: ' + data.error);
       setVideoStatus('Error: ' + data.error);
     });
 
     // 4. Subscribe to chat channel
     try {
-      await window.epoca.statements.subscribe(CHANNEL);
+      await window.host.statements.subscribe(CHANNEL);
       setStatus('connected', 'value');
       log('subscribed to: ' + CHANNEL);
     } catch (e) {
@@ -349,7 +349,7 @@
 
     // 6. Announce join (include peer ID so others can call us)
     try {
-      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'join', peerId: myPeerId}));
+      await window.host.statements.write(CHANNEL, JSON.stringify({type: 'join', peerId: myPeerId}));
       addMessage(null, 'You joined the room', false, true);
     } catch (e) {
       log('join write error: ' + e.message);
@@ -363,7 +363,7 @@
     if (!text) return;
     input.value = '';
     try {
-      await window.epoca.statements.write(CHANNEL, JSON.stringify({type: 'msg', text: text}));
+      await window.host.statements.write(CHANNEL, JSON.stringify({type: 'msg', text: text}));
     } catch (e) {
       addMessage(null, 'Send failed: ' + e.message, false, true);
     }
@@ -379,7 +379,7 @@
   async function startCamera() {
     setVideoStatus('Starting camera...');
     try {
-      var result = await window.epoca.media.getUserMedia({ audio: true, video: true });
+      var result = await window.host.media.getUserMedia({ audio: true, video: true });
       log('getUserMedia: ' + JSON.stringify(result));
       localTrackIds = [];
       if (result.audioTrackId) localTrackIds.push(result.audioTrackId);
@@ -405,7 +405,7 @@
     setVideoStatus('Calling ' + peer + '...');
     log('calling peer: ' + peer + ' with tracks: ' + JSON.stringify(localTrackIds));
     try {
-      currentSessionId = await window.epoca.media.connect(peer, localTrackIds);
+      currentSessionId = await window.host.media.connect(peer, localTrackIds);
       log('session created: ' + currentSessionId);
       setVideoStatus('Signaling... session=' + currentSessionId);
       document.getElementById('hangup-btn').style.display = '';
@@ -419,7 +419,7 @@
     if (!currentSessionId) return;
     log('hanging up session ' + currentSessionId);
     try {
-      await window.epoca.media.close(currentSessionId);
+      await window.host.media.close(currentSessionId);
     } catch (e) {
       log('close error: ' + (e.message || e));
     }

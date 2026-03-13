@@ -2,7 +2,7 @@
 //!
 //! Manages media sessions (getUserMedia, peer connections) by orchestrating
 //! the WKWebView's built-in WebRTC stack via evaluateScript. App code only
-//! sees opaque track/session IDs through window.epoca.media.*.
+//! sees opaque track/session IDs through window.host.media.*.
 //!
 //! MediaConnect flow:
 //! 1. App calls media.connect(peer, trackIds) → session_id

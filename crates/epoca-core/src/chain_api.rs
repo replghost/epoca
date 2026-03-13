@@ -1,6 +1,6 @@
 //! Chain API for sandboxed SPA tabs.
 //!
-//! Apps call `window.epoca.chain.query(method, params)` which routes through
+//! Apps call `window.host.chain.query(method, params)` which routes through
 //! the host's light client. This module handles permission checks, method
 //! allowlisting, and routing between the workbench drain loop and the
 //! chain client threads via `epoca_chain::rpc_bridge`.

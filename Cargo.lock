@@ -2747,6 +2747,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b4b0fc281743d80256607bd65e8beedc42cb0787ea119c85b81b4c0eab85e5f"
 
 [[package]]
+name = "chacha20poly1305"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
+dependencies = [
+ "aead",
+ "chacha20",
+ "cipher",
+ "poly1305",
+ "zeroize",
+]
+
+[[package]]
 name = "chrono"
 version = "0.4.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4195,12 +4208,17 @@ dependencies = [
  "epoca-protocol",
  "epoca-sandbox",
  "epoca-wallet",
+ "futures",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
  "gpui-ui-kit",
+ "gpui_http_client",
+ "http 1.4.0",
  "log",
  "sentry",
+ "smol",
+ "ureq",
 ]
 
 [[package]]
@@ -4361,7 +4379,9 @@ dependencies = [
  "bip39",
  "blake2",
  "bs58",
+ "chacha20poly1305",
  "core-foundation 0.10.0",
+ "hex",
  "k256",
  "log",
  "objc2 0.5.2",
@@ -4371,8 +4391,10 @@ dependencies = [
  "security-framework 3.7.0",
  "security-framework-sys",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "sha3",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -5728,22 +5750,20 @@ dependencies = [
 
 [[package]]
 name = "gpui-ui-kit"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f20d7b4ed7d57ac7ecff6706ebbae7c209d82ab13c85eea859f2ce5bd9d838e"
+version = "0.6.12"
 dependencies = [
  "gpui",
  "gpui-ui-kit-macros",
+ "qrcode",
  "serde",
  "serde_json",
+ "smol",
  "uuid",
 ]
 
 [[package]]
 name = "gpui-ui-kit-macros"
-version = "0.5.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "90e24d68e32c926389c7daad60a526bb0b0d7f565d0a7e28e169d5fde14262c5"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9892,6 +9912,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+dependencies = [
+ "image",
 ]
 
 [[package]]

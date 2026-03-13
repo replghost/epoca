@@ -1,7 +1,7 @@
 //! Statements API for sandboxed SPA tabs.
 //!
-//! Apps call `window.epoca.statements.write(channel, data)` and
-//! `window.epoca.statements.subscribe(channel)` for pub/sub messaging.
+//! Apps call `window.host.statements.write(channel, data)` and
+//! `window.host.statements.subscribe(channel)` for pub/sub messaging.
 //!
 //! Dual-path delivery:
 //! 1. **Local** — in-memory pub/sub for same-host subscribers (instant).
@@ -256,9 +256,6 @@ pub fn write(
     if channel.is_empty() {
         return Err("channel name cannot be empty".into());
     }
-    if channel.contains('/') {
-        return Err("channel name must not contain '/'".into());
-    }
 
     let key = channel_key(app_id, channel);
     let now = std::time::SystemTime::now()
@@ -309,9 +306,6 @@ pub fn subscribe(
     if channel.is_empty() {
         return Err("channel name cannot be empty".into());
     }
-    if channel.contains('/') {
-        return Err("channel name must not contain '/'".into());
-    }
 
     let key = channel_key(app_id, channel);
     let mut st = state().lock().unwrap();
@@ -344,9 +338,6 @@ pub fn subscribe_direct(
 ) -> Result<(u64, mpsc::Receiver<Statement>), String> {
     if channel.is_empty() {
         return Err("channel name cannot be empty".into());
-    }
-    if channel.contains('/') {
-        return Err("channel name must not contain '/'".into());
     }
 
     let key = channel_key(app_id, channel);

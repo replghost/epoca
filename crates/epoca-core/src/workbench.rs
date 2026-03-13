@@ -219,6 +219,19 @@ pub(crate) struct PendingHostApiSign {
     pub payload: Vec<u8>,
 }
 
+/// Which approval a paired sign result corresponds to.
+enum PairedSignKind {
+    Spa { webview_ptr: usize, id: u64, app_id: String },
+    WalletSign { webview_ptr: usize, id: u64 },
+    HostApi { webview_ptr: usize, request_id: String, request_tag: u8, app_id: String },
+}
+
+/// In-flight paired sign request — polled each frame via `try_recv`.
+struct PendingPairedSign {
+    kind: PairedSignKind,
+    result_rx: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
+}
+
 /// A pending WSS permission request awaiting user confirmation.
 struct PendingWssPermission {
     app_id: String,
@@ -329,6 +342,8 @@ pub struct Workbench {
     pending_hostapi_sign: Option<PendingHostApiSign>,
     pending_wss_permission: Option<PendingWssPermission>,
     pending_http_permission: Option<PendingHttpPermission>,
+    /// In-flight paired wallet sign — polled each frame until complete.
+    pending_paired_sign: Option<PendingPairedSign>,
     /// Active dot-loading tab state — holds bundle waiting for user approval.
     pending_dot_load: Option<PendingDotLoad>,
     /// Monotonically increasing counter for dot-load requests; detached DOTNS
@@ -355,6 +370,18 @@ pub struct Workbench {
     // Tab drag-to-reorder
     /// Tab being dragged (by tab id), start y, current y in sidebar coordinates.
     dragging_tab: Option<DragState>,
+
+    // Toast notifications
+    toasts: Vec<ToastEntry>,
+    toast_counter: u64,
+}
+
+struct ToastEntry {
+    id: u64,
+    message: String,
+    variant: gpui_ui_kit::ToastVariant,
+    created_at: std::time::Instant,
+    duration: std::time::Duration,
 }
 
 /// State for an in-progress tab drag-to-reorder operation.
@@ -531,6 +558,7 @@ impl Workbench {
             pending_hostapi_sign: None,
             pending_wss_permission: None,
             pending_http_permission: None,
+            pending_paired_sign: None,
             pending_dot_load: None,
             dot_load_generation: 0,
             approved_dot_apps: crate::session::load_approved_apps(),
@@ -542,6 +570,8 @@ impl Workbench {
             wallet_popover_open: false,
             page_info_open: false,
             dragging_tab: None,
+            toasts: Vec::new(),
+            toast_counter: 0,
         }
     }
 
@@ -1072,7 +1102,7 @@ impl Workbench {
             }
         }
 
-        // Drain SPA host API calls (window.epoca.* → epocaHost WKScriptMessageHandler)
+        // Drain SPA host API calls (window.host.* → epocaHost WKScriptMessageHandler)
         let spa_events = crate::spa::drain_spa_host_events();
         if !spa_events.is_empty() {
             log::info!("[sign-debug] drained {} spa_events", spa_events.len());
@@ -1104,7 +1134,14 @@ impl Workbench {
                                 if matches!(wg.manager.state(), epoca_wallet::WalletState::Locked) {
                                     let _ = wg.manager.unlock();
                                 }
-                                let addr = wg.manager.app_address(&app_id).map_err(|e| e.to_string());
+                                // For Paired wallets, use the paired address directly —
+                                // there is no local keypair to derive a per-app address from.
+                                // For Local wallets, derive a per-app address as before.
+                                let addr = if matches!(wg.manager.source, epoca_wallet::WalletSource::Paired { .. }) {
+                                    wg.manager.active_address().map_err(|e| e.to_string())
+                                } else {
+                                    wg.manager.app_address(&app_id).map_err(|e| e.to_string())
+                                };
                                 let rpk = wg.manager.root_public_key();
                                 (addr, rpk)
                             } else {
@@ -1371,7 +1408,7 @@ impl Workbench {
                 continue;
             }
 
-            // Standard JSON-path response (window.epoca.chain.query).
+            // Standard JSON-path response (window.host.chain.query).
             let js = match result {
                 Ok(val) => {
                     let json = serde_json::to_string(&val).unwrap_or_else(|_| "null".into());
@@ -1993,6 +2030,9 @@ impl Workbench {
             if orphaned { cx.notify(); }
         }
 
+        // Poll paired wallet sign result (non-blocking).
+        self.poll_pending_paired_sign(cx);
+
         // Drain test server commands (no-op unless feature = "test-server")
         #[cfg(feature = "test-server")]
         crate::test_server::drain_test_commands(self, window, cx);
@@ -2451,6 +2491,15 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
         let tab = self.tabs.remove(src_idx);
         let clamped = target_idx.min(self.tabs.len());
         self.tabs.insert(clamped, tab);
+    }
+
+    fn toggle_pin_tab(&mut self, tab_id: u64, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.pinned = !tab.pinned;
+            let msg = if tab.pinned { "Tab pinned" } else { "Tab unpinned" };
+            self.show_toast(msg, gpui_ui_kit::ToastVariant::Info, 1.5, cx);
+            cx.notify();
+        }
     }
 
     pub fn new_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4518,11 +4567,40 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 }));
 
             let icon_color = if is_active { icon_active } else { icon_muted };
-            // favicon_url is tracked but display requires fetching bytes via
-            // reqwest + gpui::Image::from_bytes (backlogged). Show the fallback
-            // icon for now.
-            let _ = favicon_url;
             let is_dragging = dragging_id == Some(tab_id);
+
+            // Build the tab icon: show the site favicon when available, fall back
+            // to the generic icon. GPUI's img() fetches the URL asynchronously via
+            // the registered HttpClient; with_fallback() handles load failures.
+            let tab_icon: AnyElement = if let Some(ref url) = favicon_url {
+                // Clone icon so the fallback closure (Fn, not FnOnce) can call it repeatedly.
+                let fallback_icon = icon.clone();
+                div()
+                    .w(px(15.0))
+                    .h(px(15.0))
+                    .rounded(px(3.0))
+                    .bg(rgba(0xffffffdd))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .flex_shrink_0()
+                    .child(
+                        img(url.clone())
+                            .w(px(13.0))
+                            .h(px(13.0))
+                            .rounded(px(2.0))
+                            .with_fallback(move || {
+                                Icon::new(fallback_icon.clone())
+                                    .size(px(13.0))
+                                    .text_color(icon_color)
+                                    .into_any_element()
+                            }),
+                    )
+                    .into_any_element()
+            } else {
+                Icon::new(icon).size(px(13.0)).text_color(icon_color).into_any_element()
+            };
+
             div()
                 .id(ElementId::Integer(tab_id))
                 .flex()
@@ -4541,9 +4619,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .when_some(context_color, |d, color| {
                     d.child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(color).flex_shrink_0())
                 })
-                .child(
-                    Icon::new(icon).size(px(13.0)).text_color(icon_color),
-                )
+                .child(tab_icon)
                 .child(
                     div()
                         .flex_1()
@@ -4594,6 +4670,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                         current_y: ev.position.y.as_f32(),
                     });
                     cx.notify();
+                }))
+                // Right-click to toggle pin
+                .on_mouse_up(gpui::MouseButton::Right, cx.listener(move |this, _ev: &gpui::MouseUpEvent, _window, cx| {
+                    this.toggle_pin_tab(tab_id, cx);
                 }))
                 .on_click(cx.listener(move |this, _ev, window, cx| {
                     // Only switch tab if we weren't actively dragging.
@@ -4687,6 +4767,7 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
             }));
 
         // ── Bottom toolbar ────────────────────────────────────────────────
+        let identity_chip = self.render_identity_chip(cx);
         let bottom_bar = div()
             .flex()
             .items_center()
@@ -4704,7 +4785,9 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_settings(window, cx);
                     })),
-            );
+            )
+            .child(div().flex_1())
+            .children(identity_chip);
 
         // ── Assemble ──────────────────────────────────────────────────────
         let tabs_area = div()
@@ -5365,8 +5448,10 @@ setTimeout(function(){{r.remove();}},420);}})()"#,
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_color(cx.theme().muted_foreground)
-                .child("Open a tab to get started");
+                .child(
+                    gpui_ui_kit::EmptyState::new("Open a tab to get started")
+                        .description("Press Cmd+T or use File > New Tab")
+                );
         }
 
         div()
@@ -5523,6 +5608,19 @@ impl Workbench {
         cx.notify();
     }
 
+    /// Show a transient toast notification. Auto-dismisses after `duration_secs`.
+    fn show_toast(&mut self, message: impl Into<String>, variant: gpui_ui_kit::ToastVariant, duration_secs: f32, cx: &mut Context<Self>) {
+        self.toast_counter += 1;
+        self.toasts.push(ToastEntry {
+            id: self.toast_counter,
+            message: message.into(),
+            variant,
+            created_at: std::time::Instant::now(),
+            duration: std::time::Duration::from_secs_f32(duration_secs),
+        });
+        cx.notify();
+    }
+
     fn lock_wallet(&mut self, cx: &mut Context<Self>) {
         if cx.has_global::<crate::wallet::WalletGlobal>() {
             cx.global_mut::<crate::wallet::WalletGlobal>().manager.lock();
@@ -5534,6 +5632,7 @@ impl Workbench {
             }
         }
         self.wallet_popover_open = false;
+        self.show_toast("Wallet locked", gpui_ui_kit::ToastVariant::Info, 2.0, cx);
         cx.notify();
     }
 
@@ -5607,6 +5706,88 @@ impl Workbench {
                                 })),
                         ),
                 ),
+        )
+    }
+
+    /// Render the identity chip for the sidebar bottom bar.
+    ///
+    /// Returns `None` when the experimental wallet is disabled or the wallet is
+    /// not in Paired mode. Only Paired wallets show a chip; Local wallets rely
+    /// on the Settings icon alone.
+    fn render_identity_chip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // Only show when the wallet feature is enabled.
+        let wallet_enabled = cx
+            .try_global::<crate::settings::SettingsGlobal>()
+            .map(|g| g.settings.experimental_wallet)
+            .unwrap_or(false);
+        if !wallet_enabled {
+            return None;
+        }
+
+        let source = cx
+            .try_global::<crate::wallet::WalletGlobal>()
+            .map(|wg| wg.manager.source.clone())?;
+
+        let (address, display_name) = match source {
+            epoca_wallet::WalletSource::Paired { address, display_name } => (address, display_name),
+            epoca_wallet::WalletSource::Local => return None,
+        };
+
+        // Build display label: prefer display_name, fall back to truncated address.
+        let label = if !display_name.is_empty() {
+            if display_name.chars().count() > 12 {
+                format!("{}…", display_name.chars().take(12).collect::<String>())
+            } else {
+                display_name
+            }
+        } else if !address.is_empty() {
+            let end = address.char_indices().nth(6).map(|(i, _)| i).unwrap_or(address.len());
+            format!("{}…", &address[..end])
+        } else {
+            "Wallet".to_string()
+        };
+
+        let dot_color = if !address.is_empty() {
+            rgba(0x00d4aaff_u32) // accent teal — connected
+        } else {
+            rgba(0xffffff66_u32) // muted — no address yet
+        };
+
+        let text_color = if !address.is_empty() {
+            rgba(0xffffffcc_u32)
+        } else {
+            rgba(0xffffff66_u32)
+        };
+
+        Some(
+            div()
+                .id("identity-chip")
+                .flex()
+                .items_center()
+                .gap(px(5.0))
+                .px(px(6.0))
+                .py(px(2.0))
+                .rounded(px(4.0))
+                .cursor_pointer()
+                .hover(|d| d.bg(rgba(0xffffff0f_u32)))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.wallet_popover_open = !this.wallet_popover_open;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .w(px(7.0))
+                        .h(px(7.0))
+                        .rounded_full()
+                        .bg(dot_color),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(text_color)
+                        .child(label),
+                )
+                .into_any_element(),
         )
     }
 
@@ -5719,8 +5900,9 @@ impl Workbench {
                                             .size(px(12.0))
                                             .text_color(rgba(0xffffff44u32)),
                                     )
-                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, _, cx| {
                                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(addr_for_copy.clone()));
+                                        this.show_toast("Address copied", gpui_ui_kit::ToastVariant::Success, 2.0, cx);
                                     })),
                             ),
                     )
@@ -5825,6 +6007,7 @@ impl Workbench {
             || self.pending_hostapi_sign.is_some()
             || self.pending_wss_permission.is_some()
             || self.pending_http_permission.is_some()
+            || self.pending_paired_sign.is_some()
     }
 
     fn is_pending_high_risk(&self) -> bool {
@@ -6194,6 +6377,38 @@ impl Workbench {
 }
 
 // ---------------------------------------------------------------------------
+// Paired sign helper
+// ---------------------------------------------------------------------------
+
+/// Build a `PairedSignConfig` that routes through the Statement Store.
+///
+/// Uses `app_id = "__host__"` so paired sign traffic is namespaced away from
+/// SPA channels and shares the host's Statement Store key allowance.
+fn build_paired_sign_config() -> epoca_wallet::pairing::PairedSignConfig {
+    let subscribe = Box::new(|channel: &str| -> Result<(u64, std::sync::mpsc::Receiver<(String, String)>), String> {
+        let (sub_id, stmt_rx) = crate::statements_api::subscribe_direct("__host__", channel)
+            .map_err(|e| e.to_string())?;
+        // Bridge Statement → (author, data) to match PairedSignConfig's signature.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<(String, String)>(64);
+        std::thread::spawn(move || {
+            while let Ok(stmt) = stmt_rx.recv() {
+                if tx.send((stmt.author.clone(), stmt.data.clone())).is_err() {
+                    break;
+                }
+            }
+        });
+        Ok((sub_id, rx))
+    });
+    let unsubscribe = Box::new(|sub_id: u64| {
+        crate::statements_api::unsubscribe(sub_id);
+    });
+    let write = Box::new(|channel: &str, data: &str| -> Result<(), String> {
+        crate::statements_api::write("__host__", "__paired__", channel, data)
+    });
+    epoca_wallet::pairing::PairedSignConfig { write, subscribe, unsubscribe }
+}
+
+// ---------------------------------------------------------------------------
 // Wallet sign confirmation dialog
 // ---------------------------------------------------------------------------
 impl Workbench {
@@ -6205,25 +6420,49 @@ impl Workbench {
             return;
         }
 
-        let result = if req.method == "signRaw" {
-            // Parse raw.data from params JSON
-            self.wallet_sign_raw(&req.params_json, cx)
-        } else {
-            // signPayload — sign the method (call data) hex bytes
-            self.wallet_sign_payload(&req.params_json, cx)
-        };
+        let is_paired = matches!(
+            cx.global::<crate::wallet::WalletGlobal>().manager.source,
+            epoca_wallet::WalletSource::Paired { .. }
+        );
 
-        match result {
-            Ok(sig_hex) => {
-                // Return { id: 1, signature: "0x01..." } — 0x01 prefix = sr25519 type byte
-                let js = format!(
-                    "window.__epocaWalletResolve({}, null, {{id: 1, signature: '0x01{}'}})",
-                    req.id, sig_hex.strip_prefix("0x").unwrap_or(&sig_hex),
-                );
-                self.evaluate_on_webview(req.webview_ptr, &js, cx);
+        if is_paired {
+            // Extract the bytes to sign, then forward to the paired mobile wallet.
+            match Self::extract_wallet_sign_bytes(&req.method, &req.params_json) {
+                Err(e) => {
+                    self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err(&e), cx);
+                }
+                Ok(payload) => {
+                    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                    let config = build_paired_sign_config();
+                    epoca_wallet::pairing::sign_via_paired(payload, config, tx);
+                    self.pending_paired_sign = Some(PendingPairedSign {
+                        kind: PairedSignKind::WalletSign {
+                            webview_ptr: req.webview_ptr,
+                            id: req.id,
+                        },
+                        result_rx: rx,
+                    });
+                }
             }
-            Err(e) => {
-                self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err(&e), cx);
+        } else {
+            let result = if req.method == "signRaw" {
+                self.wallet_sign_raw(&req.params_json, cx)
+            } else {
+                self.wallet_sign_payload(&req.params_json, cx)
+            };
+
+            match result {
+                Ok(sig_hex) => {
+                    // Return { id: 1, signature: "0x01..." } — 0x01 prefix = sr25519 type byte
+                    let js = format!(
+                        "window.__epocaWalletResolve({}, null, {{id: 1, signature: '0x01{}'}})",
+                        req.id, sig_hex.strip_prefix("0x").unwrap_or(&sig_hex),
+                    );
+                    self.evaluate_on_webview(req.webview_ptr, &js, cx);
+                }
+                Err(e) => {
+                    self.resolve_wallet_sign_js(req.webview_ptr, req.id, Err(&e), cx);
+                }
             }
         }
         cx.notify();
@@ -6244,23 +6483,44 @@ impl Workbench {
             return;
         }
 
-        let result = cx
-            .global_mut::<crate::wallet::WalletGlobal>()
-            .manager
-            .sign(&req.app_id, req.payload.as_bytes());
+        let is_paired = matches!(
+            cx.global::<crate::wallet::WalletGlobal>().manager.source,
+            epoca_wallet::WalletSource::Paired { .. }
+        );
 
-        match result {
-            Ok(sig_bytes) => {
-                let sig_hex = hex_encode(&sig_bytes);
-                let js = format!(
-                    "window.__epocaResolve({}, null, '0x{}')",
-                    req.id, sig_hex,
-                );
-                self.evaluate_on_spa(req.webview_ptr, &js, cx);
-            }
-            Err(e) => {
-                let msg = e.to_string().replace('\'', "\\'");
-                self.resolve_spa_js(req.webview_ptr, req.id, Err(&msg), cx);
+        if is_paired {
+            // Route through the mobile wallet via Statement Store.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let payload = req.payload.as_bytes().to_vec();
+            let config = build_paired_sign_config();
+            epoca_wallet::pairing::sign_via_paired(payload, config, tx);
+            self.pending_paired_sign = Some(PendingPairedSign {
+                kind: PairedSignKind::Spa {
+                    webview_ptr: req.webview_ptr,
+                    id: req.id,
+                    app_id: req.app_id,
+                },
+                result_rx: rx,
+            });
+        } else {
+            let result = cx
+                .global_mut::<crate::wallet::WalletGlobal>()
+                .manager
+                .sign(&req.app_id, req.payload.as_bytes());
+
+            match result {
+                Ok(sig_bytes) => {
+                    let sig_hex = hex_encode(&sig_bytes);
+                    let js = format!(
+                        "window.__epocaResolve({}, null, '0x{}')",
+                        req.id, sig_hex,
+                    );
+                    self.evaluate_on_spa(req.webview_ptr, &js, cx);
+                }
+                Err(e) => {
+                    let msg = e.to_string().replace('\'', "\\'");
+                    self.resolve_spa_js(req.webview_ptr, req.id, Err(&msg), cx);
+                }
             }
         }
         cx.notify();
@@ -6274,6 +6534,24 @@ impl Workbench {
 
     fn approve_chain_submit(&mut self, cx: &mut Context<Self>) {
         let Some(req) = self.pending_chain_submit.take() else { return };
+
+        // Chain submit with a paired wallet is not yet supported — the full
+        // extrinsic build pipeline signs locally with `sign_root`. Reject early.
+        if cx.has_global::<crate::wallet::WalletGlobal>()
+            && matches!(
+                cx.global::<crate::wallet::WalletGlobal>().manager.source,
+                epoca_wallet::WalletSource::Paired { .. }
+            )
+        {
+            self.resolve_spa_js(
+                req.webview_ptr,
+                req.id,
+                Err("chain submit not supported with paired wallet"),
+                cx,
+            );
+            cx.notify();
+            return;
+        }
 
         // Get the wallet's SS58 address for the nonce query.
         let address = if cx.has_global::<crate::wallet::WalletGlobal>() {
@@ -6731,25 +7009,47 @@ impl Workbench {
         let Some(req) = self.pending_hostapi_sign.take() else { return };
         let is_raw = req.request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
 
-        let response = if cx.has_global::<crate::wallet::WalletGlobal>() {
-            match cx
-                .global_mut::<crate::wallet::WalletGlobal>()
-                .manager
-                .sign_root(&req.payload)
-            {
-                Ok(sig) => {
-                    log::info!("hostapi: signed {} bytes for app {}", sig.len(), req.app_id);
-                    epoca_hostapi::protocol::encode_sign_response(&req.request_id, is_raw, &sig)
-                }
-                Err(e) => {
-                    log::warn!("hostapi: sign failed: {e}");
-                    epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
-                }
-            }
+        let is_paired = cx.has_global::<crate::wallet::WalletGlobal>()
+            && matches!(
+                cx.global::<crate::wallet::WalletGlobal>().manager.source,
+                epoca_wallet::WalletSource::Paired { .. }
+            );
+
+        if is_paired {
+            // Forward to the paired mobile wallet asynchronously.
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let config = build_paired_sign_config();
+            epoca_wallet::pairing::sign_via_paired(req.payload, config, tx);
+            self.pending_paired_sign = Some(PendingPairedSign {
+                kind: PairedSignKind::HostApi {
+                    webview_ptr: req.webview_ptr,
+                    request_id: req.request_id,
+                    request_tag: req.request_tag,
+                    app_id: req.app_id,
+                },
+                result_rx: rx,
+            });
         } else {
-            epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
-        };
-        crate::host::send_response(req.webview_ptr, &response);
+            let response = if cx.has_global::<crate::wallet::WalletGlobal>() {
+                match cx
+                    .global_mut::<crate::wallet::WalletGlobal>()
+                    .manager
+                    .sign_root(&req.payload)
+                {
+                    Ok(sig) => {
+                        log::info!("hostapi: signed {} bytes for app {}", sig.len(), req.app_id);
+                        epoca_hostapi::protocol::encode_sign_response(&req.request_id, is_raw, &sig)
+                    }
+                    Err(e) => {
+                        log::warn!("hostapi: sign failed: {e}");
+                        epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
+                    }
+                }
+            } else {
+                epoca_hostapi::protocol::encode_sign_error(&req.request_id, is_raw)
+            };
+            crate::host::send_response(req.webview_ptr, &response);
+        }
         cx.notify();
     }
 
@@ -6947,6 +7247,54 @@ impl Workbench {
         }
     }
 
+    /// Extract the raw bytes to sign from a wallet sign request (without signing).
+    ///
+    /// Returns the same bytes that `wallet_sign_raw` / `wallet_sign_payload` would
+    /// pass to `sign_root`, suitable for forwarding to the paired mobile wallet.
+    fn extract_wallet_sign_bytes(method: &str, params_json: &str) -> Result<Vec<u8>, String> {
+        if method == "signRaw" {
+            let parsed: serde_json::Value = serde_json::from_str(params_json)
+                .map_err(|e| format!("invalid params: {e}"))?;
+            let data_hex = parsed["raw"]["data"]
+                .as_str()
+                .ok_or_else(|| "missing raw.data".to_string())?;
+            let data_hex = data_hex.strip_prefix("0x").unwrap_or(data_hex);
+            hex_decode(data_hex).map_err(|e| format!("invalid hex: {e}"))
+        } else {
+            // signPayload — assemble the Substrate signing payload.
+            let parsed: serde_json::Value = serde_json::from_str(params_json)
+                .map_err(|e| format!("invalid params: {e}"))?;
+            let payload = &parsed["payload"];
+            let method_bytes = decode_hex_field(payload, "method")?;
+            let era = decode_hex_field(payload, "era")?;
+            let nonce = decode_compact_or_hex(payload, "nonce")?;
+            let tip = decode_compact_or_hex(payload, "tip")?;
+            let spec_version = decode_u32_le(payload, "specVersion")?;
+            let tx_version = decode_u32_le(payload, "transactionVersion")?;
+            let genesis_hash = decode_hex_field(payload, "genesisHash")?;
+            let block_hash = decode_hex_field(payload, "blockHash")?;
+
+            let mut signing_payload = Vec::new();
+            signing_payload.extend_from_slice(&method_bytes);
+            signing_payload.extend_from_slice(&era);
+            signing_payload.extend_from_slice(&nonce);
+            signing_payload.extend_from_slice(&tip);
+            signing_payload.extend_from_slice(&spec_version);
+            signing_payload.extend_from_slice(&tx_version);
+            signing_payload.extend_from_slice(&genesis_hash);
+            signing_payload.extend_from_slice(&block_hash);
+
+            // Substrate: hash with blake2b-256 if > 256 bytes.
+            if signing_payload.len() > 256 {
+                use blake2::Digest;
+                let hash = blake2::Blake2b::<blake2::digest::consts::U32>::digest(&signing_payload);
+                Ok(hash.to_vec())
+            } else {
+                Ok(signing_payload)
+            }
+        }
+    }
+
     fn wallet_sign_raw(&mut self, params_json: &str, cx: &mut Context<Self>) -> Result<String, String> {
         // params_json: {"raw":{"address":"...","data":"0x...","type":"bytes"}}
         let parsed: serde_json::Value = serde_json::from_str(params_json)
@@ -7008,6 +7356,69 @@ impl Workbench {
         let sig_bytes = wg.manager.sign_root(&to_sign)
             .map_err(|e| e.to_string())?;
         Ok(format!("0x{}", hex_encode(&sig_bytes)))
+    }
+
+    /// Poll `pending_paired_sign` for a completed result and dispatch it.
+    ///
+    /// Called from `process_pending_nav` each frame. Non-blocking — uses
+    /// `try_recv` so the main thread is never blocked.
+    fn poll_pending_paired_sign(&mut self, cx: &mut Context<Self>) {
+        let ready = if let Some(ref pending) = self.pending_paired_sign {
+            pending.result_rx.try_recv().ok()
+        } else {
+            None
+        };
+
+        if let Some(result) = ready {
+            let pending = self.pending_paired_sign.take().unwrap();
+            match pending.kind {
+                PairedSignKind::Spa { webview_ptr, id, app_id: _ } => {
+                    match result {
+                        Ok(sig_bytes) => {
+                            let sig_hex = hex_encode(&sig_bytes);
+                            let js = format!(
+                                "window.__epocaResolve({id}, null, '0x{sig_hex}')"
+                            );
+                            self.evaluate_on_spa(webview_ptr, &js, cx);
+                        }
+                        Err(e) => {
+                            let msg = e.replace('\'', "\\'");
+                            self.resolve_spa_js(webview_ptr, id, Err(&msg), cx);
+                        }
+                    }
+                }
+                PairedSignKind::WalletSign { webview_ptr, id } => {
+                    match result {
+                        Ok(sig_bytes) => {
+                            let sig_hex = hex_encode(&sig_bytes);
+                            // Return { id: 1, signature: "0x01..." } — 0x01 = sr25519 type byte.
+                            let js = format!(
+                                "window.__epocaWalletResolve({id}, null, {{id: 1, signature: '0x01{sig_hex}'}})"
+                            );
+                            self.evaluate_on_webview(webview_ptr, &js, cx);
+                        }
+                        Err(e) => {
+                            self.resolve_wallet_sign_js(webview_ptr, id, Err(&e), cx);
+                        }
+                    }
+                }
+                PairedSignKind::HostApi { webview_ptr, request_id, request_tag, app_id } => {
+                    let is_raw = request_tag == epoca_hostapi::protocol::TAG_SIGN_RAW_REQ;
+                    let response = match result {
+                        Ok(sig) => {
+                            log::info!("hostapi: paired sign completed ({} bytes) for app {}", sig.len(), app_id);
+                            epoca_hostapi::protocol::encode_sign_response(&request_id, is_raw, &sig)
+                        }
+                        Err(e) => {
+                            log::warn!("hostapi: paired sign failed: {e}");
+                            epoca_hostapi::protocol::encode_sign_error(&request_id, is_raw)
+                        }
+                    };
+                    crate::host::send_response(webview_ptr, &response);
+                }
+            }
+            cx.notify();
+        }
     }
 
     fn resolve_wallet_sign_js(&self, webview_ptr: usize, id: u64, result: Result<&str, &str>, cx: &mut Context<Self>) {
@@ -7575,6 +7986,26 @@ impl Render for Workbench {
                     None
                 };
 
+                // Expire old toasts
+                self.toasts.retain(|t| t.created_at.elapsed() < t.duration);
+                let toast_snapshot: Vec<(u64, String, gpui_ui_kit::ToastVariant)> = self
+                    .toasts
+                    .iter()
+                    .map(|t| (t.id, t.message.clone(), t.variant))
+                    .collect();
+                let toast_overlay: Option<gpui::AnyElement> = if toast_snapshot.is_empty() {
+                    None
+                } else {
+                    let mut container = gpui_ui_kit::ToastContainer::new(gpui_ui_kit::ToastPosition::BottomRight);
+                    for (id, msg, variant) in toast_snapshot {
+                        let toast_id = gpui::ElementId::Name(format!("toast-{id}").into());
+                        container = container.toast(
+                            gpui_ui_kit::Toast::new(toast_id, msg).variant(variant),
+                        );
+                    }
+                    Some(container.into_any_element())
+                };
+
                 div()
                     .relative()
                     .size_full()
@@ -7586,6 +8017,7 @@ impl Render for Workbench {
                     .children(wallet_backdrop)
                     .children(ctx_backdrop)
                     .children(omnibox)
+                    .children(toast_overlay)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {
@@ -7748,6 +8180,25 @@ impl Render for Workbench {
                     None
                 };
 
+                // Toasts for overlay layout
+                let toast_snapshot_overlay: Vec<(u64, String, gpui_ui_kit::ToastVariant)> = self
+                    .toasts
+                    .iter()
+                    .map(|t| (t.id, t.message.clone(), t.variant))
+                    .collect();
+                let toast_overlay_2: Option<gpui::AnyElement> = if toast_snapshot_overlay.is_empty() {
+                    None
+                } else {
+                    let mut container = gpui_ui_kit::ToastContainer::new(gpui_ui_kit::ToastPosition::BottomRight);
+                    for (id, msg, variant) in toast_snapshot_overlay {
+                        let toast_id = gpui::ElementId::Name(format!("toast-{id}").into());
+                        container = container.toast(
+                            gpui_ui_kit::Toast::new(toast_id, msg).variant(variant),
+                        );
+                    }
+                    Some(container.into_any_element())
+                };
+
                 div()
                     .relative()
                     .size_full()
@@ -7757,6 +8208,7 @@ impl Render for Workbench {
                     .children(ctx_backdrop_overlay)
                     .children(sidebar)
                     .children(omnibox)
+                    .children(toast_overlay_2)
                     .on_action(cx.listener(|this, _: &NewTab, window, cx| this.new_tab(window, cx)))
                     .on_action(cx.listener(|this, _: &CloseActiveTab, window, cx| {
                         if let Some(id) = this.active_tab_id {

@@ -18,10 +18,15 @@ gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 gpui-ui-kit = { workspace = true }
+gpui_http_client = "0.2.2"
 anyhow = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
 sentry = { workspace = true }
+smol = "2"
+ureq = "3"
+http = "1"
+futures = "0.3"
 
 [features]
 test-server = ["epoca-core/test-server"]
