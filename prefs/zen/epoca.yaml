@@ -1,0 +1,8 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+# Master switch for epoca's user-agent (product hosting) functionality.
+# Off by default while the bridge is a proof of concept.
+- name: epoca.useragent.enabled
+  value: false
