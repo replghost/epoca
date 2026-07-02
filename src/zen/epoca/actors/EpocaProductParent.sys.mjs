@@ -2,49 +2,58 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// Parent-process half of the product bridge. Receives byte frames from the
-// content actor and dispatches them to the host engine.
+// Parent-process half of the product bridge. Receives TrUAPI frames from
+// the content actor and dispatches them to the UserAgentKit host engine.
 //
-// PoC placeholder: speaks a trivial JSON-over-UTF-8 protocol so the
-// round-trip can be validated end to end. The real implementation replaces
-// #dispatch with the SCALE-frame TrUAPI engine (useragent-kit host-wasm).
+// Only self-contained outcomes (Response/Silent) are handled so far; the
+// Needs* outcomes (signing, chain access, storage, permissions...) arrive
+// with wallet/chain integration in later phases.
+
+const lazy = {};
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
+});
 
 export class EpocaProductParent extends JSWindowActorParent {
-  receiveMessage(message) {
+  async receiveMessage(message) {
     if (message.name !== "EpocaProduct:Frame") {
       return;
     }
 
-    let response;
     try {
-      const request = JSON.parse(new TextDecoder().decode(message.data));
-      response = this.#dispatch(request);
+      const outcome = await lazy.EpocaHostEngine.handleMessage(
+        new Uint8Array(message.data),
+        this.#productId()
+      );
+      this.#handleOutcome(outcome);
     } catch (e) {
-      response = { error: { code: "malformed-frame", message: e.message } };
+      console.error("EpocaProduct: engine dispatch failed", e);
     }
-
-    this.sendAsyncMessage(
-      "EpocaProduct:HostFrame",
-      new TextEncoder().encode(JSON.stringify(response))
-    );
   }
 
-  #dispatch(request) {
-    switch (request.method) {
-      case "epoca.handshake":
-        return {
-          id: request.id,
-          result: {
-            host: "epoca",
-            hostVersion: "0.1.0",
-            protocol: "poc-json-v0",
-          },
-        };
+  #handleOutcome(outcome) {
+    switch (outcome?.type) {
+      case "Response":
+        // The engine returns response bytes as a plain number[]; convert
+        // before shipping across processes.
+        this.sendAsyncMessage(
+          "EpocaProduct:HostFrame",
+          Uint8Array.from(outcome.data)
+        );
+        break;
+      case "Silent":
+        break;
       default:
-        return {
-          id: request.id,
-          error: { code: "unknown-method", method: request.method },
-        };
+        console.warn(
+          `EpocaProduct: unhandled engine outcome '${outcome?.type}'`
+        );
     }
+  }
+
+  #productId() {
+    // Placeholder identity until dotapp:// origins land: key the engine's
+    // per-product state on the document's host.
+    return this.manager?.documentPrincipal?.host || "unknown-product";
   }
 }

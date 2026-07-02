@@ -3,10 +3,54 @@
 
 "use strict";
 
-// Validates the product bridge end to end: a page loaded while
-// epoca.useragent.enabled is set must see the host mark and the MessagePort,
-// and a byte frame posted on the port must round-trip through the parent
-// host engine and come back correlated to the request.
+// Validates the product bridge end to end against the real TrUAPI engine:
+// a page loaded while epoca.useragent.enabled is set must see the host mark
+// and the MessagePort, and a SCALE handshake frame posted on the port must
+// round-trip through the UserAgentKit WASM engine in the parent process.
+//
+// Frames from the TrUAPI v0.2 golden vectors (useragent-kit conformance):
+// request  = SCALE str "handshake" + TAG_HANDSHAKE_REQ + version v1 + 1
+// response = SCALE str "handshake" + TAG_HANDSHAKE_RESP + v1 + Ok(())
+const HANDSHAKE_REQUEST_HEX = "2468616e647368616b65000001";
+const HANDSHAKE_RESPONSE_HEX = "2468616e647368616b65010000";
+
+function hexToBytes(hex) {
+  return Uint8Array.from(
+    hex.match(/../g).map(byte => parseInt(byte, 16))
+  );
+}
+
+function b64(bytes) {
+  return ChromeUtils.base64URLEncode(bytes, { pad: false });
+}
+
+async function postFrameAndAwaitReply(browser, frameHex) {
+  // Returns the reply frame base64url-encoded (byte-safe across the
+  // compartment boundary, where JS-level TypedArray access is forbidden).
+  return SpecialPowers.spawn(browser, [frameHex], async hex => {
+    const page = content.wrappedJSObject;
+    const port = page.__HOST_API_PORT__;
+    Assert.ok(port, "host api MessagePort is published");
+
+    // Build the frame in the page compartment: a privileged-compartment
+    // typed array fails the content port's structured clone.
+    const frame = Cu.cloneInto(
+      Uint8Array.from(hex.match(/../g).map(byte => parseInt(byte, 16))),
+      content
+    );
+
+    return new Promise(resolve => {
+      port.addEventListener(
+        "message",
+        event =>
+          resolve(ChromeUtils.base64URLEncode(event.data, { pad: false })),
+        { once: true }
+      );
+      port.start();
+      port.postMessage(frame);
+    });
+  });
+}
 
 add_task(async function test_epoca_bridge_disabled_by_default() {
   await BrowserTestUtils.withNewTab("https://example.com/", async browser => {
@@ -22,86 +66,63 @@ add_task(async function test_epoca_bridge_disabled_by_default() {
   });
 });
 
-add_task(async function test_epoca_bridge_handshake_roundtrip() {
+add_task(async function test_epoca_bridge_truapi_handshake() {
   await SpecialPowers.pushPrefEnv({
-    set: [["epoca.useragent.enabled", true]],
+    set: [
+      ["epoca.useragent.enabled", true],
+      // The engine wasm instantiates in the parent process, which shares
+      // Firefox's hardened eval gate. Shipping builds will allowlist the
+      // vendored glue in nsContentSecurityUtils instead of this pref.
+      ["security.allow_eval_with_system_principal", true],
+    ],
   });
 
   await BrowserTestUtils.withNewTab("https://example.com/", async browser => {
-    const response = await SpecialPowers.spawn(browser, [], async () => {
-      const page = content.wrappedJSObject;
+    const markSet = await SpecialPowers.spawn(
+      browser,
+      [],
+      () => content.wrappedJSObject.__HOST_WEBVIEW_MARK__ === true
+    );
+    ok(markSet, "host webview mark is set");
 
-      Assert.strictEqual(
-        page.__HOST_WEBVIEW_MARK__,
-        true,
-        "host webview mark is set"
-      );
-      const port = page.__HOST_API_PORT__;
-      Assert.ok(port, "host api MessagePort is published");
-
-      const request = { id: "poc-1", method: "epoca.handshake", params: {} };
-      const frame = new content.TextEncoder().encode(JSON.stringify(request));
-
-      const replyText = await new Promise(resolve => {
-        port.addEventListener(
-          "message",
-          // Decode inside the listener: WebIDL unwraps the cross-compartment
-          // buffer natively, where JS-level TypedArray access is forbidden.
-          event => resolve(new TextDecoder().decode(event.data)),
-          { once: true }
-        );
-        port.start();
-        port.postMessage(frame);
-      });
-
-      return JSON.parse(replyText);
-    });
-
-    is(response.id, "poc-1", "response correlates to the request id");
-    is(response.result.host, "epoca", "handshake identifies the epoca host");
+    const reply = await postFrameAndAwaitReply(browser, HANDSHAKE_REQUEST_HEX);
     is(
-      response.result.protocol,
-      "poc-json-v0",
-      "handshake reports the PoC protocol version"
+      reply,
+      b64(hexToBytes(HANDSHAKE_RESPONSE_HEX)),
+      "engine answers the TrUAPI handshake with the golden response frame"
     );
   });
 
   await SpecialPowers.popPrefEnv();
 });
 
-add_task(async function test_epoca_bridge_unknown_method() {
+add_task(async function test_epoca_bridge_survives_garbage_frame() {
   await SpecialPowers.pushPrefEnv({
-    set: [["epoca.useragent.enabled", true]],
+    set: [
+      ["epoca.useragent.enabled", true],
+      // The engine wasm instantiates in the parent process, which shares
+      // Firefox's hardened eval gate. Shipping builds will allowlist the
+      // vendored glue in nsContentSecurityUtils instead of this pref.
+      ["security.allow_eval_with_system_principal", true],
+    ],
   });
 
   await BrowserTestUtils.withNewTab("https://example.com/", async browser => {
-    const response = await SpecialPowers.spawn(browser, [], async () => {
-      const page = content.wrappedJSObject;
-      const port = page.__HOST_API_PORT__;
-
-      const request = { id: "poc-2", method: "epoca.no-such-method" };
-      const frame = new content.TextEncoder().encode(JSON.stringify(request));
-
-      const replyText = await new Promise(resolve => {
-        port.addEventListener(
-          "message",
-          // Decode inside the listener: WebIDL unwraps the cross-compartment
-          // buffer natively, where JS-level TypedArray access is forbidden.
-          event => resolve(new TextDecoder().decode(event.data)),
-          { once: true }
-        );
-        port.start();
-        port.postMessage(frame);
-      });
-
-      return JSON.parse(replyText);
+    // A malformed frame must not produce a reply or wedge the bridge...
+    await SpecialPowers.spawn(browser, [], () => {
+      const port = content.wrappedJSObject.__HOST_API_PORT__;
+      port.start();
+      port.postMessage(
+        Cu.cloneInto(Uint8Array.from([0xde, 0xad, 0xbe, 0xef]), content)
+      );
     });
 
-    is(response.id, "poc-2", "error response correlates to the request id");
+    // ...so a handshake sent right after must still round-trip.
+    const reply = await postFrameAndAwaitReply(browser, HANDSHAKE_REQUEST_HEX);
     is(
-      response.error.code,
-      "unknown-method",
-      "unknown methods return a typed error"
+      reply,
+      b64(hexToBytes(HANDSHAKE_RESPONSE_HEX)),
+      "bridge still answers the handshake after a malformed frame"
     );
   });
 

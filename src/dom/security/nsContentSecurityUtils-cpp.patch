@@ -1,0 +1,15 @@
+diff --git a/dom/security/nsContentSecurityUtils.cpp b/dom/security/nsContentSecurityUtils.cpp
+index 186c777f23..f7597cf40c 100644
+--- a/dom/security/nsContentSecurityUtils.cpp
++++ b/dom/security/nsContentSecurityUtils.cpp
+@@ -614,6 +614,10 @@ bool nsContentSecurityUtils::IsEvalAllowed(JSContext* cx,
+   // eval()-like functions. It will ideally be restricted to files that are
+   // exclusively used in testing contexts.
+   static nsLiteralCString evalAllowlist[] = {
++      // epoca: vendored UserAgentKit TrUAPI host engine (wasm-bindgen glue
++      // calls WebAssembly.instantiate from the parent process).
++      "resource:///modules/epoca/useragent_wasm.js"_ns,
++
+       // Test-only third-party library
+       "resource://testing-common/sinon-7.2.7.js"_ns,
+       // Test-only utility
