@@ -17,3 +17,9 @@
 # profile. Empty means "generate and persist". For tests and dev only.
 - name: epoca.useragent.dev-mnemonic
   value: ""
+
+# JSON object mapping dotapp product ids to local directories holding an
+# unpacked bundle, e.g. {"browse": "/path/to/browse/dist"}. Lets a product
+# load at dotapp://<id>/ before dotNS/CAR distribution exists. Dev only.
+- name: epoca.dotapp.dev-roots
+  value: ""

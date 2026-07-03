@@ -1,0 +1,21 @@
+diff --git a/netwerk/base/nsNetUtil.cpp b/netwerk/base/nsNetUtil.cpp
+index 7636af5ef8..bbb8778069 100644
+--- a/netwerk/base/nsNetUtil.cpp
++++ b/netwerk/base/nsNetUtil.cpp
+@@ -1969,6 +1969,16 @@ nsresult NS_NewURI(nsIURI** aURI, const nsACString& aSpec,
+         .Finalize(aURI);
+   }
+ 
++  // epoca: dotapp product URIs must be standard (host-bearing) URLs so each
++  // product id yields its own persistent content principal; the fallthrough
++  // DefaultURI is not an nsIStandardURL and would degrade to a null principal.
++  if (scheme.EqualsLiteral("dotapp")) {
++    return NS_MutateURI(new nsStandardURL::Mutator())
++        .Apply(&nsIStandardURLMutator::Init, nsIStandardURL::URLTYPE_AUTHORITY,
++               -1, aSpec, aCharset, aBaseURI, nullptr)
++        .Finalize(aURI);
++  }
++
+   if (scheme.EqualsLiteral("moz-extension")) {
+     RefPtr<mozilla::net::ExtensionProtocolHandler> handler =
+         mozilla::net::ExtensionProtocolHandler::GetSingleton();

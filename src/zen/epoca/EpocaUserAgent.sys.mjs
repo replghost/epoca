@@ -20,15 +20,30 @@ const JSWINDOWACTORS = {
         DOMDocElementInserted: {},
       },
     },
-    // PoC scope: any http(s) page while the pref is flipped. Once the
-    // dotapp:// scheme lands, this narrows to product origins only.
-    matches: ["https://*/*", "http://*/*"],
+    // No `matches`: MatchPattern cannot express host-bearing custom schemes
+    // (dotapp is not in its HostLocatorSchemes, so patterns parse as path
+    // globs and MatchesDomain rejects any URI with a host). The child actor
+    // gates on the document scheme instead.
     enablePreference: "epoca.useragent.enabled",
+  },
+};
+
+const JSPROCESSACTORS = {
+  // Asset pipe for the dotapp protocol handler: content-process subresource
+  // channels query the parent-side product registry through this actor.
+  EpocaDotApp: {
+    parent: {
+      esModuleURI: "resource:///actors/EpocaDotAppParent.sys.mjs",
+    },
+    child: {
+      esModuleURI: "resource:///actors/EpocaDotAppChild.sys.mjs",
+    },
   },
 };
 
 export let gEpocaUserAgent = {
   init() {
     ActorManagerParent.addJSWindowActors(JSWINDOWACTORS);
+    ActorManagerParent.addJSProcessActors(JSPROCESSACTORS);
   },
 };

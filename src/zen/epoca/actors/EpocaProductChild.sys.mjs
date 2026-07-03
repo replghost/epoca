@@ -25,13 +25,21 @@ const BOOTSTRAP = `
   })();
 `;
 
+// Product origins, plus any http(s) page for PoC/bridge testing while the
+// epoca.useragent.enabled pref is flipped. This gate lives here because the
+// actor's `matches` cannot express dotapp URIs (see EpocaUserAgent.sys.mjs).
+const BRIDGE_SCHEMES = new Set(["dotapp", "https", "http"]);
+
 export class EpocaProductChild extends JSWindowActorChild {
   #sandbox = null;
   // Content-side function that posts a host frame to the page's port.
   #deliverToProduct = null;
 
   handleEvent(event) {
-    if (event.type === "DOMDocElementInserted") {
+    if (
+      event.type === "DOMDocElementInserted" &&
+      BRIDGE_SCHEMES.has(this.document?.documentURIObject?.scheme)
+    ) {
       this.#installBridge();
     }
   }
