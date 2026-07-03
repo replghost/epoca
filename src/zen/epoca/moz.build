@@ -6,6 +6,7 @@ EXTRA_JS_MODULES += [
     "EpocaHostEngine.sys.mjs",
     "EpocaProductStorage.sys.mjs",
     "EpocaUserAgent.sys.mjs",
+    "EpocaWallet.sys.mjs",
 ]
 
 FINAL_TARGET_FILES.modules.epoca += [

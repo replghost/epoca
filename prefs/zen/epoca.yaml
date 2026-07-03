@@ -6,3 +6,14 @@
 # Off by default while the bridge is a proof of concept.
 - name: epoca.useragent.enabled
   value: false
+
+# Skip account/signing consent prompts and approve automatically. For
+# automated testing and kiosk/dev use only — leaving this on defeats the
+# host's signing consent guarantees.
+- name: epoca.useragent.auto-approve
+  value: false
+
+# Override the wallet mnemonic (BIP-39) instead of generating one per
+# profile. Empty means "generate and persist". For tests and dev only.
+- name: epoca.useragent.dev-mnemonic
+  value: ""

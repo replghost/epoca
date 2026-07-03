@@ -3,18 +3,25 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 // Parent-process half of the product bridge. Receives TrUAPI frames from
-// the content actor and dispatches them to the UserAgentKit host engine.
-//
-// Only self-contained outcomes (Response/Silent) are handled so far; the
-// Needs* outcomes (signing, chain access, storage, permissions...) arrive
-// with wallet/chain integration in later phases.
+// the content actor and dispatches them to the UserAgentKit host engine,
+// mediating the outcomes that require host resources: storage, account
+// access, and signing.
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
+  EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
 });
+
+const AUTO_APPROVE_PREF = "epoca.useragent.auto-approve";
+
+// Cross-product, cross-window state: one wallet, one user.
+// Account grants are cached per product once approved; a signature request
+// while another is pending is rejected outright (no queuing, BRG-011).
+const gAccountGrants = new Set();
+let gSignInFlight = false;
 
 export class EpocaProductParent extends JSWindowActorParent {
   async receiveMessage(message) {
@@ -41,44 +48,58 @@ export class EpocaProductParent extends JSWindowActorParent {
         // before shipping across processes.
         this.#sendFrame(Uint8Array.from(outcome.data));
         break;
+
       case "Silent":
         break;
+
       case "NeedsStorageRead": {
         const value = await lazy.EpocaProductStorage.get(
           productId,
           outcome.key
         );
-        this.#sendFrame(
-          await lazy.EpocaHostEngine.encodeResponse(
-            "encodeStorageReadResponse",
-            outcome.request_id,
-            value
-          )
-        );
+        await this.#reply("encodeStorageReadResponse", outcome.request_id, value);
         break;
       }
+
       case "NeedsStorageWrite":
         await lazy.EpocaProductStorage.set(
           productId,
           outcome.key,
           Uint8Array.from(outcome.value)
         );
-        this.#sendFrame(
-          await lazy.EpocaHostEngine.encodeResponse(
-            "encodeStorageWriteResponse",
-            outcome.request_id
-          )
-        );
+        await this.#reply("encodeStorageWriteResponse", outcome.request_id);
         break;
+
       case "NeedsStorageClear":
         await lazy.EpocaProductStorage.remove(productId, outcome.key);
-        this.#sendFrame(
-          await lazy.EpocaHostEngine.encodeResponse(
-            "encodeStorageClearResponse",
-            outcome.request_id
-          )
+        await this.#reply("encodeStorageClearResponse", outcome.request_id);
+        break;
+
+      case "NeedsAccountGet":
+        await this.#handleAccountGet(outcome, productId);
+        break;
+
+      case "NeedsSign":
+        await this.#handleSign(outcome, productId);
+        break;
+
+      case "NeedsCreateTransaction":
+        // No chain backend yet, so we can't build a signed extrinsic.
+        await this.#reply(
+          "encodeCreateTransactionError",
+          outcome.request_id,
+          "not_supported"
         );
         break;
+
+      case "NeedsCreateTransactionLegacyAccount":
+        await this.#reply(
+          "encodeCreateTxNonProductError",
+          outcome.request_id,
+          "not_supported"
+        );
+        break;
+
       default:
         console.warn(
           `EpocaProduct: unhandled engine outcome '${outcome?.type}'`
@@ -86,13 +107,107 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
   }
 
+  async #handleAccountGet(outcome, productId) {
+    const granted =
+      gAccountGrants.has(productId) ||
+      (await this.#confirm(
+        "Account access",
+        `${productId} wants to see its account address.`
+      ));
+    if (!granted) {
+      await this.#reply(
+        "encodeAccountGetError",
+        outcome.request_id,
+        "Rejected"
+      );
+      return;
+    }
+    gAccountGrants.add(productId);
+    const publicKey = await lazy.EpocaWallet.appPublicKey(
+      outcome.account.dotns_id,
+      outcome.account.derivation_index
+    );
+    await this.#reply(
+      "encodeAccountGetResponse",
+      outcome.request_id,
+      publicKey
+    );
+  }
+
+  async #handleSign(outcome, productId) {
+    // BRG-011: never queue a second signature request.
+    if (gSignInFlight) {
+      await this.#reply(
+        "encodeSignError",
+        outcome.request_id,
+        outcome.request_tag
+      );
+      return;
+    }
+    gSignInFlight = true;
+    try {
+      // BRG-010: signing always requires explicit, per-request approval.
+      const approved = await this.#confirm(
+        "Signature request",
+        `${productId} wants to sign a message with your account.`
+      );
+      if (!approved) {
+        await this.#reply(
+          "encodeSignError",
+          outcome.request_id,
+          outcome.request_tag
+        );
+        return;
+      }
+      const signature = await lazy.EpocaWallet.sign(
+        outcome.account.dotns_id,
+        outcome.account.derivation_index,
+        Uint8Array.from(outcome.payload)
+      );
+      await this.#reply(
+        "encodeSignResponse",
+        outcome.request_id,
+        outcome.request_tag,
+        signature
+      );
+    } finally {
+      gSignInFlight = false;
+    }
+  }
+
+  async #reply(method, ...args) {
+    this.#sendFrame(await lazy.EpocaHostEngine.encodeResponse(method, ...args));
+  }
+
+  async #confirm(title, message) {
+    if (Services.prefs.getBoolPref(AUTO_APPROVE_PREF, false)) {
+      return true;
+    }
+    const flags =
+      Services.prompt.BUTTON_TITLE_IS_STRING * Services.prompt.BUTTON_POS_0 +
+      Services.prompt.BUTTON_TITLE_IS_STRING * Services.prompt.BUTTON_POS_1;
+    const result = await Services.prompt.asyncConfirmEx(
+      this.browsingContext,
+      Services.prompt.MODAL_TYPE_TAB,
+      title,
+      message,
+      flags,
+      "Allow",
+      "Deny",
+      null,
+      null,
+      false
+    );
+    return result.getProperty("buttonNumClicked") === 0;
+  }
+
   #sendFrame(bytes) {
     this.sendAsyncMessage("EpocaProduct:HostFrame", bytes);
   }
 
   #productId() {
-    // Placeholder identity until dotapp:// origins land: key the engine's
-    // per-product state on the document's host.
+    // Placeholder identity until dotapp:// origins land: key host state on
+    // the document's host.
     return this.manager?.documentPrincipal?.host || "unknown-product";
   }
 }

@@ -7,6 +7,9 @@ support-files = [
   "head.js",
 ]
 
+["browser_epoca_accounts.js"]
+
 ["browser_epoca_bridge.js"]
 
 ["browser_epoca_storage.js"]
+

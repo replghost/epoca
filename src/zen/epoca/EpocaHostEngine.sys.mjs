@@ -29,6 +29,31 @@ async function readBinaryResource(url) {
 
 export const EpocaHostEngine = {
   _enginePromise: null,
+  _gluePromise: null,
+
+  /**
+   * The initialized wasm-bindgen glue module (HostApiHandle, WalletHandle,
+   * free functions). Shared with EpocaWallet so the wasm instantiates once.
+   */
+  glue() {
+    if (!this._gluePromise) {
+      this._gluePromise = (async () => {
+        // The engine's time source reads globalThis.performance (for the
+        // wallet auto-lock clock); the system-module global doesn't provide
+        // it, so shim a monotonic-enough clock before instantiating.
+        if (typeof globalThis.performance === "undefined") {
+          globalThis.performance = { now: () => Date.now() };
+        }
+        const glue = ChromeUtils.importESModule(GLUE_URL, {
+          global: "current",
+        });
+        const wasmBytes = await readBinaryResource(WASM_URL);
+        await glue.default({ module_or_path: wasmBytes });
+        return glue;
+      })();
+    }
+    return this._gluePromise;
+  },
 
   _ensure() {
     if (!this._enginePromise) {
@@ -38,10 +63,12 @@ export const EpocaHostEngine = {
   },
 
   async _create() {
-    const glue = ChromeUtils.importESModule(GLUE_URL, { global: "current" });
-    const wasmBytes = await readBinaryResource(WASM_URL);
-    await glue.default({ module_or_path: wasmBytes });
-    return new glue.HostApiHandle();
+    const glue = await this.glue();
+    const api = new glue.HostApiHandle();
+    // Pass no legacy accounts: exposing the soft-derivation root identity to
+    // products is a known cross-product-correlation hazard (DER-001).
+    api.setAccounts("[]");
+    return api;
   },
 
   /**
