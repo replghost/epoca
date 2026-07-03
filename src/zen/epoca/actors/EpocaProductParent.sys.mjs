@@ -13,6 +13,7 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
+  EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
 });
 
 export class EpocaProductParent extends JSWindowActorParent {
@@ -22,33 +23,71 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
 
     try {
+      const productId = this.#productId();
       const outcome = await lazy.EpocaHostEngine.handleMessage(
         new Uint8Array(message.data),
-        this.#productId()
+        productId
       );
-      this.#handleOutcome(outcome);
+      await this.#handleOutcome(outcome, productId);
     } catch (e) {
       console.error("EpocaProduct: engine dispatch failed", e);
     }
   }
 
-  #handleOutcome(outcome) {
+  async #handleOutcome(outcome, productId) {
     switch (outcome?.type) {
       case "Response":
         // The engine returns response bytes as a plain number[]; convert
         // before shipping across processes.
-        this.sendAsyncMessage(
-          "EpocaProduct:HostFrame",
-          Uint8Array.from(outcome.data)
-        );
+        this.#sendFrame(Uint8Array.from(outcome.data));
         break;
       case "Silent":
+        break;
+      case "NeedsStorageRead": {
+        const value = await lazy.EpocaProductStorage.get(
+          productId,
+          outcome.key
+        );
+        this.#sendFrame(
+          await lazy.EpocaHostEngine.encodeResponse(
+            "encodeStorageReadResponse",
+            outcome.request_id,
+            value
+          )
+        );
+        break;
+      }
+      case "NeedsStorageWrite":
+        await lazy.EpocaProductStorage.set(
+          productId,
+          outcome.key,
+          Uint8Array.from(outcome.value)
+        );
+        this.#sendFrame(
+          await lazy.EpocaHostEngine.encodeResponse(
+            "encodeStorageWriteResponse",
+            outcome.request_id
+          )
+        );
+        break;
+      case "NeedsStorageClear":
+        await lazy.EpocaProductStorage.remove(productId, outcome.key);
+        this.#sendFrame(
+          await lazy.EpocaHostEngine.encodeResponse(
+            "encodeStorageClearResponse",
+            outcome.request_id
+          )
+        );
         break;
       default:
         console.warn(
           `EpocaProduct: unhandled engine outcome '${outcome?.type}'`
         );
     }
+  }
+
+  #sendFrame(bytes) {
+    this.sendAsyncMessage("EpocaProduct:HostFrame", bytes);
   }
 
   #productId() {

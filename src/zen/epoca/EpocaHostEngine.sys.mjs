@@ -55,4 +55,15 @@ export const EpocaHostEngine = {
     const engine = await this._ensure();
     return engine.handleMessage(frame, productId);
   },
+
+  /**
+   * Invoke one of the engine's encode*Response methods, e.g.
+   * encodeStorageReadResponse(request_id, value?).
+   *
+   * @returns {Promise<Uint8Array>} the SCALE response frame.
+   */
+  async encodeResponse(method, ...args) {
+    const engine = await this._ensure();
+    return engine[method](...args);
+  },
 };

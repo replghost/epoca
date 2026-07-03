@@ -8,3 +8,5 @@ support-files = [
 ]
 
 ["browser_epoca_bridge.js"]
+
+["browser_epoca_storage.js"]

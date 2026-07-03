@@ -4,6 +4,7 @@
 
 EXTRA_JS_MODULES += [
     "EpocaHostEngine.sys.mjs",
+    "EpocaProductStorage.sys.mjs",
     "EpocaUserAgent.sys.mjs",
 ]
 
