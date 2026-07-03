@@ -6,8 +6,10 @@ EXTRA_JS_MODULES += [
     "EpocaDotAppContentPolicy.sys.mjs",
     "EpocaDotAppProtocolHandler.sys.mjs",
     "EpocaDotAppRegistry.sys.mjs",
+    "EpocaDotNs.sys.mjs",
     "EpocaHostEngine.sys.mjs",
     "EpocaProductStorage.sys.mjs",
+    "EpocaUrlbarProvider.sys.mjs",
     "EpocaUserAgent.sys.mjs",
     "EpocaWallet.sys.mjs",
 ]

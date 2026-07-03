@@ -23,3 +23,9 @@
 # load at dotapp://<id>/ before dotNS/CAR distribution exists. Dev only.
 - name: epoca.dotapp.dev-roots
   value: ""
+
+# Resolve unknown dotapp products through dotNS (on-chain contenthash
+# lookup + IPFS bundle fetch) on first navigation. The fetch is performed
+# by the host in the parent process; products themselves stay network-locked.
+- name: epoca.dotapp.dotns.enabled
+  value: true

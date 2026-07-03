@@ -12,6 +12,13 @@
 // EpocaDotAppContentPolicy backstops that from outside the document.
 
 const DEV_ROOTS_PREF = "epoca.dotapp.dev-roots";
+const DOTNS_PREF = "epoca.dotapp.dotns.enabled";
+
+const lazy = {};
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaDotNs: "resource:///modules/EpocaDotNs.sys.mjs",
+});
 
 // Every fetch directive is pinned to the product's own scheme (same-origin
 // enforcement on top of this comes from CORS: dotapp channels carry no
@@ -141,7 +148,31 @@ export const EpocaDotAppRegistry = {
     if (registered) {
       return registered;
     }
-    return this._readDevRoot(productId, path);
+    const dev = await this._readDevRoot(productId, path);
+    if (dev) {
+      return dev;
+    }
+    return this._resolveViaDotNs(productId, path);
+  },
+
+  // Unknown product: resolve it through dotNS, register the fetched bundle,
+  // and retry the lookup. This is what makes a first navigation to
+  // dotapp://browse/ work with nothing pre-registered.
+  async _resolveViaDotNs(productId, path) {
+    if (
+      !Services.prefs.getBoolPref(DOTNS_PREF, false) ||
+      this._products.has(productId)
+    ) {
+      return null;
+    }
+    try {
+      const assets = await lazy.EpocaDotNs.resolve(productId);
+      this.register(productId, assets);
+    } catch (e) {
+      console.warn(`dotapp: dotNS resolution failed for ${productId}`, e);
+      return null;
+    }
+    return this._products.get(productId)?.get(path) ?? null;
   },
 
   // Dev convenience: epoca.dotapp.dev-roots is a JSON object mapping product

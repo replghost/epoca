@@ -13,5 +13,7 @@ support-files = [
 
 ["browser_epoca_dotapp.js"]
 
+["browser_epoca_dotns.js"]
+
 ["browser_epoca_storage.js"]
 

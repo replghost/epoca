@@ -45,5 +45,25 @@ export let gEpocaUserAgent = {
   init() {
     ActorManagerParent.addJSWindowActors(JSWINDOWACTORS);
     ActorManagerParent.addJSProcessActors(JSPROCESSACTORS);
+
+    // Register the dot-name URL bar provider once a browser window is up:
+    // importing urlbar modules at browser-before-ui-startup would pull the
+    // whole urlbar stack into the startup path.
+    Services.obs.addObserver(function onDelayedStartup() {
+      Services.obs.removeObserver(
+        onDelayedStartup,
+        "browser-delayed-startup-finished"
+      );
+      const { ProvidersManager } = ChromeUtils.importESModule(
+        "moz-src:///browser/components/urlbar/UrlbarProvidersManager.sys.mjs"
+      );
+      const { EpocaUrlbarProviderDotNames } = ChromeUtils.importESModule(
+        "resource:///modules/EpocaUrlbarProvider.sys.mjs"
+      );
+      const instance = ProvidersManager.getInstanceForSap("urlbar");
+      if (!instance.getProvider("EpocaUrlbarProviderDotNames")) {
+        instance.registerProvider(new EpocaUrlbarProviderDotNames());
+      }
+    }, "browser-delayed-startup-finished");
   },
 };
