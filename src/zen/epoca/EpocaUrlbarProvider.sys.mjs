@@ -3,9 +3,9 @@
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
 // URL bar provider for dot names: typing "browse.dot" (optionally with a
-// path, or as "dot://browse") offers a heuristic result that navigates to
-// dotapp://browse/, where the protocol handler serves the bundle (resolving
-// it via dotNS first if it isn't registered yet).
+// path, or as "dot://browse.dot") offers a heuristic result that navigates
+// to dot://browse.dot/, where the protocol handler serves the bundle
+// (resolving it via dotNS first if it isn't registered yet).
 
 import {
   UrlbarProvider,
@@ -26,9 +26,9 @@ const DOT_INPUT_RE =
   /^(?:dot:\/\/)?([a-z0-9][a-z0-9-]{0,63})(?:\.dot)?(\/\S*)?$/i;
 
 /**
- * Map URL bar input to a dotapp URL, or null when the input is not a dot
- * name. The bare-label form (no ".dot", no "dot://") is rejected so normal
- * hostnames and search terms are unaffected.
+ * Map URL bar input to a canonical dot://<label>.dot URL, or null when the
+ * input is not a dot name. The bare-label form (no ".dot", no "dot://") is
+ * rejected so normal hostnames and search terms are unaffected.
  *
  * @param {string} input
  * @returns {string|null}
@@ -45,7 +45,7 @@ export function dotInputToDotAppUrl(input) {
   }
   const label = match[1].toLowerCase();
   const path = match[2] || "/";
-  return `dotapp://${label}${path}`;
+  return `dot://${label}.dot${path}`;
 }
 
 export class EpocaUrlbarProviderDotNames extends UrlbarProvider {
@@ -82,7 +82,7 @@ export class EpocaUrlbarProviderDotNames extends UrlbarProvider {
       heuristic: true,
       payload: {
         url,
-        title: `Open ${new URL(url).host}.dot`,
+        title: `Open ${new URL(url).host}`,
         icon: "chrome://global/skin/icons/defaultFavicon.svg",
       },
     });

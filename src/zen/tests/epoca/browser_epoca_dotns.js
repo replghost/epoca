@@ -25,11 +25,11 @@ const { EpocaDotAppRegistry } = ChromeUtils.importESModule(
 
 add_task(function test_dot_input_mapping() {
   const cases = [
-    ["browse.dot", "dotapp://browse/"],
-    ["browse.dot/settings", "dotapp://browse/settings"],
-    ["dot://browse", "dotapp://browse/"],
-    ["dot://browse/a/b", "dotapp://browse/a/b"],
-    ["Browse.DOT", "dotapp://browse/"],
+    ["browse.dot", "dot://browse.dot/"],
+    ["browse.dot/settings", "dot://browse.dot/settings"],
+    ["dot://browse", "dot://browse.dot/"],
+    ["dot://browse/a/b", "dot://browse.dot/a/b"],
+    ["Browse.DOT", "dot://browse.dot/"],
     ["browse", null],
     ["example.com", null],
     ["browse.dots", null],
@@ -64,7 +64,7 @@ add_task(async function test_dot_name_urlbar_result() {
   ok(result.heuristic, "the dot-name result is the heuristic result");
   is(
     result.payload.url,
-    "dotapp://browse/",
+    "dot://browse.dot/",
     "result navigates to the dotapp URL"
   );
 
@@ -94,7 +94,7 @@ add_task(async function test_dotns_fallback_resolves_unknown_product() {
     EpocaDotAppRegistry.unregister("dotns-product");
   });
 
-  await BrowserTestUtils.withNewTab("dotapp://dotns-product/", async browser => {
+  await BrowserTestUtils.withNewTab("dot://dotns-product.dot/", async browser => {
     const title = await SpecialPowers.spawn(
       browser,
       [],
@@ -110,7 +110,7 @@ add_task(async function test_dotns_fallback_resolves_unknown_product() {
   );
 
   // Second load must come from the registry cache, not another resolution.
-  await BrowserTestUtils.withNewTab("dotapp://dotns-product/", async browser => {
+  await BrowserTestUtils.withNewTab("dot://dotns-product.dot/", async browser => {
     const title = await SpecialPowers.spawn(
       browser,
       [],

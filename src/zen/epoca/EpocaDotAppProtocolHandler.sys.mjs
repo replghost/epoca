@@ -2,7 +2,7 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// Protocol handler for dotapp://<product-id>/<path>. Serves product bundles
+// Protocol handler for dot://<name>.dot/<path>. Serves product bundles
 // from the parent-process EpocaDotAppRegistry. Under Fission, document loads
 // open the channel in the parent while subresource loads open it in the
 // content process, so both paths are handled: a direct registry lookup in
@@ -19,7 +19,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
 });
 
 export class EpocaDotAppProtocolHandler {
-  scheme = "dotapp";
+  scheme = "dot";
 
   allowPort() {
     return false;
@@ -36,7 +36,7 @@ export class EpocaDotAppProtocolHandler {
     const wrapper = Services.io.newSuspendableChannelWrapper(channel);
     wrapper.suspend();
 
-    this.#resolve(uri)
+    this.#resolve(uri, loadInfo)
       .then(asset => {
         if (asset?.inputStream) {
           channel.contentStream = asset.inputStream;
@@ -74,14 +74,18 @@ export class EpocaDotAppProtocolHandler {
     }
   }
 
-  async #resolve(uri) {
+  async #resolve(uri, loadInfo) {
+    const browsingContextId = loadInfo?.browsingContext?.id;
     if (
       Services.appinfo.processType === Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT
     ) {
-      return lazy.EpocaDotAppRegistry.resolve(uri);
+      return lazy.EpocaDotAppRegistry.resolve(uri, browsingContextId);
     }
     const actor = ChromeUtils.domProcessChild.getActor("EpocaDotApp");
-    return actor.sendQuery("EpocaDotApp:GetAsset", { spec: uri.spec });
+    return actor.sendQuery("EpocaDotApp:GetAsset", {
+      spec: uri.spec,
+      browsingContextId,
+    });
   }
 
   QueryInterface = ChromeUtils.generateQI(["nsIProtocolHandler"]);

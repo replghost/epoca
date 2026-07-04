@@ -15,7 +15,10 @@ ChromeUtils.defineESModuleGetters(lazy, {
 export class EpocaDotAppParent extends JSProcessActorParent {
   receiveMessage(message) {
     if (message.name === "EpocaDotApp:GetAsset") {
-      return lazy.EpocaDotAppRegistry.resolve(message.data.spec);
+      return lazy.EpocaDotAppRegistry.resolve(
+        message.data.spec,
+        message.data.browsingContextId
+      );
     }
     return null;
   }

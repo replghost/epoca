@@ -2,10 +2,12 @@
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at http://mozilla.org/MPL/2.0/.
 
-// Parent-process registry of dotapp product bundles. A product is an
-// in-memory map of absolute paths to asset bytes; the dotapp protocol
+// Parent-process registry of dot product bundles. A product is an
+// in-memory map of absolute paths to asset bytes; the dot protocol
 // handler (directly in the parent, via the EpocaDotApp process actor from
-// content) resolves every dotapp://<product-id>/<path> load against it.
+// content) resolves every dot://<name>.dot/<path> load against it.
+// Registry keys are bare labels ("browse"); the URI host carries the
+// canonical .dot suffix ("browse.dot").
 //
 // Products never fetch from the network: the CSP injected into every HTML
 // asset locks all load directives to the dotapp scheme, and
@@ -13,6 +15,28 @@
 
 const DEV_ROOTS_PREF = "epoca.dotapp.dev-roots";
 const DOTNS_PREF = "epoca.dotapp.dotns.enabled";
+const IMAGE_GATEWAYS_PREF = "epoca.dotapp.image-gateways";
+
+/**
+ * Origins products may load images from, in addition to their own bundle:
+ * the content-addressed IPFS gateways (app icons reference bare CIDs there).
+ * This is the single deliberate exception to the no-network rule, shared by
+ * the CSP below and EpocaDotAppContentPolicy.
+ *
+ * @returns {string[]}
+ */
+export function imageGatewayOrigins() {
+  try {
+    const parsed = JSON.parse(
+      Services.prefs.getStringPref(IMAGE_GATEWAYS_PREF, "[]")
+    );
+    return Array.isArray(parsed)
+      ? parsed.filter(o => /^https:\/\/[a-z0-9.-]+$/i.test(o))
+      : [];
+  } catch {
+    return [];
+  }
+}
 
 const lazy = {};
 
@@ -24,19 +48,23 @@ ChromeUtils.defineESModuleGetters(lazy, {
 // enforcement on top of this comes from CORS: dotapp channels carry no
 // Access-Control-Allow-Origin, so cross-product fetch fails). The bridge
 // MessagePort is unaffected by CSP, so TrUAPI traffic still flows.
-const PRODUCT_CSP =
-  "default-src 'none'; " +
-  "script-src dotapp: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; " +
-  "style-src dotapp: 'unsafe-inline'; " +
-  "img-src dotapp: data: blob:; " +
-  "media-src dotapp: data: blob:; " +
-  "font-src dotapp: data:; " +
-  "connect-src dotapp:; " +
-  "frame-src dotapp:; " +
-  "worker-src dotapp: blob:; " +
-  "object-src 'none'; " +
-  "base-uri 'none'; " +
-  "form-action 'none'";
+function productCsp() {
+  const imgExtra = imageGatewayOrigins().join(" ");
+  return (
+    "default-src 'none'; " +
+    "script-src dot: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; " +
+    "style-src dot: 'unsafe-inline'; " +
+    `img-src dot: data: blob: ${imgExtra}; `.replace(/ +/g, " ") +
+    "media-src dot: data: blob:; " +
+    "font-src dot: data:; " +
+    "connect-src dot:; " +
+    "frame-src dot:; " +
+    "worker-src dot: blob:; " +
+    "object-src 'none'; " +
+    "base-uri 'none'; " +
+    "form-action 'none'"
+  );
+}
 
 const CONTENT_TYPES = new Map([
   ["html", "text/html"],
@@ -99,19 +127,23 @@ export const EpocaDotAppRegistry = {
   },
 
   /**
-   * Resolve a dotapp URI to channel payload.
+   * Resolve a dot URI to channel payload. Only the canonical host form
+   * <label>.dot is served — anything else 404s, so a product cannot obtain
+   * a second origin for the same bundle.
    *
    * @param {nsIURI|string} uri
+   * @param {number} [browsingContextId] - The initiating browsing context;
+   *   used to surface resolution progress in that window's status panel.
    * @returns {Promise<{inputStream, contentType}|null>} null when unknown.
    */
-  async resolve(uri) {
+  async resolve(uri, browsingContextId) {
     if (typeof uri === "string") {
       uri = Services.io.newURI(uri);
     }
-    if (uri.scheme !== "dotapp") {
+    if (uri.scheme !== "dot" || !uri.host.endsWith(".dot")) {
       return null;
     }
-    const productId = uri.host;
+    const productId = uri.host.slice(0, -".dot".length);
     // filePath excludes query/ref and is dot-segment-normalized by the
     // standard URL parser.
     let path = uri.filePath;
@@ -119,10 +151,10 @@ export const EpocaDotAppRegistry = {
       path += "index.html";
     }
 
-    let asset = await this._lookup(productId, path);
+    let asset = await this._lookup(productId, path, browsingContextId);
     if (!asset && !/\.[^/]+$/.test(path)) {
       // Extensionless miss: treat as a client-side SPA route.
-      asset = await this._lookup(productId, "/index.html");
+      asset = await this._lookup(productId, "/index.html", browsingContextId);
     }
     if (!asset) {
       return null;
@@ -143,7 +175,7 @@ export const EpocaDotAppRegistry = {
     return { inputStream: stream, contentType };
   },
 
-  async _lookup(productId, path) {
+  async _lookup(productId, path, browsingContextId) {
     const registered = this._products.get(productId)?.get(path);
     if (registered) {
       return registered;
@@ -152,25 +184,43 @@ export const EpocaDotAppRegistry = {
     if (dev) {
       return dev;
     }
-    return this._resolveViaDotNs(productId, path);
+    return this._resolveViaDotNs(productId, path, browsingContextId);
+  },
+
+  // Mirror ordinary web loads: while the (suspended) channel waits on dotNS
+  // and the bundle fetch, show progress in the initiating window's status
+  // panel — the same component that shows "Looking up host…" for the web.
+  _setLoadStatus(browsingContextId, message) {
+    if (!browsingContextId) {
+      return;
+    }
+    try {
+      const win = BrowsingContext.get(browsingContextId)?.topChromeWindow;
+      win?.XULBrowserWindow?.onStatusChange(null, null, 0, message);
+    } catch {
+      // Status text is best-effort chrome sugar; never fail a load over it.
+    }
   },
 
   // Unknown product: resolve it through dotNS, register the fetched bundle,
   // and retry the lookup. This is what makes a first navigation to
-  // dotapp://browse/ work with nothing pre-registered.
-  async _resolveViaDotNs(productId, path) {
+  // dot://browse.dot/ work with nothing pre-registered.
+  async _resolveViaDotNs(productId, path, browsingContextId) {
     if (
       !Services.prefs.getBoolPref(DOTNS_PREF, false) ||
       this._products.has(productId)
     ) {
       return null;
     }
+    this._setLoadStatus(browsingContextId, `Looking up ${productId}.dot…`);
     try {
       const assets = await lazy.EpocaDotNs.resolve(productId);
       this.register(productId, assets);
     } catch (e) {
       console.warn(`dotapp: dotNS resolution failed for ${productId}`, e);
       return null;
+    } finally {
+      this._setLoadStatus(browsingContextId, "");
     }
     return this._products.get(productId)?.get(path) ?? null;
   },
@@ -206,7 +256,7 @@ export const EpocaDotAppRegistry = {
 // implicit head).
 function injectCsp(bytes) {
   const html = new TextDecoder().decode(bytes);
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${PRODUCT_CSP}">`;
+  const meta = `<meta http-equiv="Content-Security-Policy" content="${productCsp()}">`;
   let insertAt = null;
   const anchor = /<head[^>]*>|<html[^>]*>/i.exec(html);
   if (anchor) {

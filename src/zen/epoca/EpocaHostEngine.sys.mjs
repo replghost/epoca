@@ -9,6 +9,12 @@
 const GLUE_URL = "resource:///modules/epoca/useragent_wasm.js";
 const WASM_URL = "resource:///modules/epoca/useragent_wasm_bg.wasm";
 
+const lazy = {};
+
+ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
+});
+
 async function readBinaryResource(url) {
   if (typeof fetch === "function") {
     const response = await fetch(url);
@@ -68,6 +74,15 @@ export const EpocaHostEngine = {
     // Pass no legacy accounts: exposing the soft-derivation root identity to
     // products is a known cross-product-correlation hazard (DER-001).
     api.setAccounts("[]");
+    // Chains the host can reach; the engine answers featureSupported(Chain)
+    // from this set and routes chainHead requests as NeedsChain* outcomes.
+    const genesisHashes = lazy.EpocaChainService.supportedGenesisHashes();
+    if (genesisHashes.length) {
+      api.setSupportedChains(genesisHashes);
+    }
+    console.debug(
+      `EpocaHostEngine: engine ready, ${genesisHashes.length} supported chain(s)`
+    );
     return api;
   },
 

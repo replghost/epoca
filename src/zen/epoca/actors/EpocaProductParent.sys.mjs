@@ -10,6 +10,7 @@
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
   EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
@@ -34,6 +35,11 @@ export class EpocaProductParent extends JSWindowActorParent {
       const outcome = await lazy.EpocaHostEngine.handleMessage(
         new Uint8Array(message.data),
         productId
+      );
+      console.debug(
+        `EpocaProduct[${productId}]: outcome ${outcome?.type}` +
+          (outcome?.json_rpc_method ? ` ${outcome.json_rpc_method}` : "") +
+          (outcome?.method ? ` ${outcome.method}` : "")
       );
       await this.#handleOutcome(outcome, productId);
     } catch (e) {
@@ -99,6 +105,31 @@ export class EpocaProductParent extends JSWindowActorParent {
           "not_supported"
         );
         break;
+
+      case "NeedsChainQuery":
+        await this.#handleChainQuery(outcome);
+        break;
+
+      case "NeedsChainRpc":
+        await this.#handleChainRpc(outcome);
+        break;
+
+      case "NeedsChainFollow":
+        await this.#handleChainFollow(outcome);
+        break;
+
+      case "NeedsNavigate":
+        await this.#handleNavigate(outcome);
+        break;
+
+      case "NeedsChainFollowStop": {
+        const stop = this.#chainFollows.get(outcome.request_id);
+        if (stop) {
+          this.#chainFollows.delete(outcome.request_id);
+          stop();
+        }
+        break;
+      }
 
       default:
         console.warn(
@@ -175,6 +206,241 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
   }
 
+  // Active chainHead follow subscriptions, keyed by the follow request id.
+  #chainFollows = new Map();
+  // genesis hex -> {promise, resolve} for the server-side follow
+  // subscription id. chainHead operations must carry the SERVER's
+  // subscription id as their first JSON-RPC param, but the engine only
+  // knows the product-SDK's opaque follow_sub_id — the host owns this
+  // translation. One live follow per (product, genesis) is assumed, which
+  // matches the product-SDK's follow lifecycle.
+  #followServerIds = new Map();
+
+  didDestroy() {
+    for (const stop of this.#chainFollows.values()) {
+      stop();
+    }
+    this.#chainFollows.clear();
+    this.#followServerIds.clear();
+  }
+
+  // wasm-bindgen serializes serde_json maps as JS Maps, which JSON.stringify
+  // flattens to {}. Convert to plain objects before putting them on the wire.
+  static #plainJson(value) {
+    if (value instanceof Map) {
+      return Object.fromEntries(
+        [...value].map(([k, v]) => [k, EpocaProductParent.#plainJson(v)])
+      );
+    }
+    if (Array.isArray(value)) {
+      return value.map(v => EpocaProductParent.#plainJson(v));
+    }
+    return value;
+  }
+
+  // Legacy single-chain query: no genesis in the outcome, route to the
+  // default network. The raw JSON-RPC response text goes back verbatim;
+  // the engine parses and re-encodes it.
+  async #handleChainQuery(outcome) {
+    try {
+      const genesis = lazy.EpocaChainService.defaultGenesis();
+      if (!genesis) {
+        throw new Error("no chain configured");
+      }
+      const response = await lazy.EpocaChainService.sendRpc(
+        genesis,
+        outcome.method,
+        EpocaProductParent.#plainJson(outcome.params ?? [])
+      );
+      await this.#reply(
+        "encodeChainQueryResponse",
+        outcome.request_id,
+        response
+      );
+    } catch (e) {
+      console.error("EpocaProduct: chain query failed", e);
+      await this.#reply("encodeChainQueryError", outcome.request_id);
+    }
+  }
+
+  async #handleChainRpc(outcome) {
+    try {
+      const genesis = lazy.EpocaChainService.routeByGenesis(
+        outcome.genesis_hash
+      );
+      if (!genesis) {
+        throw new Error("unsupported chain");
+      }
+      let params = EpocaProductParent.#plainJson(outcome.json_rpc_params ?? []);
+      if (outcome.follow_sub_id != null) {
+        const ack = this.#followServerIds.get(genesis);
+        if (!ack) {
+          throw new Error("no active chainHead follow for this chain");
+        }
+        params = [await ack.promise, ...params];
+      }
+      const response = await lazy.EpocaChainService.sendRpc(
+        genesis,
+        outcome.json_rpc_method,
+        params
+      );
+      await this.#reply(
+        "encodeChainRpcResponse",
+        outcome.request_id,
+        outcome.request_tag,
+        response
+      );
+    } catch (e) {
+      console.error(
+        `EpocaProduct: chain rpc ${outcome.json_rpc_method} failed`,
+        e
+      );
+      await this.#reply(
+        "encodeChainRpcError",
+        outcome.request_id,
+        outcome.request_tag,
+        String(e?.message || e)
+      );
+    }
+  }
+
+  // Real nodes emit runtime specs with `apis` as an object map; the engine's
+  // typed followEvent parser expects an array of [name, version] pairs and
+  // silently drops events it cannot parse. Mirror the normalization done by
+  // useragent-kit's runtime-chain-service.
+  static #normalizeFollowEvent(text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return text;
+    }
+    if (parsed?.method !== "chainHead_v1_followEvent") {
+      return text;
+    }
+    const result = parsed.params?.result;
+    const runtime =
+      result?.event === "initialized"
+        ? result.finalizedBlockRuntime
+        : result?.event === "newBlock"
+          ? result.newRuntime
+          : null;
+    const apis = runtime?.spec?.apis;
+    if (!apis || Array.isArray(apis)) {
+      return text;
+    }
+    runtime.spec.apis = Object.entries(apis).filter(
+      ([, version]) => typeof version === "number"
+    );
+    return JSON.stringify(parsed);
+  }
+
+  async #handleChainFollow(outcome) {
+    const requestId = outcome.request_id;
+    const genesis = lazy.EpocaChainService.routeByGenesis(
+      outcome.genesis_hash
+    );
+    const abort = async () => {
+      this.#chainFollows.delete(requestId);
+      if (genesis && this.#followServerIds.get(genesis)?.owner === requestId) {
+        this.#followServerIds.delete(genesis);
+      }
+      await this.#reply("encodeChainFollowStop", requestId);
+    };
+    try {
+      if (!genesis) {
+        throw new Error("unsupported chain");
+      }
+      const ack = Promise.withResolvers();
+      ack.owner = requestId;
+      this.#followServerIds.set(genesis, ack);
+      const stop = await lazy.EpocaChainService.startSubscription(
+        genesis,
+        "chainHead_v1_follow",
+        [outcome.with_runtime],
+        async jsonRpc => {
+          const normalized = EpocaProductParent.#normalizeFollowEvent(jsonRpc);
+          let parsed;
+          try {
+            parsed = JSON.parse(normalized);
+          } catch {
+            parsed = null;
+          }
+          // First message is the ack carrying the server subscription id.
+          if (parsed?.id != null && typeof parsed.result === "string") {
+            ack.resolve(parsed.result);
+            return;
+          }
+          const frame = await lazy.EpocaHostEngine.encodeResponse(
+            "encodeChainFollowEvent",
+            requestId,
+            normalized
+          );
+          if (frame?.length) {
+            this.#sendFrame(frame);
+          } else if (normalized.includes("followEvent")) {
+            console.warn(
+              "EpocaProduct: follow event dropped by encoder:",
+              normalized.slice(0, 300)
+            );
+          }
+        },
+        () => abort()
+      );
+      this.#chainFollows.set(requestId, stop);
+    } catch (e) {
+      console.error("EpocaProduct: chain follow failed", e);
+      await abort();
+    }
+  }
+
+  // Map a navigateTo target onto the local product scheme. Accepted forms:
+  // a bare dot name ("coinflip.dot"), and web-host product URLs that other
+  // hosts use ("https://<label>.dot.li/...", "https://<label>.app.paseo.li/
+  // ..."), which products construct when they assume the dotli deployment.
+  // Everything else is null — a product must not steer its tab to the web.
+  static #navigateTargetToDotUrl(target) {
+    const name = /^([a-z0-9][a-z0-9-]{0,63})\.dot$/i.exec(target);
+    if (name) {
+      return `dot://${name[1].toLowerCase()}.dot/`;
+    }
+    let url;
+    try {
+      url = new URL(target);
+    } catch {
+      return null;
+    }
+    if (url.protocol !== "https:") {
+      return null;
+    }
+    const host = /^([a-z0-9][a-z0-9-]{0,63})(?:\.app\.paseo\.li|\.dot\.li)$/i.exec(
+      url.hostname
+    );
+    if (!host) {
+      return null;
+    }
+    return `dot://${host[1].toLowerCase()}.dot${url.pathname}${url.search}`;
+  }
+
+  async #handleNavigate(outcome) {
+    const dotUrl = EpocaProductParent.#navigateTargetToDotUrl(
+      outcome.url?.trim() ?? ""
+    );
+    if (dotUrl) {
+      try {
+        this.browsingContext.top.loadURI(Services.io.newURI(dotUrl), {
+          triggeringPrincipal:
+            Services.scriptSecurityManager.getSystemPrincipal(),
+        });
+      } catch (e) {
+        console.error(`EpocaProduct: navigate to ${outcome.url} failed`, e);
+      }
+    } else {
+      console.warn(`EpocaProduct: refused navigate to '${outcome.url}'`);
+    }
+    await this.#reply("encodeNavigateResponse", outcome.request_id);
+  }
+
   async #reply(method, ...args) {
     this.#sendFrame(await lazy.EpocaHostEngine.encodeResponse(method, ...args));
   }
@@ -206,8 +472,14 @@ export class EpocaProductParent extends JSWindowActorParent {
   }
 
   #productId() {
-    // Placeholder identity until dotapp:// origins land: key host state on
-    // the document's host.
-    return this.manager?.documentPrincipal?.host || "unknown-product";
+    // dot://<label>.dot documents key host state on the bare label; http(s)
+    // PoC pages fall back to their full host.
+    const host = this.manager?.documentPrincipal?.host;
+    if (!host) {
+      return "unknown-product";
+    }
+    return this.manager.documentPrincipal.schemeIs("dot")
+      ? host.replace(/\.dot$/, "")
+      : host;
   }
 }

@@ -45,7 +45,7 @@ add_setup(function () {
 });
 
 add_task(async function test_dotapp_loads_with_isolated_origin() {
-  await BrowserTestUtils.withNewTab("dotapp://product-a/", async browser => {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", async browser => {
     const result = await SpecialPowers.spawn(browser, [], () => {
       return {
         title: content.document.title,
@@ -61,7 +61,7 @@ add_task(async function test_dotapp_loads_with_isolated_origin() {
     is(result.title, "product-a", "document served from the registry");
     is(
       result.origin,
-      "dotapp://product-a",
+      "dot://product-a.dot",
       "content principal keys on the product host"
     );
     ok(result.scripted, "subresource script loaded and executed");
@@ -71,7 +71,7 @@ add_task(async function test_dotapp_loads_with_isolated_origin() {
 });
 
 add_task(async function test_dotapp_network_locked() {
-  await BrowserTestUtils.withNewTab("dotapp://product-a/", async browser => {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", async browser => {
     const result = await SpecialPowers.spawn(browser, [], async () => {
       const own = await content
         .fetch("/data.json")
@@ -101,16 +101,16 @@ add_task(async function test_dotapp_origin_isolation() {
   // Principal objects stay valid after their tab closes; open the products
   // sequentially so two tab-close animations don't overlap test teardown.
   let principalA;
-  await BrowserTestUtils.withNewTab("dotapp://product-a/", browser => {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", browser => {
     principalA = browser.browsingContext.currentWindowGlobal.documentPrincipal;
   });
   let principalB;
-  await BrowserTestUtils.withNewTab("dotapp://product-b/", browser => {
+  await BrowserTestUtils.withNewTab("dot://product-b.dot/", browser => {
     principalB = browser.browsingContext.currentWindowGlobal.documentPrincipal;
   });
 
-  is(principalA.origin, "dotapp://product-a", "product-a keeps its origin");
-  is(principalB.origin, "dotapp://product-b", "product-b keeps its origin");
+  is(principalA.origin, "dot://product-a.dot", "product-a keeps its origin");
+  is(principalB.origin, "dot://product-b.dot", "product-b keeps its origin");
   ok(
     principalA.isContentPrincipal && principalB.isContentPrincipal,
     "products get real content principals, not opaque null principals"
@@ -125,7 +125,7 @@ add_task(async function test_dotapp_gets_truapi_bridge() {
   await SpecialPowers.pushPrefEnv({
     set: [["epoca.useragent.enabled", true]],
   });
-  await BrowserTestUtils.withNewTab("dotapp://product-a/", async browser => {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", async browser => {
     const result = await SpecialPowers.spawn(browser, [], () => {
       const page = content.wrappedJSObject;
       return {

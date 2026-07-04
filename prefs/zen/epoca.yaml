@@ -29,3 +29,15 @@
 # by the host in the parent process; products themselves stay network-locked.
 - name: epoca.dotapp.dotns.enabled
   value: true
+
+# Chains the host connects to on behalf of products, as a JSON object of
+# genesis hash -> list of JSON-RPC WebSocket endpoints. Default: Asset Hub
+# Paseo (next/v2), where dotNS and the browse registry live.
+- name: epoca.chain.networks
+  value: '{"0xbf0488dbe9daa1de1c08c5f743e26fdc2a4ecd74cf87dd1b4b1eeb99ae4ef19f": ["wss://paseo-asset-hub-next-rpc.polkadot.io"]}'
+
+# IPFS gateway origins products may load images from (app icons reference
+# bare CIDs on the Bulletin gateway). The one deliberate exception to the
+# product no-network rule; applies to image loads only.
+- name: epoca.dotapp.image-gateways
+  value: '["https://paseo-bulletin-next-ipfs.polkadot.io"]'

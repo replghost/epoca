@@ -21,7 +21,7 @@ const JSWINDOWACTORS = {
       },
     },
     // No `matches`: MatchPattern cannot express host-bearing custom schemes
-    // (dotapp is not in its HostLocatorSchemes, so patterns parse as path
+    // (dot is not in its HostLocatorSchemes, so patterns parse as path
     // globs and MatchesDomain rejects any URI with a host). The child actor
     // gates on the document scheme instead.
     enablePreference: "epoca.useragent.enabled",
@@ -29,7 +29,7 @@ const JSWINDOWACTORS = {
 };
 
 const JSPROCESSACTORS = {
-  // Asset pipe for the dotapp protocol handler: content-process subresource
+  // Asset pipe for the dot protocol handler: content-process subresource
   // channels query the parent-side product registry through this actor.
   EpocaDotApp: {
     parent: {
