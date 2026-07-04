@@ -1464,8 +1464,13 @@ export class HostApiHandle {
         }
     }
     /**
-     * Encode a typed error for `NeedsGetUserId`. `error_kind` is one of
-     * "PermissionDenied", "NotConnected", or "Unknown".
+     * Encode a typed error for `NeedsGetUserId`. `error_kind` must be one
+     * of `"PermissionDenied"`, `"NotConnected"`, or `"Unknown"` — any
+     * other value returns a `JsError` so a JS-side typo surfaces at the
+     * call site instead of silently emitting a bogus `Unknown{reason:""}`
+     * frame to the product. Matches the sibling `encodeAccountGetError`
+     * / `encodeAccountCreateProofError` shape (see
+     * [`parse_request_credentials_error`] / [`parse_create_proof_error`]).
      * @param {string} request_id
      * @param {string} error_kind
      * @param {string | null} [reason]
@@ -1483,6 +1488,11 @@ export class HostApiHandle {
             wasm.hostapihandle_encodeGetUserIdError(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
             var v4 = getArrayU8FromWasm0(r0, r1).slice();
             wasm.__wbindgen_export5(r0, r1 * 1, 1);
             return v4;
@@ -3383,6 +3393,58 @@ export class WalletHandle {
         }
     }
     /**
+     * Assemble the PGAS claim extrinsic (hex, `0x`-prefixed) for Asset Hub.
+     *
+     * The browser fetches chain state via its own RPC — the committed ring
+     * members + index and root `revision` from the People chain, a free
+     * `(day, slot_index)` (see `pgasSlotAlias`), the Asset Hub runtime
+     * `spec`/`tx` versions and `genesis` hash, and confirmation that
+     * `MembersSubscriber::RingRoots` on Asset Hub already carries the
+     * revision — and passes it here; this builds the byte-exact general
+     * transaction funding `target` with PGAS. Submit the result via
+     * `author_submitExtrinsic` on Asset Hub.
+     * @param {string} target_hex
+     * @param {string[]} members_hex
+     * @param {number} ring_index
+     * @param {number} revision
+     * @param {number} day
+     * @param {number} slot_index
+     * @param {number} spec_version
+     * @param {number} tx_version
+     * @param {string} genesis_hex
+     * @returns {string}
+     */
+    buildPgasClaimExtrinsic(target_hex, members_hex, ring_index, revision, day, slot_index, spec_version, tx_version, genesis_hex) {
+        let deferred5_0;
+        let deferred5_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(target_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArrayJsValueToWasm0(members_hex, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            const ptr2 = passStringToWasm0(genesis_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len2 = WASM_VECTOR_LEN;
+            wasm.wallethandle_buildPgasClaimExtrinsic(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ring_index, revision, day, slot_index, spec_version, tx_version, ptr2, len2);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr4 = r0;
+            var len4 = r1;
+            if (r3) {
+                ptr4 = 0; len4 = 0;
+                throw takeObject(r2);
+            }
+            deferred5_0 = ptr4;
+            deferred5_1 = len4;
+            return getStringFromWasm0(ptr4, len4);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred5_0, deferred5_1, 1);
+        }
+    }
+    /**
      * Decrypt data produced by `chatP256Encrypt`.
      * @param {Uint8Array} peer_identifier_key
      * @param {Uint8Array} ciphertext
@@ -3695,6 +3757,40 @@ export class WalletHandle {
         this.__wbg_ptr = ret;
         WalletHandleFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Derive the one-time PGAS slot alias (hex, `0x`-prefixed) for a
+     * `(day, slot_index)` pair.
+     *
+     * Hosts probe `Pgas::ClaimedGasAliases[(day, alias)]` on Asset Hub with
+     * each candidate alias to find a free slot before claiming.
+     * @param {number} day
+     * @param {number} slot_index
+     * @returns {string}
+     */
+    pgasSlotAlias(day, slot_index) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.wallethandle_pgasSlotAlias(retptr, this.__wbg_ptr, day, slot_index);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr1 = r0;
+            var len1 = r1;
+            if (r3) {
+                ptr1 = 0; len1 = 0;
+                throw takeObject(r2);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred2_0, deferred2_1, 1);
+        }
     }
     /**
      * Derive the 32-byte lite-person ring-VRF member key (hex, `0x`-prefixed).
@@ -4398,6 +4494,112 @@ export function generateMnemonic() {
         wasm.__wbindgen_export5(deferred2_0, deferred2_1, 1);
     }
 }
+
+/**
+ * `Pgas::ClaimedGasAliases[(day, alias)]` storage key (hex) — presence marks
+ * a spent PGAS slot.
+ * @param {number} day
+ * @param {string} alias_hex
+ * @returns {string}
+ */
+export function pgasClaimedGasAliasKey(day, alias_hex) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(alias_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.pgasClaimedGasAliasKey(retptr, day, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        var ptr2 = r0;
+        var len2 = r1;
+        if (r3) {
+            ptr2 = 0; len2 = 0;
+            throw takeObject(r2);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export5(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * Decode the `revision` from a People-chain `Members::Root` storage value.
+ * @param {string} value_hex
+ * @returns {number}
+ */
+export function pgasDecodeRingRootRevision(value_hex) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(value_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.pgasDecodeRingRootRevision(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        if (r2) {
+            throw takeObject(r1);
+        }
+        return r0 >>> 0;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Decode the revisions present in a `MembersSubscriber::RingRoots` value.
+ * @param {string} value_hex
+ * @returns {Uint32Array}
+ */
+export function pgasDecodeSubscriberRingRevisions(value_hex) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passStringToWasm0(value_hex, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.pgasDecodeSubscriberRingRevisions(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+        var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+        if (r3) {
+            throw takeObject(r2);
+        }
+        var v2 = getArrayU32FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 4, 4);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * `MembersSubscriber::RingRoots[(lite, ringIndex)]` storage key (hex) on the
+ * submission chain — used to await the ring revision sync before claiming.
+ * @param {number} ring_index
+ * @returns {string}
+ */
+export function pgasSubscriberRingRootsKey(ring_index) {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.pgasSubscriberRingRootsKey(retptr, ring_index);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        deferred1_0 = r0;
+        deferred1_1 = r1;
+        return getStringFromWasm0(r0, r1);
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+        wasm.__wbindgen_export5(deferred1_0, deferred1_1, 1);
+    }
+}
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -4636,7 +4838,7 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).length;
             return ret;
         },
-        __wbg_load_8d95bc8fe6df9612: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+        __wbg_load_1ac28ef7e0b1e375: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             const ret = getObject(arg1).load(getStringFromWasm0(arg2, arg3));
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
@@ -4686,7 +4888,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_8931(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_8891(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -4754,7 +4956,7 @@ function __wbg_get_imports() {
             const ret = Promise.resolve(getObject(arg0));
             return addHeapObject(ret);
         },
-        __wbg_save_37cfbec2b7619a7c: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+        __wbg_save_9dfe9246957ccad8: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).save(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
         }, arguments); },
         __wbg_setItem_bb1a692eb19d66d0: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
@@ -4855,13 +5057,13 @@ function __wbg_get_imports() {
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 796, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8928);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 784, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8888);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 600, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6747);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 586, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6685);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -4908,14 +5110,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_6747(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_6747(arg0, arg1);
+function __wasm_bindgen_func_elem_6685(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_6685(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_8928(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_8888(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_8928(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_8888(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -4926,8 +5128,8 @@ function __wasm_bindgen_func_elem_8928(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_8931(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8931(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8891(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8891(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 
@@ -5060,6 +5262,11 @@ function getArrayJsValueFromWasm0(ptr, len) {
     return result;
 }
 
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -5075,6 +5282,14 @@ function getDataViewMemory0() {
 
 function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -5227,6 +5442,7 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedDataViewMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     return wasm;
 }
