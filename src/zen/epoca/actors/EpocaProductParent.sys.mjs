@@ -142,6 +142,29 @@ export class EpocaProductParent extends JSWindowActorParent {
         await this.#handleDevicePermission(outcome, productId);
         break;
 
+      case "NeedsGetUserId":
+        // epoca has no dotNS "primary username" identity for the wallet, so
+        // report the typed not-connected error; products fall back to their
+        // own connect/onboarding UI.
+        await this.#reply(
+          "encodeGetUserIdError",
+          outcome.request_id,
+          "NotConnected",
+          null
+        );
+        break;
+
+      case "NeedsThemeSubscription":
+        // Report the browser's current color scheme once (Theme enum:
+        // 0 = Light, 1 = Dark). Theme rarely changes mid-session and the
+        // product only needs an initial value to render.
+        await this.#reply(
+          "encodeThemeReceive",
+          outcome.request_id,
+          [this.#isDarkTheme() ? 1 : 0]
+        );
+        break;
+
       case "NeedsPreimageLookupSubscription":
         await this.#handlePreimageLookup(outcome);
         break;
@@ -434,6 +457,16 @@ export class EpocaProductParent extends JSWindowActorParent {
   // In-flight preimage lookups, keyed by request id, so an unsubscribe that
   // arrives mid-fetch can suppress delivery.
   #preimageLookups = new Map();
+
+  #isDarkTheme() {
+    try {
+      return !!this.browsingContext?.topChromeWindow?.matchMedia(
+        "(prefers-color-scheme: dark)"
+      ).matches;
+    } catch {
+      return false;
+    }
+  }
 
   // Preimage lookup (Bulletin content-addressed data, e.g. product icons):
   // the engine hands us a 32-byte hex key; the host resolves it to a CIDv1
