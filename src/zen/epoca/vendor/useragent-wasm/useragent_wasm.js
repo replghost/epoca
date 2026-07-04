@@ -1464,6 +1464,56 @@ export class HostApiHandle {
         }
     }
     /**
+     * Encode a typed error for `NeedsGetUserId`. `error_kind` is one of
+     * "PermissionDenied", "NotConnected", or "Unknown".
+     * @param {string} request_id
+     * @param {string} error_kind
+     * @param {string | null} [reason]
+     * @returns {Uint8Array}
+     */
+    encodeGetUserIdError(request_id, error_kind, reason) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(error_kind, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            var ptr2 = isLikeNone(reason) ? 0 : passStringToWasm0(reason, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            var len2 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeGetUserIdError(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v4 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v4;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode the primary user identity for `NeedsGetUserId`.
+     * @param {string} request_id
+     * @param {string} primary_username
+     * @returns {Uint8Array}
+     */
+    encodeGetUserIdResponse(request_id, primary_username) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(primary_username, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeGetUserIdResponse(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Encode a navigation acknowledgement.
      * @param {string} request_id
      * @returns {Uint8Array}
@@ -1635,6 +1685,53 @@ export class HostApiHandle {
         }
     }
     /**
+     * Encode a preimage lookup interrupt (subscription torn down host-side).
+     * @param {string} request_id
+     * @returns {Uint8Array}
+     */
+    encodePreimageLookupInterrupt(request_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodePreimageLookupInterrupt(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a preimage lookup receive message for
+     * `NeedsPreimageLookupSubscription`.
+     *
+     * Pass `Some(bytes)` with the preimage value once fetched, or `None`
+     * when the key has no preimage.
+     * @param {string} request_id
+     * @param {Uint8Array | null} [value]
+     * @returns {Uint8Array}
+     */
+    encodePreimageLookupReceive(request_id, value) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            var ptr1 = isLikeNone(value) ? 0 : passArray8ToWasm0(value, wasm.__wbindgen_export);
+            var len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodePreimageLookupReceive(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Encode a push notification acknowledgement.
      * @param {string} request_id
      * @returns {Uint8Array}
@@ -1801,6 +1898,50 @@ export class HostApiHandle {
             var v2 = getArrayU8FromWasm0(r0, r1).slice();
             wasm.__wbindgen_export5(r0, r1 * 1, 1);
             return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a theme interrupt (subscription torn down host-side).
+     * @param {string} request_id
+     * @returns {Uint8Array}
+     */
+    encodeThemeInterrupt(request_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeThemeInterrupt(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a theme receive message for `NeedsThemeSubscription`.
+     * `theme_data` is the SCALE-encoded theme payload.
+     * @param {string} request_id
+     * @param {Uint8Array} theme_data
+     * @returns {Uint8Array}
+     */
+    encodeThemeReceive(request_id, theme_data) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(theme_data, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeThemeReceive(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
@@ -4545,7 +4686,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_8910(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_8931(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -4715,12 +4856,12 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 796, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8907);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8928);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 600, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6726);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6747);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -4767,14 +4908,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_6726(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_6726(arg0, arg1);
+function __wasm_bindgen_func_elem_6747(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_6747(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_8907(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_8928(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_8907(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_8928(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -4785,8 +4926,8 @@ function __wasm_bindgen_func_elem_8907(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_8910(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8910(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8931(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8931(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

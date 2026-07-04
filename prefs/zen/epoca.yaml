@@ -42,6 +42,12 @@
 - name: epoca.dotapp.image-gateways
   value: '["https://paseo-bulletin-next-ipfs.polkadot.io"]'
 
+# Bulletin IPFS gateway the host fetches preimage-lookup bodies from
+# (content-addressed product data: icons, receipts, ...). The fetch runs in
+# the parent process on the product's behalf; the product stays network-locked.
+- name: epoca.dotapp.preimage-gateway
+  value: "https://paseo-bulletin-next-ipfs.polkadot.io"
+
 # Allow DOM localStorage for dot:// product origins. Without this, LSNG
 # rejects the datastore request (dot:// windows aren't registered as storage
 # clients) and window.localStorage throws, crashing unmodified web/framework

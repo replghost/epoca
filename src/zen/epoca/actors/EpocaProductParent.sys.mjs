@@ -142,6 +142,19 @@ export class EpocaProductParent extends JSWindowActorParent {
         await this.#handleDevicePermission(outcome, productId);
         break;
 
+      case "NeedsPreimageLookupSubscription":
+        await this.#handlePreimageLookup(outcome);
+        break;
+
+      case "NeedsPreimageLookupUnsubscribe": {
+        const pending = this.#preimageLookups.get(outcome.request_id);
+        if (pending) {
+          pending.cancelled = true;
+          this.#preimageLookups.delete(outcome.request_id);
+        }
+        break;
+      }
+
       case "NeedsChainFollowStop": {
         const stop = this.#chainFollows.get(outcome.request_id);
         if (stop) {
@@ -242,6 +255,10 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
     this.#chainFollows.clear();
     this.#followServerIds.clear();
+    for (const entry of this.#preimageLookups.values()) {
+      entry.cancelled = true;
+    }
+    this.#preimageLookups.clear();
   }
 
   // wasm-bindgen serializes serde_json maps as JS Maps, which JSON.stringify
@@ -412,6 +429,95 @@ export class EpocaProductParent extends JSWindowActorParent {
       console.error("EpocaProduct: chain follow failed", e);
       await abort();
     }
+  }
+
+  // In-flight preimage lookups, keyed by request id, so an unsubscribe that
+  // arrives mid-fetch can suppress delivery.
+  #preimageLookups = new Map();
+
+  // Preimage lookup (Bulletin content-addressed data, e.g. product icons):
+  // the engine hands us a 32-byte hex key; the host resolves it to a CIDv1
+  // (raw codec, blake2b-256 multihash) and fetches the body from the Bulletin
+  // IPFS gateway. Fetching happens here in the parent, which is not subject to
+  // the product network lockdown. Content is immutable, so the "subscription"
+  // is effectively one-shot: deliver once, then the product unsubscribes.
+  async #handlePreimageLookup(outcome) {
+    const requestId = outcome.request_id;
+    const entry = { cancelled: false };
+    this.#preimageLookups.set(requestId, entry);
+    try {
+      const cid = EpocaProductParent.#preimageKeyToCid(outcome.key);
+      const gateway = Services.prefs.getStringPref(
+        "epoca.dotapp.preimage-gateway",
+        ""
+      );
+      let value = null;
+      if (cid && gateway) {
+        const response = await fetch(`${gateway}/ipfs/${cid}`);
+        if (response.ok) {
+          value = new Uint8Array(await response.arrayBuffer());
+        } else if (response.status !== 404) {
+          console.warn(
+            `EpocaProduct: preimage fetch ${cid} -> HTTP ${response.status}`
+          );
+        }
+      }
+      if (entry.cancelled) {
+        return;
+      }
+      // encodePreimageLookupReceive takes Some(bytes) or None (key absent).
+      await this.#reply(
+        "encodePreimageLookupReceive",
+        requestId,
+        value ? Array.from(value) : null
+      );
+    } catch (e) {
+      console.error(`EpocaProduct: preimage lookup failed`, e);
+      if (!entry.cancelled) {
+        await this.#reply("encodePreimageLookupInterrupt", requestId);
+      }
+    } finally {
+      this.#preimageLookups.delete(requestId);
+    }
+  }
+
+  // Mirror useragent-kit host-chain bulletin::preimage_key_to_cid: a 32-byte
+  // key becomes CIDv1 / raw codec (0x55) / blake2b-256 multihash (0xb220,
+  // varint 0xa0 0xe4 0x02) / 32-byte digest, base32-lower ('b' multibase).
+  static #preimageKeyToCid(key) {
+    const raw = key.startsWith("0x") ? key.slice(2) : key;
+    if (raw.length !== 64 || /[^0-9a-fA-F]/.test(raw)) {
+      return null;
+    }
+    const digest = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) {
+      digest[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+    }
+    // CIDv1(0x01) raw(0x55) blake2b-256 multihash(0xa0 0xe4 0x02) len(0x20)
+    // = 6-byte prefix, then the 32-byte digest.
+    const cid = new Uint8Array(38);
+    cid.set([0x01, 0x55, 0xa0, 0xe4, 0x02, 0x20], 0);
+    cid.set(digest, 6);
+    return "b" + EpocaProductParent.#base32LowerNoPad(cid);
+  }
+
+  static #base32LowerNoPad(bytes) {
+    const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+    let out = "";
+    let buffer = 0;
+    let bits = 0;
+    for (const byte of bytes) {
+      buffer = (buffer << 8) | byte;
+      bits += 8;
+      while (bits >= 5) {
+        bits -= 5;
+        out += alphabet[(buffer >> bits) & 0x1f];
+      }
+    }
+    if (bits > 0) {
+      out += alphabet[(buffer << (5 - bits)) & 0x1f];
+    }
+    return out;
   }
 
   // Device access (camera for QR scanning, etc): consent once per product
