@@ -1,0 +1,19 @@
+diff --git a/browser/modules/FaviconLoader.sys.mjs b/browser/modules/FaviconLoader.sys.mjs
+index 10f8044a24..dfa1b87605 100644
+--- a/browser/modules/FaviconLoader.sys.mjs
++++ b/browser/modules/FaviconLoader.sys.mjs
+@@ -252,7 +252,13 @@ class FaviconLoad {
+   }
+ 
+   async onStopRequest(request, statusCode) {
+-    if (request != this.channel) {
++    if (
++      request != this.channel &&
++      // epoca: a suspendable channel wrapper (dot:// product favicons)
++      // opens its wrapped inner channel, so the request is never the
++      // wrapper itself. Not a redirect; accept the result.
++      !(this.channel instanceof Ci.nsISuspendableChannelWrapper)
++    ) {
+       // Indicates that a redirect has occurred. We don't care about the result
+       // of the original channel.
+       return;

@@ -23,6 +23,22 @@ const AUTO_APPROVE_PREF = "epoca.useragent.auto-approve";
 // while another is pending is rejected outright (no queuing, BRG-011).
 const gAccountGrants = new Set();
 let gSignInFlight = false;
+// "<productId>:<kind>" — device permissions granted this session.
+const gDeviceGrants = new Set();
+
+// Gecko permission type + consent wording per TrUAPI DevicePermissionKind.
+// Kinds without a Gecko permission only gate the product-side API.
+const DEVICE_PERMISSIONS = new Map([
+  ["Camera", { geckoType: "camera", label: "use your camera" }],
+  ["Microphone", { geckoType: "microphone", label: "use your microphone" }],
+  ["Location", { geckoType: "geo", label: "see your location" }],
+  ["Notifications", { geckoType: "desktop-notification", label: "show notifications" }],
+  ["Clipboard", { geckoType: "clipboard-read", label: "read your clipboard" }],
+  ["Bluetooth", { geckoType: null, label: "use Bluetooth" }],
+  ["Nfc", { geckoType: null, label: "use NFC" }],
+  ["OpenUrl", { geckoType: null, label: "open external links" }],
+  ["Biometrics", { geckoType: null, label: "use biometric authentication" }],
+]);
 
 export class EpocaProductParent extends JSWindowActorParent {
   async receiveMessage(message) {
@@ -120,6 +136,10 @@ export class EpocaProductParent extends JSWindowActorParent {
 
       case "NeedsNavigate":
         await this.#handleNavigate(outcome);
+        break;
+
+      case "NeedsDevicePermission":
+        await this.#handleDevicePermission(outcome, productId);
         break;
 
       case "NeedsChainFollowStop": {
@@ -392,6 +412,43 @@ export class EpocaProductParent extends JSWindowActorParent {
       console.error("EpocaProduct: chain follow failed", e);
       await abort();
     }
+  }
+
+  // Device access (camera for QR scanning, etc): consent once per product
+  // and kind per session. A grant also sets the matching Gecko permission
+  // on the product's origin for the session, so the follow-up DOM API call
+  // (e.g. getUserMedia) doesn't raise a second doorhanger.
+  async #handleDevicePermission(outcome, productId) {
+    const kind = String(outcome.kind);
+    const known = DEVICE_PERMISSIONS.get(kind);
+    if (!known) {
+      console.warn(`EpocaProduct: unknown device permission kind '${kind}'`);
+      await this.#reply("encodeDevicePermissionError", outcome.request_id);
+      return;
+    }
+    const grantKey = `${productId}:${kind}`;
+    const granted =
+      gDeviceGrants.has(grantKey) ||
+      (await this.#confirm(
+        "Device access",
+        `${productId} wants to ${known.label}.`
+      ));
+    if (granted) {
+      gDeviceGrants.add(grantKey);
+      if (known.geckoType) {
+        Services.perms.addFromPrincipal(
+          this.manager.documentPrincipal,
+          known.geckoType,
+          Services.perms.ALLOW_ACTION,
+          Services.perms.EXPIRE_SESSION
+        );
+      }
+    }
+    await this.#reply(
+      "encodeDevicePermissionResponse",
+      outcome.request_id,
+      granted
+    );
   }
 
   // Map a navigateTo target onto the local product scheme. Accepted forms:

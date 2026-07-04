@@ -18,12 +18,17 @@ function bytes(text) {
 
 const PRODUCT_A_HTML = `<!DOCTYPE html>
 <html>
-  <head><title>product-a</title></head>
+  <head>
+    <title>product-a</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  </head>
   <body>
     <h1 id="title">alpha</h1>
     <script src="/app.js"></script>
   </body>
 </html>`;
+
+const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#e6007a"/></svg>`;
 
 add_setup(function () {
   EpocaDotAppRegistry.register("product-a", {
@@ -32,6 +37,7 @@ add_setup(function () {
       `document.getElementById("title").dataset.scripted = "yes";`
     ),
     "/data.json": bytes(`{"ok":true}`),
+    "/favicon.svg": bytes(FAVICON_SVG),
   });
   EpocaDotAppRegistry.register("product-b", {
     "/index.html": bytes(
@@ -119,6 +125,23 @@ add_task(async function test_dotapp_origin_isolation() {
     !principalA.subsumes(principalB) && !principalB.subsumes(principalA),
     "product principals do not subsume each other"
   );
+});
+
+add_task(async function test_dotapp_favicon() {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", async browser => {
+    const tab = gBrowser.getTabForBrowser(browser);
+    await BrowserTestUtils.waitForCondition(
+      () => tab.getAttribute("image"),
+      "waiting for the tab favicon"
+    );
+    // SVG favicons are delivered as a data: URL (wrapped in
+    // moz-remote-image: for rendering) — assert our bundle's bytes made it.
+    const image = decodeURIComponent(tab.getAttribute("image"));
+    ok(
+      image.includes("data:image/svg+xml"),
+      "tab favicon was served from the product bundle"
+    );
+  });
 });
 
 add_task(async function test_dotapp_gets_truapi_bridge() {
