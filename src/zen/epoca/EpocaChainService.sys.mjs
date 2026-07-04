@@ -42,6 +42,12 @@ class ChainConnection {
     this.#url = url;
   }
 
+  // Open the socket ahead of any request so the first real chain call
+  // doesn't pay TCP+TLS+WS connect latency. Fire-and-forget.
+  prewarm() {
+    this.#ensureOpen().catch(() => {});
+  }
+
   #ensureOpen() {
     if (this.#socket?.readyState === WebSocket.OPEN) {
       return Promise.resolve();
@@ -216,6 +222,21 @@ export const EpocaChainService = {
       this._connections.set(genesisHex, connection);
     }
     return connection;
+  },
+
+  /**
+   * Open the connection for a genesis (default: the first configured chain)
+   * without issuing a request, so a product's first chain call is fast.
+   */
+  prewarm(genesisHex = this.defaultGenesis()) {
+    if (!genesisHex) {
+      return;
+    }
+    try {
+      this._connection(genesisHex).prewarm();
+    } catch (e) {
+      console.warn("EpocaChain: prewarm failed", e);
+    }
   },
 
   /**

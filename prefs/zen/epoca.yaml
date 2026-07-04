@@ -36,6 +36,12 @@
 - name: epoca.chain.networks
   value: '{"0xbf0488dbe9daa1de1c08c5f743e26fdc2a4ecd74cf87dd1b4b1eeb99ae4ef19f": ["wss://paseo-asset-hub-next-rpc.polkadot.io"]}'
 
+# Open the chain WebSocket as soon as a dot:// product loads, so its first
+# chainHead follow reaches a finalized block quickly instead of racing a
+# cold connect. Costs one idle WS for products that never touch the chain.
+- name: epoca.chain.prewarm
+  value: true
+
 # IPFS gateway origins products may load images from (app icons reference
 # bare CIDs on the Bulletin gateway). The one deliberate exception to the
 # product no-network rule; applies to image loads only.

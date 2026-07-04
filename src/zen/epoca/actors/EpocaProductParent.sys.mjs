@@ -41,6 +41,23 @@ const DEVICE_PERMISSIONS = new Map([
 ]);
 
 export class EpocaProductParent extends JSWindowActorParent {
+  // A product that has chain access will follow the chain shortly after it
+  // loads; open the WebSocket now so that first follow reaches a finalized
+  // block quickly (avoids a cold-connect race where an eager chain check
+  // runs before the connection is up). dot:// products only.
+  actorCreated() {
+    try {
+      if (
+        Services.prefs.getBoolPref("epoca.chain.prewarm", true) &&
+        this.manager?.documentPrincipal?.schemeIs("dot")
+      ) {
+        lazy.EpocaChainService.prewarm();
+      }
+    } catch (e) {
+      console.warn("EpocaProduct: chain prewarm skipped", e);
+    }
+  }
+
   async receiveMessage(message) {
     if (message.name !== "EpocaProduct:Frame") {
       return;
