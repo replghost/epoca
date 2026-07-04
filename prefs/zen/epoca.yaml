@@ -41,3 +41,15 @@
 # product no-network rule; applies to image loads only.
 - name: epoca.dotapp.image-gateways
   value: '["https://paseo-bulletin-next-ipfs.polkadot.io"]'
+
+# Allow DOM localStorage for dot:// product origins. Without this, LSNG
+# rejects the datastore request (dot:// windows aren't registered as storage
+# clients) and window.localStorage throws, crashing unmodified web/framework
+# apps (e.g. Next.js products) that touch it during hydration. Products are
+# still origin-isolated; durable app state is expected to go over the TrUAPI
+# storage host functions. TRADEOFF: this disables the LSNG client-id check
+# globally (not just for dot://), a modest defense-in-depth reduction against
+# a compromised content process forging a storage principal. Proper fix:
+# register a ClientSource for dot:// documents so validation passes per-origin.
+- name: dom.storage.client_validation
+  value: false
