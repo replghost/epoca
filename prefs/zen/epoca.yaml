@@ -48,6 +48,11 @@
 - name: epoca.chain.statement-store-endpoint
   value: "wss://paseo-people-next-system-rpc.polkadot.io"
 
+# Deliver statement-store subscription results to products. Kill switch for
+# the statement-store feature; on by default.
+- name: epoca.statement-store.deliver
+  value: true
+
 # IPFS gateway origins products may load images from (app icons reference
 # bare CIDs on the Bulletin gateway). The one deliberate exception to the
 # product no-network rule; applies to image loads only.

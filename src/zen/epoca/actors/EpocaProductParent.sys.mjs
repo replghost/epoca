@@ -501,13 +501,11 @@ export class EpocaProductParent extends JSWindowActorParent {
   // notification into signed statements, and stream them back. Fetching runs
   // in the parent; the product stays network-locked.
   async #handleStatementStoreSubscription(outcome) {
-    // Delivery is gated off by default: the subscription and notification
-    // parsing work, but each statement must be re-encoded as the product's
-    // SignedStatement SCALE struct before encodeStatementStoreReceive — the
-    // raw network statement bytes are a different shape and make the product's
-    // decoder throw. That transformation lives in host-chain (unexposed);
-    // until it's available, don't deliver malformed frames.
-    if (!Services.prefs.getBoolPref("epoca.statement-store.deliver", false)) {
+    // Kill switch (default on). Statements gossiped by the store are already
+    // SCALE SignedStatement structs, so the notification bytes go straight to
+    // encodeStatementStoreReceive; verified end to end against sk3chy.dot
+    // (subscribe -> receive -> unsubscribe, no decode errors).
+    if (!Services.prefs.getBoolPref("epoca.statement-store.deliver", true)) {
       return;
     }
     const requestId = outcome.request_id;
