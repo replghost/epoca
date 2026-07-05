@@ -42,6 +42,12 @@
 - name: epoca.chain.prewarm
   value: true
 
+# JSON-RPC WebSocket endpoint for the statement store (People Next chain),
+# which products reach via the TrUAPI statement-store API. Distinct from the
+# product chains in epoca.chain.networks.
+- name: epoca.chain.statement-store-endpoint
+  value: "wss://paseo-people-next-system-rpc.polkadot.io"
+
 # IPFS gateway origins products may load images from (app icons reference
 # bare CIDs on the Bulletin gateway). The one deliberate exception to the
 # product no-network rule; applies to image loads only.

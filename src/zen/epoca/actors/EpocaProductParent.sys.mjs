@@ -182,6 +182,19 @@ export class EpocaProductParent extends JSWindowActorParent {
         );
         break;
 
+      case "NeedsStatementStoreSubscription":
+        await this.#handleStatementStoreSubscription(outcome);
+        break;
+
+      case "NeedsStatementStoreUnsubscribe": {
+        const stop = this.#statementSubs.get(outcome.request_id);
+        if (stop) {
+          this.#statementSubs.delete(outcome.request_id);
+          stop();
+        }
+        break;
+      }
+
       case "NeedsPreimageLookupSubscription":
         await this.#handlePreimageLookup(outcome);
         break;
@@ -299,6 +312,10 @@ export class EpocaProductParent extends JSWindowActorParent {
       entry.cancelled = true;
     }
     this.#preimageLookups.clear();
+    for (const stop of this.#statementSubs.values()) {
+      stop();
+    }
+    this.#statementSubs.clear();
   }
 
   // wasm-bindgen serializes serde_json maps as JS Maps, which JSON.stringify
@@ -474,6 +491,116 @@ export class EpocaProductParent extends JSWindowActorParent {
   // In-flight preimage lookups, keyed by request id, so an unsubscribe that
   // arrives mid-fetch can suppress delivery.
   #preimageLookups = new Map();
+
+  // Active statement-store subscriptions: request id -> stop function.
+  #statementSubs = new Map();
+
+  // Statement-store subscription (Bulletin statements on the People Next
+  // chain): translate the product's TopicFilter to statement_subscribeStatement
+  // params, subscribe over the host's statement-store WebSocket, parse each
+  // notification into signed statements, and stream them back. Fetching runs
+  // in the parent; the product stays network-locked.
+  async #handleStatementStoreSubscription(outcome) {
+    // Delivery is gated off by default: the subscription and notification
+    // parsing work, but each statement must be re-encoded as the product's
+    // SignedStatement SCALE struct before encodeStatementStoreReceive — the
+    // raw network statement bytes are a different shape and make the product's
+    // decoder throw. That transformation lives in host-chain (unexposed);
+    // until it's available, don't deliver malformed frames.
+    if (!Services.prefs.getBoolPref("epoca.statement-store.deliver", false)) {
+      return;
+    }
+    const requestId = outcome.request_id;
+    const abort = async () => {
+      this.#statementSubs.delete(requestId);
+      await this.#reply("encodeStatementStoreInterrupt", requestId);
+    };
+    try {
+      const params = EpocaProductParent.#statementFilterToParams(outcome.filter);
+      const stop = await lazy.EpocaChainService.subscribeStatements(
+        params,
+        async text => {
+          const statements = EpocaProductParent.#parseStatementNotification(text);
+          if (statements.length) {
+            await this.#reply(
+              "encodeStatementStoreReceive",
+              requestId,
+              statements,
+              false
+            );
+          }
+        },
+        () => abort()
+      );
+      this.#statementSubs.set(requestId, stop);
+    } catch (e) {
+      console.error("EpocaProduct: statement-store subscribe failed", e);
+      await abort();
+    }
+  }
+
+  // TopicFilter -> statement_subscribeStatement params. Mirrors host-chain
+  // statement_subscribe_params: Any -> ["any"], MatchAny(topics) ->
+  // [{ matchAny: [hex...] }]. Defensive about the serialized enum shape.
+  static #statementFilterToParams(filter) {
+    const topics =
+      filter?.MatchAny ?? filter?.matchAny ?? (Array.isArray(filter) ? filter : null);
+    if (Array.isArray(topics) && topics.length) {
+      const hexes = topics.map(t =>
+        typeof t === "string" ? t : EpocaProductParent.#bytesToHex(t)
+      );
+      return [{ matchAny: hexes }];
+    }
+    return ["any"];
+  }
+
+  // Extract signed statements (as Uint8Array) from a statement_subscribeStatement
+  // notification. Mirrors host-chain-core parse_statement_notification, which
+  // reads params.result.{data,newStatements}.statements (hex strings).
+  static #parseStatementNotification(text) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return [];
+    }
+    // Live People Next notifies via method "statement_statement" with
+    // result.event = "newStatements"; older nodes used
+    // "statement_subscribeStatement". Accept both.
+    if (
+      parsed?.method !== "statement_statement" &&
+      parsed?.method !== "statement_subscribeStatement"
+    ) {
+      return [];
+    }
+    const result = parsed.params?.result;
+    const arr =
+      result?.data?.statements ??
+      result?.newStatements?.statements ??
+      result?.statements;
+    if (!Array.isArray(arr)) {
+      return [];
+    }
+    return arr
+      .filter(s => typeof s === "string")
+      .map(s => EpocaProductParent.#hexToBytes(s));
+  }
+
+  static #hexToBytes(hex) {
+    const raw = hex.startsWith("0x") ? hex.slice(2) : hex;
+    const out = new Uint8Array(raw.length >> 1);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = parseInt(raw.slice(i * 2, i * 2 + 2), 16);
+    }
+    return out;
+  }
+
+  static #bytesToHex(bytes) {
+    return (
+      "0x" +
+      Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("")
+    );
+  }
 
   #isDarkTheme() {
     try {

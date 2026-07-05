@@ -1848,6 +1848,190 @@ export class HostApiHandle {
         }
     }
     /**
+     * Encode a create-proof-authorized error.
+     * @param {string} request_id
+     * @param {number} kind
+     * @param {string} reason
+     * @returns {Uint8Array}
+     */
+    encodeStatementProofAuthorizedError(request_id, kind, reason) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(reason, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementProofAuthorizedError(retptr, this.__wbg_ptr, ptr0, len0, kind, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a create-proof-authorized response for
+     * `NeedsStatementStoreCreateProofAuthorized`.
+     * @param {string} request_id
+     * @param {Uint8Array} proof_bytes
+     * @returns {Uint8Array}
+     */
+    encodeStatementProofAuthorizedResponse(request_id, proof_bytes) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(proof_bytes, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementProofAuthorizedResponse(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a create-proof error. `kind` is the protocol error discriminant.
+     * @param {string} request_id
+     * @param {number} kind
+     * @param {string} reason
+     * @returns {Uint8Array}
+     */
+    encodeStatementProofError(request_id, kind, reason) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(reason, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementProofError(retptr, this.__wbg_ptr, ptr0, len0, kind, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a create-proof response for `NeedsStatementStoreCreateProof`.
+     * @param {string} request_id
+     * @param {Uint8Array} proof_bytes
+     * @returns {Uint8Array}
+     */
+    encodeStatementProofResponse(request_id, proof_bytes) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(proof_bytes, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementProofResponse(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a statement-store subscription interrupt (torn down host-side).
+     * @param {string} request_id
+     * @returns {Uint8Array}
+     */
+    encodeStatementStoreInterrupt(request_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementStoreInterrupt(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a statement-store subscription receive for
+     * `NeedsStatementStoreSubscription`. `signed_statements` is an array of
+     * SCALE-encoded signed statements (each a Uint8Array); `is_complete`
+     * marks the terminal batch.
+     * @param {string} request_id
+     * @param {Array<any>} signed_statements
+     * @param {boolean} is_complete
+     * @returns {Uint8Array}
+     */
+    encodeStatementStoreReceive(request_id, signed_statements, is_complete) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementStoreReceive(retptr, this.__wbg_ptr, ptr0, len0, addHeapObject(signed_statements), is_complete);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a statement-store submit error.
+     * @param {string} request_id
+     * @param {string} reason
+     * @returns {Uint8Array}
+     */
+    encodeStatementSubmitError(request_id, reason) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(reason, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementSubmitError(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a statement-store submit acknowledgement for
+     * `NeedsStatementStoreSubmit`.
+     * @param {string} request_id
+     * @returns {Uint8Array}
+     */
+    encodeStatementSubmitResponse(request_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeStatementSubmitResponse(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Encode a storage clear acknowledgement for `NeedsStorageClear`.
      * @param {string} request_id
      * @returns {Uint8Array}
@@ -4888,7 +5072,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_8891(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_8921(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -5058,12 +5242,12 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 784, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8888);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8918);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 586, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6685);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6715);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -5110,14 +5294,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_6685(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_6685(arg0, arg1);
+function __wasm_bindgen_func_elem_6715(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_6715(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_8888(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_8918(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_8888(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_8918(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -5128,8 +5312,8 @@ function __wasm_bindgen_func_elem_8888(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_8891(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8891(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_8921(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_8921(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

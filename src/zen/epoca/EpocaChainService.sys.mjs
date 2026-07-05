@@ -10,7 +10,10 @@
 
 const NETWORKS_PREF = "epoca.chain.networks";
 
-const STOP_METHODS = new Map([["chainHead_v1_follow", "chainHead_v1_unfollow"]]);
+const STOP_METHODS = new Map([
+  ["chainHead_v1_follow", "chainHead_v1_unfollow"],
+  ["statement_subscribeStatement", "statement_unsubscribeStatement"],
+]);
 
 function hexToBytes(hex) {
   return Uint8Array.from(
@@ -255,6 +258,37 @@ export const EpocaChainService = {
   startSubscription(genesisHex, method, params, onMessage, onAbort) {
     return this._connection(genesisHex).startSubscription(
       method,
+      params,
+      onMessage,
+      onAbort
+    );
+  },
+
+  // Dedicated connection to the statement-store chain (People Next), which is
+  // a distinct endpoint from the product's own chains.
+  _ssConnection: null,
+
+  /**
+   * Subscribe to statement-store statements matching a filter. onMessage
+   * receives every raw JSON-RPC message (ack + notifications); the caller
+   * parses statements out of the notifications.
+   *
+   * @param {Array} params - statement_subscribeStatement params (filter).
+   * @returns {Promise<() => void>} stop function.
+   */
+  subscribeStatements(params, onMessage, onAbort) {
+    const url = Services.prefs.getStringPref(
+      "epoca.chain.statement-store-endpoint",
+      ""
+    );
+    if (!url) {
+      return Promise.reject(new Error("no statement-store endpoint configured"));
+    }
+    if (!this._ssConnection) {
+      this._ssConnection = new ChainConnection(url);
+    }
+    return this._ssConnection.startSubscription(
+      "statement_subscribeStatement",
       params,
       onMessage,
       onAbort
