@@ -7,16 +7,19 @@
 // derivation (//app//<dotns_id>//<index>) — private keys never leave this
 // module; products only ever see public keys and signatures.
 //
-// The mnemonic is generated once per profile and stored in the profile.
-// NOTE: it is currently plaintext on disk; moving it to the OS keychain
-// (with an auto-lock timeout via WalletHandle.lock/tick) is a later
-// milestone. A pref override exists for tests and dev.
+// The mnemonic is generated once per profile and stored encrypted at rest in
+// the profile (wallet.json "mnemonicEnc"), using OSKeyStore — the same
+// OS-keychain-backed secret store Firefox uses for saved passwords (macOS
+// Keychain / Windows Credential Manager / libsecret). A pref override exists
+// for tests and dev. (An auto-lock timeout via WalletHandle.lock/tick is a
+// later refinement.)
 
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   JSONFile: "resource://gre/modules/JSONFile.sys.mjs",
+  OSKeyStore: "resource://gre/modules/OSKeyStore.sys.mjs",
 });
 
 const MNEMONIC_PREF = "epoca.useragent.dev-mnemonic";
@@ -47,11 +50,19 @@ export const EpocaWallet = {
       path: PathUtils.join(PathUtils.profileDir, "epoca", "wallet.json"),
     });
     await file.load();
-    if (!file.data.mnemonic) {
-      file.data.mnemonic = glue.generateMnemonic();
-      await file._save();
+
+    // Encrypted at rest (OS keychain-backed).
+    if (file.data.mnemonicEnc) {
+      return lazy.OSKeyStore.decrypt(file.data.mnemonicEnc);
     }
-    return file.data.mnemonic;
+
+    // Either first run, or migration of a legacy plaintext mnemonic to
+    // encrypted storage.
+    const mnemonic = file.data.mnemonic || glue.generateMnemonic();
+    file.data.mnemonicEnc = await lazy.OSKeyStore.encrypt(mnemonic);
+    delete file.data.mnemonic;
+    await file._save();
+    return mnemonic;
   },
 
   /**
