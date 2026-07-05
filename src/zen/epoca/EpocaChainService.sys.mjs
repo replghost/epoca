@@ -268,6 +268,29 @@ export const EpocaChainService = {
   // a distinct endpoint from the product's own chains.
   _ssConnection: null,
 
+  _ssConn() {
+    const url = Services.prefs.getStringPref(
+      "epoca.chain.statement-store-endpoint",
+      ""
+    );
+    if (!url) {
+      throw new Error("no statement-store endpoint configured");
+    }
+    if (!this._ssConnection) {
+      this._ssConnection = new ChainConnection(url);
+    }
+    return this._ssConnection;
+  },
+
+  /**
+   * Send a JSON-RPC request to the statement-store chain (People Next);
+   * resolves with the raw response message text. Used by the allowance-claim
+   * flow for storage reads and extrinsic submission.
+   */
+  ssRpc(method, params) {
+    return this._ssConn().sendRpc(method, params);
+  },
+
   /**
    * Subscribe to statement-store statements matching a filter. onMessage
    * receives every raw JSON-RPC message (ack + notifications); the caller
@@ -277,17 +300,13 @@ export const EpocaChainService = {
    * @returns {Promise<() => void>} stop function.
    */
   subscribeStatements(params, onMessage, onAbort) {
-    const url = Services.prefs.getStringPref(
-      "epoca.chain.statement-store-endpoint",
-      ""
-    );
-    if (!url) {
-      return Promise.reject(new Error("no statement-store endpoint configured"));
+    let conn;
+    try {
+      conn = this._ssConn();
+    } catch (e) {
+      return Promise.reject(e);
     }
-    if (!this._ssConnection) {
-      this._ssConnection = new ChainConnection(url);
-    }
-    return this._ssConnection.startSubscription(
+    return conn.startSubscription(
       "statement_subscribeStatement",
       params,
       onMessage,

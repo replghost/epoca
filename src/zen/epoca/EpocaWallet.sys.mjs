@@ -83,4 +83,55 @@ export const EpocaWallet = {
     const wallet = await this._ensure();
     return wallet.sign(dotnsId, index, payload);
   },
+
+  /**
+   * The wallet's chat-identity account (`//wallet`), used as the owner of the
+   * statement-store allowance and by the native chat/statement-store protocol.
+   *
+   * @returns {Promise<Uint8Array>} 32-byte sr25519 public key.
+   */
+  async walletPublicKey() {
+    const wallet = await this._ensure();
+    return wallet.walletPublicKey();
+  },
+
+  /**
+   * The 32-byte lite-person ring-VRF member key (hex, `0x`-prefixed), used to
+   * locate this account in the on-chain allowance ring.
+   *
+   * @returns {Promise<string>}
+   */
+  async ringVrfMemberKey() {
+    const wallet = await this._ensure();
+    return wallet.ringVrfMemberKey();
+  },
+
+  /**
+   * Assemble the statement-store allowance-claim extrinsic (hex, `0x`-prefixed),
+   * including the ring-VRF proof signed with the wallet's Bandersnatch key.
+   * Chain state (ring members/index, day-period, runtime versions, genesis) is
+   * fetched by the caller via RPC and passed in.
+   *
+   * @returns {Promise<string>}
+   */
+  async buildAllowanceClaimExtrinsic(
+    membersHex,
+    ringIndex,
+    period,
+    seq,
+    specVersion,
+    txVersion,
+    genesisHex
+  ) {
+    const wallet = await this._ensure();
+    return wallet.buildAllowanceClaimExtrinsic(
+      membersHex,
+      ringIndex,
+      period,
+      seq,
+      specVersion,
+      txVersion,
+      genesisHex
+    );
+  },
 };
