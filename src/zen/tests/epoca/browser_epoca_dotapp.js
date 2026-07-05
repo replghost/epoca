@@ -44,9 +44,24 @@ add_setup(function () {
       `<!DOCTYPE html><html><head><title>product-b</title></head><body></body></html>`
     ),
   });
+  // SPA with a RELATIVE asset path (like Nuxt/Vite "./assets/x.js"), served
+  // under a client sub-route to exercise the injected <base href="/">.
+  EpocaDotAppRegistry.register("spa", {
+    "/index.html": bytes(
+      `<!DOCTYPE html><html><head><title>spa</title>` +
+        `<script src="./assets/app.js"></script></head>` +
+        `<body><h1 id="t">spa</h1></body></html>`
+    ),
+    "/assets/app.js": bytes(
+      // Head script: set a flag on documentElement (always present) so the
+      // test observes that the relative asset loaded, not DOM timing.
+      `document.documentElement.dataset.assetLoaded = "yes";`
+    ),
+  });
   registerCleanupFunction(() => {
     EpocaDotAppRegistry.unregister("product-a");
     EpocaDotAppRegistry.unregister("product-b");
+    EpocaDotAppRegistry.unregister("spa");
   });
 });
 
@@ -61,10 +76,12 @@ add_task(async function test_dotapp_loads_with_isolated_origin() {
         cspInjected: !!content.document.querySelector(
           'meta[http-equiv="Content-Security-Policy"]'
         ),
+        baseInjected: !!content.document.querySelector('base[href="/"]'),
         secureContext: content.isSecureContext,
       };
     });
     is(result.title, "product-a", "document served from the registry");
+    ok(result.baseInjected, "host <base href='/'> was injected");
     is(
       result.origin,
       "dot://product-a.dot",
@@ -74,6 +91,21 @@ add_task(async function test_dotapp_loads_with_isolated_origin() {
     ok(result.cspInjected, "host CSP meta was injected into the document");
     ok(result.secureContext, "dotapp documents are secure contexts");
   });
+});
+
+add_task(async function test_dotapp_spa_subroute_relative_assets() {
+  // Loading a client sub-route serves index.html (SPA fallback); its relative
+  // "./assets/app.js" must resolve against the product root, not the route
+  // path, thanks to the injected <base href="/">.
+  await BrowserTestUtils.withNewTab(
+    "dot://spa.dot/play/deep",
+    async browser => {
+      const loaded = await SpecialPowers.spawn(browser, [], () => {
+        return content.document.documentElement.dataset.assetLoaded;
+      });
+      is(loaded, "yes", "relative asset resolved to root under a sub-route");
+    }
+  );
 });
 
 add_task(async function test_dotapp_network_locked() {

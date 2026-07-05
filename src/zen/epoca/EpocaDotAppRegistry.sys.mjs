@@ -256,7 +256,15 @@ export const EpocaDotAppRegistry = {
 // implicit head).
 function injectCsp(bytes) {
   const html = new TextDecoder().decode(bytes);
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${productCsp()}">`;
+  // <base href="/"> is essential for SPA client routes: products reference
+  // bundled assets relatively (e.g. Nuxt/Vite "./_nuxt/x.js"), and when we
+  // serve index.html as the fallback for a route like /play/, the document
+  // base would otherwise be dot://<id>/play/ so relative assets resolve to
+  // /play/_nuxt/x.js (404). Pinning the base to the product root fixes them;
+  // absolute-path products are unaffected. It must precede any asset ref.
+  const meta =
+    `<base href="/">` +
+    `<meta http-equiv="Content-Security-Policy" content="${productCsp()}">`;
   let insertAt = null;
   const anchor = /<head[^>]*>|<html[^>]*>/i.exec(html);
   if (anchor) {
