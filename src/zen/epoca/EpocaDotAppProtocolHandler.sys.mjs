@@ -41,7 +41,16 @@ export class EpocaDotAppProtocolHandler {
         if (asset?.inputStream) {
           channel.contentStream = asset.inputStream;
           channel.contentType = asset.contentType;
-          channel.contentCharset = "utf-8";
+          // Only text formats carry a charset. Setting it on binary types
+          // appends ";charset=utf-8" to the Content-Type, which breaks strict
+          // consumers — e.g. WebAssembly.instantiateStreaming requires exactly
+          // "application/wasm".
+          if (
+            asset.contentType.startsWith("text/") ||
+            asset.contentType === "application/json"
+          ) {
+            channel.contentCharset = "utf-8";
+          }
           wrapper.resume();
         } else {
           this.#fail(channel, wrapper, Cr.NS_ERROR_FILE_NOT_FOUND);
