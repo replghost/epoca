@@ -107,6 +107,35 @@ export const EpocaWallet = {
   },
 
   /**
+   * Sign with the `//wallet` chat-identity sr25519 key (the account behind
+   * walletPublicKey). Used to answer the DotSpark auth challenge.
+   *
+   * @param {Uint8Array} payload
+   * @returns {Promise<Uint8Array>} 64-byte signature.
+   */
+  async signWallet(payload) {
+    const wallet = await this._ensure();
+    return wallet.signWallet(payload);
+  },
+
+  /**
+   * Build the signed lite-person username-registration payload for submission
+   * to the DotSpark backend. Binds the consumer-registration signature to the
+   * given verifier ("attester") account.
+   *
+   * @param {string} fullUsername - `<lowercase-letters>.<digits>`.
+   * @param {string} verifierAccountId - attester SS58 or 0x-hex.
+   * @returns {Promise<object>} the camelCase payload (0x-hex fields).
+   */
+  async buildLitePersonRegistrationPayload(fullUsername, verifierAccountId) {
+    const wallet = await this._ensure();
+    return wallet.buildLitePersonRegistrationPayload(
+      fullUsername,
+      verifierAccountId
+    );
+  },
+
+  /**
    * Assemble the statement-store allowance-claim extrinsic (hex, `0x`-prefixed),
    * including the ring-VRF proof signed with the wallet's Bandersnatch key.
    * Chain state (ring members/index, day-period, runtime versions, genesis) is

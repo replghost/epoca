@@ -53,6 +53,13 @@
 - name: epoca.statement-store.deliver
   value: true
 
+# DotSpark backend base URL for lite-person username registration (the v2
+# attestation flow that makes the wallet identity a committed ring member,
+# unblocking the statement-store allowance claim). Empty falls back to the
+# built-in default.
+- name: epoca.registration.backend
+  value: "https://bravo.product.parity.io"
+
 # IPFS gateway origins products may load images from (app icons reference
 # bare CIDs on the Bulletin gateway). The one deliberate exception to the
 # product no-network rule; applies to image loads only.
