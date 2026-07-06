@@ -60,6 +60,20 @@
 - name: epoca.registration.backend
   value: "https://bravo.product.parity.io"
 
+# Network selector required by the DotSpark username status endpoint (recent
+# backend drift; no reference client sends it and the valid value is not
+# published). Empty disables status polling — on-chain ring inclusion is the
+# reliable confirmation regardless.
+- name: epoca.registration.network
+  value: ""
+
+# When a product uses the statement store, provision the host identity's
+# allowance in the background: register it on-chain via DotSpark if it is not
+# yet a ring member, then claim. Off by default because it creates a persistent
+# on-chain identity.
+- name: epoca.registration.auto-provision
+  value: false
+
 # IPFS gateway origins products may load images from (app icons reference
 # bare CIDs on the Bulletin gateway). The one deliberate exception to the
 # product no-network rule; applies to image loads only.

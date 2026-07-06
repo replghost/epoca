@@ -19,6 +19,7 @@ const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
+  EpocaRegistration: "resource:///modules/EpocaRegistration.sys.mjs",
   EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
 });
 
@@ -32,6 +33,10 @@ const RING_SCAN_WINDOW = 6;
 // Confirmation poll attempts after submission, and the delay between them (ms).
 const CONFIRM_ATTEMPTS = 10;
 const CONFIRM_DELAY_MS = 6_000;
+// After registration, how long to wait for the freshly-attested member to land
+// in a committed ring (ring commitment is async, chain-driven).
+const RING_WAIT_ATTEMPTS = 20;
+const RING_WAIT_DELAY_MS = 15_000;
 
 function bytesToHex(bytes) {
   return (
@@ -75,21 +80,26 @@ export const EpocaAllowance = {
    * claiming one via a ring-VRF proof if it doesn't. Idempotent and
    * de-duplicated across concurrent callers.
    *
+   * @param {object} [options]
+   * @param {boolean} [options.provision] - if the identity is not yet a
+   *   committed ring member, register it via DotSpark and wait for ring
+   *   commitment before claiming.
    * @returns {Promise<object>} one of:
    *   {status:"already-granted"}
-   *   {status:"submitted", txHash, confirmed}
+   *   {status:"submitted", txHash, confirmed, registered?, username?}
    *   {status:"not-ring-included", scanned:{lo,current}}
+   *   {status:"registered-awaiting-ring-commit", username, account}
    */
-  ensure() {
+  ensure(options = {}) {
     if (!this._inFlight) {
-      this._inFlight = this._claim().finally(() => {
+      this._inFlight = this._claim(options).finally(() => {
         this._inFlight = null;
       });
     }
     return this._inFlight;
   },
 
-  async _claim() {
+  async _claim({ provision = false } = {}) {
     const glue = await lazy.EpocaHostEngine.glue();
     const accountId = await lazy.EpocaWallet.walletPublicKey();
     const accountHex = bytesToHex(accountId);
@@ -100,7 +110,24 @@ export const EpocaAllowance = {
     }
 
     const memberKey = await lazy.EpocaWallet.ringVrfMemberKey();
-    const ring = await this._findCommittedRing(glue, memberKey);
+    let ring = await this._findCommittedRing(glue, memberKey);
+
+    let registeredUsername = null;
+    if (!ring && provision) {
+      // Self-provision: register the identity, then wait for it to land in a
+      // committed ring (async on the chain side) before claiming.
+      const reg = await lazy.EpocaRegistration.register();
+      registeredUsername = reg.username;
+      ring = await this._waitForCommittedRing(glue, memberKey);
+      if (!ring) {
+        return {
+          status: "registered-awaiting-ring-commit",
+          username: registeredUsername,
+          account: accountHex,
+        };
+      }
+    }
+
     if (!ring) {
       const current = await this._currentRingIndex(glue);
       return {
@@ -141,7 +168,30 @@ export const EpocaAllowance = {
         break;
       }
     }
-    return { status: "submitted", txHash, confirmed };
+    return {
+      status: "submitted",
+      txHash,
+      confirmed,
+      ...(registeredUsername
+        ? { registered: true, username: registeredUsername }
+        : {}),
+    };
+  },
+
+  /**
+   * Poll for the member key to appear in a committed ring, after registration.
+   *
+   * @returns {Promise<{index:number, members:string[]}|null>}
+   */
+  async _waitForCommittedRing(glue, memberKey) {
+    for (let i = 0; i < RING_WAIT_ATTEMPTS; i++) {
+      const ring = await this._findCommittedRing(glue, memberKey);
+      if (ring) {
+        return ring;
+      }
+      await delay(RING_WAIT_DELAY_MS);
+    }
+    return null;
   },
 
   /** True if any `StmtStoreAllowanceByAccount` entry exists for the account. */

@@ -10,6 +10,7 @@
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaAllowance: "resource:///modules/EpocaAllowance.sys.mjs",
   EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
@@ -508,6 +509,19 @@ export class EpocaProductParent extends JSWindowActorParent {
     if (!Services.prefs.getBoolPref("epoca.statement-store.deliver", true)) {
       return;
     }
+
+    // A product using the statement store is the signal to provision the
+    // host identity's allowance (register on-chain if needed, then claim).
+    // Off by default: it registers a persistent on-chain identity. Fire and
+    // forget; EpocaAllowance de-duplicates across subscriptions.
+    if (Services.prefs.getBoolPref("epoca.registration.auto-provision", false)) {
+      lazy.EpocaAllowance.ensure({ provision: true })
+        .then(result =>
+          console.debug("EpocaProduct: allowance ensure", result?.status)
+        )
+        .catch(e => console.error("EpocaProduct: allowance ensure failed", e));
+    }
+
     const requestId = outcome.request_id;
     const abort = async () => {
       this.#statementSubs.delete(requestId);
