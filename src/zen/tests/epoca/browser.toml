@@ -6,6 +6,16 @@
 support-files = [
   "head.js",
 ]
+# In local (unpackaged) builds the epoca modules and actors are symlinked from
+# dist into the source tree, which sits outside the build's srcdir. The content
+# process sandbox cannot follow those symlinks, so any epoca code that must run
+# in a content process (the dot:// protocol handler + content policy, the
+# EpocaProduct/EpocaDotApp actors) fails to load and its loads hang. Packaged
+# builds embed everything in omni.ja and are unaffected, so this only lowers the
+# sandbox for these dev-build tests. See EpocaUserAgent.sys.mjs.
+prefs = [
+  "security.sandbox.content.level=0",
+]
 
 ["browser_epoca_accounts.js"]
 

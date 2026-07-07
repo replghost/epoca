@@ -9,7 +9,7 @@
   "scripts": {
     "build": "surfer build",
     "build:ui": "surfer build --ui",
-    "start": "cd engine && python3 ./mach run --noprofile",
+    "start": "cd engine && MOZ_DISABLE_CONTENT_SANDBOX=1 python3 ./mach run --noprofile",
     "start:bloat": "XPCOM_MEM_BLOAT_LOG=1 npm start",
     "import": "npm run ffprefs && npm run import:dumps && surfer import",
     "import:dumps": "python3 scripts/update_service_dumps.py",
