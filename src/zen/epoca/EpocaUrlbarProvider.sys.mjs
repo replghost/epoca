@@ -18,8 +18,6 @@ ChromeUtils.defineESModuleGetters(lazy, {
   UrlbarResult: "moz-src:///browser/components/urlbar/UrlbarResult.sys.mjs",
 });
 
-const ENABLED_PREF = "epoca.useragent.enabled";
-
 // "browse.dot", "browse.dot/route", "dot://browse/route" — a dotNS label
 // followed by an optional path.
 const DOT_INPUT_RE =
@@ -58,8 +56,12 @@ export class EpocaUrlbarProviderDotNames extends UrlbarProvider {
   }
 
   async isActive(queryContext) {
+    // dot:// is a first-class scheme (always registered), so route dot-name
+    // input regardless of epoca.useragent.enabled. Only explicit ".dot"/"dot://"
+    // input matches (dotInputToDotAppUrl), so normal hostnames/searches are
+    // unaffected. Without this, typing "<name>.dot" falls through to Firefox's
+    // fixup, which treats it as a hostname ("Server Not Found").
     return (
-      Services.prefs.getBoolPref(ENABLED_PREF, false) &&
       !queryContext.searchMode &&
       !!dotInputToDotAppUrl(queryContext.searchString)
     );

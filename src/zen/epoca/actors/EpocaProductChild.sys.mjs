@@ -25,20 +25,27 @@ const BOOTSTRAP = `
   })();
 `;
 
-// Product origins, plus any http(s) page for PoC/bridge testing while the
-// epoca.useragent.enabled pref is flipped. This gate lives here because the
-// actor's `matches` cannot express dot URIs (see EpocaUserAgent.sys.mjs).
-const BRIDGE_SCHEMES = new Set(["dot", "https", "http"]);
-
 export class EpocaProductChild extends JSWindowActorChild {
   #sandbox = null;
   // Content-side function that posts a host frame to the page's port.
   #deliverToProduct = null;
 
+  // dot:// products always get the host bridge — it is the whole point of the
+  // scheme, and product host-api clients (e.g. host-api-wrapper) refuse to run
+  // until they see the injected __HOST_WEBVIEW_MARK__/__HOST_API_PORT__. http(s)
+  // pages only get it while epoca.useragent.enabled is flipped, for PoC/testing.
+  // (This gate lives here because the actor's `matches` cannot express dot URIs;
+  // see EpocaUserAgent.sys.mjs.)
   handleEvent(event) {
-    if (
-      event.type === "DOMDocElementInserted" &&
-      BRIDGE_SCHEMES.has(this.document?.documentURIObject?.scheme)
+    if (event.type !== "DOMDocElementInserted") {
+      return;
+    }
+    const scheme = this.document?.documentURIObject?.scheme;
+    if (scheme === "dot") {
+      this.#installBridge();
+    } else if (
+      (scheme === "https" || scheme === "http") &&
+      Services.prefs.getBoolPref("epoca.useragent.enabled", false)
     ) {
       this.#installBridge();
     }

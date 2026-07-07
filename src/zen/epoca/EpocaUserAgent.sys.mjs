@@ -23,8 +23,10 @@ const JSWINDOWACTORS = {
     // No `matches`: MatchPattern cannot express host-bearing custom schemes
     // (dot is not in its HostLocatorSchemes, so patterns parse as path
     // globs and MatchesDomain rejects any URI with a host). The child actor
-    // gates on the document scheme instead.
-    enablePreference: "epoca.useragent.enabled",
+    // gates on the document scheme instead: dot:// products always get the
+    // bridge; http(s) only when epoca.useragent.enabled (PoC). No
+    // `enablePreference` here, or the actor would not instantiate for dot://
+    // products on a default profile.
   },
 };
 
