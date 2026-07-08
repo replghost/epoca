@@ -23,6 +23,8 @@ XPCOM_MANIFESTS += [
 ]
 
 FINAL_TARGET_FILES.modules.epoca += [
+    "vendor/useragent-extensions-wasm/useragent_extensions_wasm.js",
+    "vendor/useragent-extensions-wasm/useragent_extensions_wasm_bg.wasm",
     "vendor/useragent-wasm/useragent_wasm.js",
     "vendor/useragent-wasm/useragent_wasm_bg.wasm",
 ]

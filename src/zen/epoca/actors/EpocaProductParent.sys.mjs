@@ -57,9 +57,39 @@ export class EpocaProductParent extends JSWindowActorParent {
     } catch (e) {
       console.warn("EpocaProduct: chain prewarm skipped", e);
     }
+    // Forward extension push events (CRDT updates, awareness, peer changes)
+    // to this page. Room ids are namespaced "<productId>/<roomId>" on the
+    // way in, so only events for this page's product pass the filter.
+    this.#unsubscribeExtEvents = lazy.EpocaHostEngine.subscribeExtensionEvents(
+      events => {
+        const productId = this.#productId();
+        for (const { event, payloadJson } of events) {
+          const scoped = EpocaProductParent.#payloadForProduct(
+            payloadJson,
+            productId
+          );
+          if (scoped === null) {
+            continue;
+          }
+          try {
+            this.sendAsyncMessage("EpocaProduct:ExtPush", {
+              event,
+              payloadJson: scoped,
+            });
+          } catch (e) {
+            // Actor torn down mid-broadcast — the unsubscribe in didDestroy
+            // stops future deliveries.
+          }
+        }
+      }
+    );
   }
 
   async receiveMessage(message) {
+    if (message.name === "EpocaProduct:ExtCall") {
+      await this.#handleExtensionCall(message.data);
+      return;
+    }
     if (message.name !== "EpocaProduct:Frame") {
       return;
     }
@@ -303,7 +333,96 @@ export class EpocaProductParent extends JSWindowActorParent {
   // matches the product-SDK's follow lifecycle.
   #followServerIds = new Map();
 
+  // Unsubscribe handle for extension push events (set in actorCreated).
+  #unsubscribeExtEvents = null;
+
+  // Extension call from the page's window.__hostCall: dispatch to the
+  // shared registry with the room id scoped to this product, then resolve
+  // the page's pending promise with the raw JSON result (mirrors the
+  // reference ProductView semantics: error envelopes resolve, not reject).
+  async #handleExtensionCall(json) {
+    let call;
+    try {
+      call = JSON.parse(json);
+    } catch {
+      return;
+    }
+    const { callId, channel, method } = call;
+    if (
+      typeof callId !== "number" ||
+      typeof channel !== "string" ||
+      typeof method !== "string"
+    ) {
+      return;
+    }
+    const productId = this.#productId();
+    let params =
+      call.params && typeof call.params === "object" ? call.params : {};
+    if (typeof params.roomId === "string") {
+      params = { ...params, roomId: `${productId}/${params.roomId}` };
+    }
+    let valueJson = null;
+    try {
+      valueJson = await lazy.EpocaHostEngine.extensionDispatch(
+        channel,
+        method,
+        JSON.stringify(params)
+      );
+    } catch (e) {
+      console.error("EpocaProduct: extension dispatch failed", e);
+      try {
+        this.sendAsyncMessage("EpocaProduct:ExtResolve", {
+          callId,
+          ok: false,
+          valueJson: JSON.stringify(String(e?.message || e)),
+        });
+      } catch (sendErr) {
+        // Actor torn down.
+      }
+      return;
+    }
+    if (valueJson !== null) {
+      valueJson = EpocaProductParent.#payloadForProduct(valueJson, productId, {
+        passWithoutRoom: true,
+      });
+    }
+    try {
+      this.sendAsyncMessage("EpocaProduct:ExtResolve", {
+        callId,
+        ok: true,
+        valueJson,
+      });
+    } catch (e) {
+      // Actor torn down.
+    }
+  }
+
+  // Rewrite a JSON payload's "<productId>/<roomId>" back to the page-visible
+  // room id. Returns the rewritten JSON, the payload unchanged when it has
+  // no roomId (only if `passWithoutRoom`; events without a room would leak
+  // across products otherwise), or null when the room belongs to another
+  // product.
+  static #payloadForProduct(payloadJson, productId, { passWithoutRoom } = {}) {
+    let payload;
+    try {
+      payload = JSON.parse(payloadJson);
+    } catch {
+      return passWithoutRoom ? payloadJson : null;
+    }
+    if (!payload || typeof payload.roomId !== "string") {
+      return passWithoutRoom ? payloadJson : null;
+    }
+    const prefix = `${productId}/`;
+    if (!payload.roomId.startsWith(prefix)) {
+      return null;
+    }
+    payload.roomId = payload.roomId.slice(prefix.length);
+    return JSON.stringify(payload);
+  }
+
   didDestroy() {
+    this.#unsubscribeExtEvents?.();
+    this.#unsubscribeExtEvents = null;
     for (const stop of this.#chainFollows.values()) {
       stop();
     }

@@ -8,6 +8,10 @@
 
 const GLUE_URL = "resource:///modules/epoca/useragent_wasm.js";
 const WASM_URL = "resource:///modules/epoca/useragent_wasm_bg.wasm";
+const EXT_GLUE_URL =
+  "resource:///modules/epoca/useragent_extensions_wasm.js";
+const EXT_WASM_URL =
+  "resource:///modules/epoca/useragent_extensions_wasm_bg.wasm";
 
 const lazy = {};
 
@@ -36,6 +40,70 @@ async function readBinaryResource(url) {
 export const EpocaHostEngine = {
   _enginePromise: null,
   _gluePromise: null,
+  _extRegistryPromise: null,
+  _extSubscribers: new Set(),
+
+  /**
+   * The extension registry (window.host.ext.* — CRDT et al.), from the
+   * vendored useragent-extensions-wasm bundle. One registry per browser
+   * process: the CRDT extension runs the LocalBroadcastCrdtRuntime, so all
+   * product tabs share documents and sync through push events.
+   */
+  extensionRegistry() {
+    if (!this._extRegistryPromise) {
+      this._extRegistryPromise = (async () => {
+        if (typeof globalThis.performance === "undefined") {
+          globalThis.performance = { now: () => Date.now() };
+        }
+        const glue = ChromeUtils.importESModule(EXT_GLUE_URL, {
+          global: "current",
+        });
+        const wasmBytes = await readBinaryResource(EXT_WASM_URL);
+        await glue.default({ module_or_path: wasmBytes });
+        const registry = new glue.ExtensionRegistryHandle();
+        registry.registerBuiltinsWithLocalCrdt();
+        return registry;
+      })();
+    }
+    return this._extRegistryPromise;
+  },
+
+  /**
+   * Subscribe to extension push events. `callback` receives an array of
+   * `{event, payloadJson}` objects. Returns an unsubscribe function.
+   */
+  subscribeExtensionEvents(callback) {
+    this._extSubscribers.add(callback);
+    return () => this._extSubscribers.delete(callback);
+  },
+
+  /**
+   * Dispatch an extension call and fan out any push events it produced.
+   * The local runtimes only queue events as a result of dispatches, so
+   * draining here (no timer) delivers every event promptly.
+   *
+   * Returns the extension's JSON result string, or null.
+   */
+  async extensionDispatch(channel, method, paramsJson) {
+    const registry = await this.extensionRegistry();
+    const result = registry.dispatch(channel, method, paramsJson) ?? null;
+    let events = [];
+    try {
+      events = JSON.parse(registry.drainEvents());
+    } catch (e) {
+      console.error("EpocaHostEngine: drainEvents parse failed", e);
+    }
+    if (events.length) {
+      for (const subscriber of this._extSubscribers) {
+        try {
+          subscriber(events);
+        } catch (e) {
+          console.error("EpocaHostEngine: extension event subscriber failed", e);
+        }
+      }
+    }
+    return result;
+  },
 
   /**
    * The initialized wasm-bindgen glue module (HostApiHandle, WalletHandle,
