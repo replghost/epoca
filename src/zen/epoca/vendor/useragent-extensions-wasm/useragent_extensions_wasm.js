@@ -131,6 +131,19 @@ export class ExtensionRegistryHandle {
     registerBuiltinsWithLocalCrdt() {
         wasm.extensionregistryhandle_registerBuiltinsWithLocalCrdt(this.__wbg_ptr);
     }
+    /**
+     * Register built-in extensions like [`Self::register_builtins_with_local_crdt`],
+     * but with the CRDT extension backed by the given relay runtime handle
+     * ([`useragent_extensions::RelayCrdtRuntime`]): local fan-out plus
+     * cross-device sync over the Statement Store. The host drives the relay
+     * side through the handle (`desiredTopics` / `ingestStatement` /
+     * `drainOutbound`).
+     * @param {RelayCrdtHandle} relay
+     */
+    registerBuiltinsWithRelayCrdt(relay) {
+        _assertClass(relay, RelayCrdtHandle);
+        wasm.extensionregistryhandle_registerBuiltinsWithRelayCrdt(this.__wbg_ptr, relay.__wbg_ptr);
+    }
 }
 if (Symbol.dispose) ExtensionRegistryHandle.prototype[Symbol.dispose] = ExtensionRegistryHandle.prototype.free;
 
@@ -854,6 +867,97 @@ export class MediaProtocolHandle {
     }
 }
 if (Symbol.dispose) MediaProtocolHandle.prototype[Symbol.dispose] = MediaProtocolHandle.prototype.free;
+
+/**
+ * JS-facing handle over `useragent_extensions::RelayCrdtRuntime`.
+ *
+ * Construct it with an ephemeral per-session sender id, register it via
+ * [`ExtensionRegistryHandle::register_builtins_with_relay_crdt`], then drive
+ * the transport from the host:
+ * - keep statement subscriptions matching [`Self::desired_topics`] (and fetch
+ *   a topic's existing statements when it first appears — late join);
+ * - feed inbound statements to [`Self::ingest_statement`];
+ * - sign and submit everything from [`Self::drain_outbound`] with the host
+ *   account.
+ */
+export class RelayCrdtHandle {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RelayCrdtHandleFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_relaycrdthandle_free(ptr, 0);
+    }
+    /**
+     * JSON array of `{"roomId": string, "topicHex": "0x…"}` for every joined room.
+     * @returns {string}
+     */
+    desiredTopics() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.relaycrdthandle_desiredTopics(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Drain statements to sign and submit, as a JSON array of
+     * `{"topicHex", "dataBase64", "channelHex"|null, "expirySecs"|null}`.
+     * @returns {string}
+     */
+    drainOutbound() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            wasm.relaycrdthandle_drainOutbound(retptr, this.__wbg_ptr);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            deferred1_0 = r0;
+            deferred1_1 = r1;
+            return getStringFromWasm0(r0, r1);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export2(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * Feed one inbound statement payload for a topic (`0x…` hex).
+     * @param {string} topic_hex
+     * @param {Uint8Array} data
+     */
+    ingestStatement(topic_hex, data) {
+        const ptr0 = passStringToWasm0(topic_hex, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(data, wasm.__wbindgen_export3);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.relaycrdthandle_ingestStatement(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+    }
+    /**
+     * `sender_id`: ephemeral per-host-session id (e.g. 8 random bytes, hex).
+     * @param {string} sender_id
+     */
+    constructor(sender_id) {
+        const ptr0 = passStringToWasm0(sender_id, wasm.__wbindgen_export3, wasm.__wbindgen_export4);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.relaycrdthandle_new(ptr0, len0);
+        this.__wbg_ptr = ret;
+        RelayCrdtHandleFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+}
+if (Symbol.dispose) RelayCrdtHandle.prototype[Symbol.dispose] = RelayCrdtHandle.prototype.free;
 function __wbg_get_imports() {
     const import0 = {
         __proto__: null,
@@ -975,6 +1079,9 @@ const ExtensionRegistryHandleFinalization = (typeof FinalizationRegistry === 'un
 const MediaProtocolHandleFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_mediaprotocolhandle_free(ptr, 1));
+const RelayCrdtHandleFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_relaycrdthandle_free(ptr, 1));
 
 function addHeapObject(obj) {
     if (heap_next === heap.length) heap.push(heap.length + 1);
@@ -983,6 +1090,12 @@ function addHeapObject(obj) {
 
     heap[idx] = obj;
     return idx;
+}
+
+function _assertClass(instance, klass) {
+    if (!(instance instanceof klass)) {
+        throw new Error(`expected instance of ${klass.name}`);
+    }
 }
 
 function dropObject(idx) {
@@ -1043,6 +1156,13 @@ let heap_next = heap.length;
 
 function isLikeNone(x) {
     return x === undefined || x === null;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {

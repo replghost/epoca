@@ -17,6 +17,7 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
+  EpocaCrdtRelay: "resource:///modules/EpocaCrdtRelay.sys.mjs",
 });
 
 async function readBinaryResource(url) {
@@ -43,11 +44,19 @@ export const EpocaHostEngine = {
   _extRegistryPromise: null,
   _extSubscribers: new Set(),
 
+  // The RelayCrdtRuntime handle (sans-IO): epoca drives its I/O — statement
+  // subscribe/fetch/sign/submit — through EpocaCrdtRelay. Set alongside the
+  // registry. A per-process random sender id lets the runtime drop its own
+  // statement echoes on ingest.
+  _relay: null,
+  _relayGlue: null,
+
   /**
    * The extension registry (window.host.ext.* — CRDT et al.), from the
    * vendored useragent-extensions-wasm bundle. One registry per browser
-   * process: the CRDT extension runs the LocalBroadcastCrdtRuntime, so all
-   * product tabs share documents and sync through push events.
+   * process. The CRDT extension runs the RelayCrdtRuntime: updates still fan
+   * out to this device's tabs via push events, and also relay across devices
+   * through the statement store (driven by EpocaCrdtRelay).
    */
   extensionRegistry() {
     if (!this._extRegistryPromise) {
@@ -61,7 +70,15 @@ export const EpocaHostEngine = {
         const wasmBytes = await readBinaryResource(EXT_WASM_URL);
         await glue.default({ module_or_path: wasmBytes });
         const registry = new glue.ExtensionRegistryHandle();
-        registry.registerBuiltinsWithLocalCrdt();
+        const senderBytes = new Uint8Array(8);
+        crypto.getRandomValues(senderBytes);
+        const senderId = Array.from(senderBytes, b =>
+          b.toString(16).padStart(2, "0")
+        ).join("");
+        this._relay = new glue.RelayCrdtHandle(senderId);
+        this._relayGlue = glue;
+        registry.registerBuiltinsWithRelayCrdt(this._relay);
+        lazy.EpocaCrdtRelay.start();
         return registry;
       })();
     }
@@ -87,22 +104,35 @@ export const EpocaHostEngine = {
   async extensionDispatch(channel, method, paramsJson) {
     const registry = await this.extensionRegistry();
     const result = registry.dispatch(channel, method, paramsJson) ?? null;
+    await this.fanExtensionEvents();
+    // Drive the statement-store relay: reconcile subscriptions and submit any
+    // outbound the dispatch produced. Fire-and-forget (it does network I/O).
+    lazy.EpocaCrdtRelay.pump();
+    return result;
+  },
+
+  /**
+   * Drain the extension runtime's queued push events and fan them to product
+   * tabs. Called after a dispatch and after the relay ingests a peer statement.
+   */
+  async fanExtensionEvents() {
+    const registry = await this.extensionRegistry();
     let events = [];
     try {
       events = JSON.parse(registry.drainEvents());
     } catch (e) {
       console.error("EpocaHostEngine: drainEvents parse failed", e);
     }
-    if (events.length) {
-      for (const subscriber of this._extSubscribers) {
-        try {
-          subscriber(events);
-        } catch (e) {
-          console.error("EpocaHostEngine: extension event subscriber failed", e);
-        }
+    if (!events.length) {
+      return;
+    }
+    for (const subscriber of this._extSubscribers) {
+      try {
+        subscriber(events);
+      } catch (e) {
+        console.error("EpocaHostEngine: extension event subscriber failed", e);
       }
     }
-    return result;
   },
 
   /**
