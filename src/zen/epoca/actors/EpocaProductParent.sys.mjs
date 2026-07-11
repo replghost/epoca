@@ -190,6 +190,23 @@ export class EpocaProductParent extends JSWindowActorParent {
         await this.#handleDevicePermission(outcome, productId);
         break;
 
+      case "NeedsDeriveEntropy":
+        try {
+          const entropy = await lazy.EpocaWallet.deriveProductEntropy(
+            productId,
+            Uint8Array.from(outcome.key)
+          );
+          await this.#reply(
+            "encodeDeriveEntropyResponse",
+            outcome.request_id,
+            entropy
+          );
+        } catch (e) {
+          console.error("EpocaProduct: deriveEntropy failed", e);
+          await this.#reply("encodeDeriveEntropyError", outcome.request_id);
+        }
+        break;
+
       case "NeedsGetUserId":
         // epoca has no dotNS "primary username" identity for the wallet, so
         // report the typed not-connected error; products fall back to their

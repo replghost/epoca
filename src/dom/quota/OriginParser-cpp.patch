@@ -1,0 +1,17 @@
+diff --git a/dom/quota/OriginParser.cpp b/dom/quota/OriginParser.cpp
+index 2d4203727b..670d1457a7 100644
+--- a/dom/quota/OriginParser.cpp
++++ b/dom/quota/OriginParser.cpp
+@@ -137,6 +137,12 @@ void OriginParser::HandleScheme(const nsDependentCSubstring& aToken) {
+       (isFile = aToken.EqualsLiteral("file")) || aToken.EqualsLiteral("app") ||
+       aToken.EqualsLiteral("resource") ||
+       aToken.EqualsLiteral("moz-extension") ||
++      // epoca: dot://<name>.dot product origins are standard, host-bearing
++      // and storage-eligible (see src/zen/epoca/components.conf). Accept the
++      // scheme so QuotaManager gives each product its own storage directory
++      // (IndexedDB, Cache API, LSNG); without this the origin resolves to
++      // InvalidOrigin and storage opens fail with UnknownError.
++      aToken.EqualsLiteral("dot") ||
+       (isChrome = aToken.EqualsLiteral(kChromeOrigin)) ||
+       aToken.EqualsLiteral("uuid")) {
+     mScheme = aToken;

@@ -33,3 +33,4 @@ prefs = [
 
 ["browser_epoca_storage.js"]
 
+["browser_epoca_indexeddb.js"]

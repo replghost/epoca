@@ -85,6 +85,20 @@ export const EpocaWallet = {
   },
 
   /**
+   * Deterministic, product-scoped entropy for the `deriveEntropy` host
+   * function: a keyed blake2b chain over the BIP-39 root entropy, the product
+   * id, and the caller's key. The root entropy never leaves the wallet.
+   *
+   * @param {string} productId
+   * @param {Uint8Array} key - caller-chosen, up to 32 bytes.
+   * @returns {Promise<Uint8Array>} 32 bytes.
+   */
+  async deriveProductEntropy(productId, key) {
+    const wallet = await this._ensure();
+    return wallet.deriveProductEntropy(productId, key);
+  },
+
+  /**
    * The wallet's chat-identity account (`//wallet`), used as the owner of the
    * statement-store allowance and by the native chat/statement-store protocol.
    *
