@@ -104,13 +104,21 @@ export const EpocaAllowance = {
     const accountId = await lazy.EpocaWallet.walletPublicKey();
     const accountHex = bytesToHex(accountId);
 
+    console.info(`[epoca:allowance] claim start account=${accountHex}`);
+
     // Idempotency: skip if the account already has an allowance entry.
     if (await this._allowanceExists(glue, accountHex)) {
+      console.info("[epoca:allowance] already granted");
       return { status: "already-granted" };
     }
 
     const memberKey = await lazy.EpocaWallet.ringVrfMemberKey();
     let ring = await this._findCommittedRing(glue, memberKey);
+    console.info(
+      `[epoca:allowance] committed ring lookup: ${
+        ring ? `found index ${ring.index}` : "none"
+      } (provision=${provision})`
+    );
 
     let registeredUsername = null;
     if (!ring && provision) {
@@ -118,18 +126,30 @@ export const EpocaAllowance = {
       // committed ring (async on the chain side) before claiming.
       const reg = await lazy.EpocaRegistration.register();
       registeredUsername = reg.username;
+      console.info(
+        "[epoca:allowance] registered; waiting for ring commitment " +
+          "(chain-driven, minutes)…"
+      );
       ring = await this._waitForCommittedRing(glue, memberKey);
       if (!ring) {
+        console.info(
+          "[epoca:allowance] status=registered-awaiting-ring-commit " +
+            `username=${registeredUsername}`
+        );
         return {
           status: "registered-awaiting-ring-commit",
           username: registeredUsername,
           account: accountHex,
         };
       }
+      console.info(`[epoca:allowance] ring committed at index ${ring.index}`);
     }
 
     if (!ring) {
       const current = await this._currentRingIndex(glue);
+      console.info(
+        `[epoca:allowance] status=not-ring-included (current ring ${current})`
+      );
       return {
         status: "not-ring-included",
         scanned: { lo: Math.max(0, current - RING_SCAN_WINDOW), current },
@@ -159,6 +179,9 @@ export const EpocaAllowance = {
       [extrinsicHex]
     );
     const txHash = rpcResult(submitRaw, "author_submitExtrinsic");
+    console.info(
+      `[epoca:allowance] claim extrinsic submitted tx=${txHash}; confirming…`
+    );
 
     let confirmed = false;
     for (let i = 0; i < CONFIRM_ATTEMPTS; i++) {
@@ -168,6 +191,9 @@ export const EpocaAllowance = {
         break;
       }
     }
+    console.info(
+      `[epoca:allowance] status=submitted tx=${txHash} confirmed=${confirmed}`
+    );
     return {
       status: "submitted",
       txHash,

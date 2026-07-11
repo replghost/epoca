@@ -112,6 +112,9 @@ export const EpocaRegistration = {
     }
     await lazy.EpocaWallet.setUsername(fullUsername);
     const backend = backendBase();
+    console.info(
+      `[epoca:registration] start username=${fullUsername} backend=${backend}`
+    );
 
     // 1. Resolve the live attester; the payload's consumer-registration
     //    signature binds to it, so this must precede building the payload.
@@ -122,6 +125,7 @@ export const EpocaRegistration = {
         `attester lookup HTTP ${attRes.status}: ${attRes.text}`
       );
     }
+    console.info(`[epoca:registration] attester resolved ${attester}`);
 
     // 2. Build the signed candidate payload, matching the wire shape the
     //    backend actually acts on (verified live): `candidateAccountId` must be
@@ -141,6 +145,7 @@ export const EpocaRegistration = {
 
     // 3-4. Challenge-response auth (nonce is single-use, so re-challenge on retry).
     const token = await this._authenticate(backend, publicKeyHex);
+    console.info("[epoca:registration] authenticated (bearer token acquired)");
 
     // 5. Submit the attestation.
     const submit = await postJson(
@@ -153,9 +158,16 @@ export const EpocaRegistration = {
         `attestation submit HTTP ${submit.status}: ${submit.text}`
       );
     }
+    console.info(
+      `[epoca:registration] attestation submitted HTTP ${submit.status} ` +
+        `(candidateAccountId=${payload.candidateAccountId})`
+    );
 
     // 6. Poll until the backend reports the username assigned on-chain.
     const assigned = await this._pollAssignment(backend, fullUsername);
+    console.info(
+      `[epoca:registration] done username=${fullUsername} assigned=${assigned}`
+    );
 
     return {
       account: "0x" + publicKeyHex,
@@ -173,6 +185,7 @@ export const EpocaRegistration = {
       });
       if (ch.status < 200 || ch.status >= 300) {
         lastErr = `auth challenge HTTP ${ch.status}: ${ch.text}`;
+        console.warn(`[epoca:registration] ${lastErr} (retry ${i + 1}/3)`);
         continue;
       }
       const nonce = field(ch.text, "nonce");
