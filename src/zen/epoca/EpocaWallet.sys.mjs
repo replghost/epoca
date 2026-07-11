@@ -98,6 +98,32 @@ export const EpocaWallet = {
     return wallet.deriveProductEntropy(productId, key);
   },
 
+  _identityFile() {
+    const file = new lazy.JSONFile({
+      path: PathUtils.join(PathUtils.profileDir, "epoca", "identity.json"),
+    });
+    return file.load().then(() => file);
+  },
+
+  /**
+   * The wallet's registered lite-person username (`<name>.<digits>`), or null
+   * if the identity has not been provisioned. Non-secret, so kept out of the
+   * encrypted wallet.json.
+   *
+   * @returns {Promise<string|null>}
+   */
+  async getUsername() {
+    const file = await this._identityFile();
+    return file.data.username ?? null;
+  },
+
+  /** Persist the chosen username so it is stable across registration retries. */
+  async setUsername(username) {
+    const file = await this._identityFile();
+    file.data.username = username;
+    await file._save();
+  },
+
   /**
    * The wallet's chat-identity account (`//wallet`), used as the owner of the
    * statement-store allowance and by the native chat/statement-store protocol.

@@ -67,5 +67,19 @@ export let gEpocaUserAgent = {
         instance.registerProvider(new EpocaUrlbarProviderDotNames());
       }
     }, "browser-delayed-startup-finished");
+
+    // Attach the identity panel (toolbar button + popup) to every browser
+    // window. Unlike the urlbar registration above this observer persists, so
+    // each new window gets its own panel instance.
+    Services.obs.addObserver(subject => {
+      try {
+        const { EpocaIdentityPanel } = ChromeUtils.importESModule(
+          "resource:///modules/EpocaIdentityPanel.sys.mjs"
+        );
+        subject.gEpocaIdentityPanel = new EpocaIdentityPanel(subject);
+      } catch (e) {
+        console.error("epoca: identity panel init failed", e);
+      }
+    }, "browser-delayed-startup-finished");
   },
 };

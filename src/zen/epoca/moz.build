@@ -11,6 +11,7 @@ EXTRA_JS_MODULES += [
     "EpocaDotAppRegistry.sys.mjs",
     "EpocaDotNs.sys.mjs",
     "EpocaHostEngine.sys.mjs",
+    "EpocaIdentityPanel.sys.mjs",
     "EpocaProductStorage.sys.mjs",
     "EpocaRegistration.sys.mjs",
     "EpocaSs58.sys.mjs",

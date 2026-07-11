@@ -207,17 +207,34 @@ export class EpocaProductParent extends JSWindowActorParent {
         }
         break;
 
-      case "NeedsGetUserId":
-        // epoca has no dotNS "primary username" identity for the wallet, so
-        // report the typed not-connected error; products fall back to their
-        // own connect/onboarding UI.
-        await this.#reply(
-          "encodeGetUserIdError",
-          outcome.request_id,
-          "NotConnected",
-          null
-        );
+      case "NeedsGetUserId": {
+        // Return the wallet's registered lite-person username. If none is
+        // provisioned yet, kick off registration in the background (idempotent,
+        // de-duped by EpocaAllowance) so a retry resolves once it lands, and
+        // report not-connected for now. Registration is gated by the same
+        // auto-provision pref as the statement-store allowance, since it
+        // creates a persistent on-chain identity.
+        const username = await lazy.EpocaWallet.getUsername();
+        if (username) {
+          await this.#reply(
+            "encodeGetUserIdResponse",
+            outcome.request_id,
+            username
+          );
+        } else {
+          // No identity yet. We deliberately do NOT auto-register here: the
+          // user picks their handle explicitly in the epoca identity panel
+          // (toolbar), which registers on-chain and persists the username.
+          // Once provisioned, a retry of this call resolves.
+          await this.#reply(
+            "encodeGetUserIdError",
+            outcome.request_id,
+            "NotConnected",
+            null
+          );
+        }
         break;
+      }
 
       case "NeedsThemeSubscription":
         // Report the browser's current color scheme once (Theme enum:

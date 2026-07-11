@@ -104,7 +104,13 @@ export const EpocaRegistration = {
    *   "alice.42". Defaults to an auto-generated name.
    * @returns {Promise<object>} { account, username, submitted, assigned }.
    */
-  async register(fullUsername = randomUsername()) {
+  async register(fullUsername) {
+    // Reuse the persisted username if one was already chosen, so retries (and
+    // getUserId) resolve to a stable name rather than a fresh random each time.
+    if (!fullUsername) {
+      fullUsername = (await lazy.EpocaWallet.getUsername()) || randomUsername();
+    }
+    await lazy.EpocaWallet.setUsername(fullUsername);
     const backend = backendBase();
 
     // 1. Resolve the live attester; the payload's consumer-registration

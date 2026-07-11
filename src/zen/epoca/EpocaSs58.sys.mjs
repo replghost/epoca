@@ -223,3 +223,7 @@ export function encodeSs58(pubkey, prefix = 42) {
   full[payload.length + 1] = checksum[1];
   return base58(full);
 }
+
+// Namespace export for consumers that lazy-import via
+// ChromeUtils.defineESModuleGetters ({ EpocaSs58: "..." } → lazy.EpocaSs58).
+export const EpocaSs58 = { encodeSs58 };

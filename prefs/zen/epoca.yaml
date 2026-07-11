@@ -67,10 +67,12 @@
 - name: epoca.registration.network
   value: ""
 
-# When a product uses the statement store, provision the host identity's
-# allowance in the background: register it on-chain via DotSpark if it is not
-# yet a ring member, then claim. Off by default because it creates a persistent
-# on-chain identity.
+# When a product uses the statement store, allow provisioning the host
+# identity's allowance in the background (register on-chain via DotSpark if not
+# yet a ring member, then claim). Off by default: registration creates a
+# persistent on-chain identity with a user-chosen handle, so it is driven
+# explicitly from the epoca identity panel rather than silently in the
+# background. Enable to let statement-store products auto-provision.
 - name: epoca.registration.auto-provision
   value: false
 
