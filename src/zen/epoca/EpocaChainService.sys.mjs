@@ -72,14 +72,20 @@ class ChainConnection {
 
   #onClose() {
     this.#socket = null;
-    for (const { reject } of this.#pendingRequests.values()) {
-      reject(new Error("chain connection closed"));
-    }
-    this.#pendingRequests.clear();
     const aborted = [
       ...this.#pendingSubscriptions.values(),
       ...this.#activeSubscriptions.values(),
     ];
+    if (this.#pendingRequests.size || aborted.length) {
+      console.warn(
+        `EpocaChain: connection closed url=${this.#url} ` +
+          `pendingReqs=${this.#pendingRequests.size} abortedSubs=${aborted.length}`
+      );
+    }
+    for (const { reject } of this.#pendingRequests.values()) {
+      reject(new Error("chain connection closed"));
+    }
+    this.#pendingRequests.clear();
     this.#pendingSubscriptions.clear();
     this.#activeSubscriptions.clear();
     for (const sub of aborted) {
@@ -118,6 +124,14 @@ class ChainConnection {
           } else {
             this.#activeSubscriptions.set(parsed.result, sub);
           }
+        } else {
+          // No subscription id in the ack — the server rejected the
+          // subscribe (e.g. method unsupported / not permitted). Surface it;
+          // the sub is now neither pending nor active.
+          console.warn(
+            `EpocaChain: subscription ack has no id (${sub.stopMethod}): ` +
+              text.slice(0, 300)
+          );
         }
         if (!sub.cancelled) {
           sub.onMessage(text);
