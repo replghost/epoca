@@ -748,7 +748,158 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
     return arr
       .filter(s => typeof s === "string")
-      .map(s => EpocaProductParent.#hexToBytes(s));
+      .map(s =>
+        EpocaProductParent.#toPositionalSignedStatement(
+          EpocaProductParent.#hexToBytes(s)
+        )
+      )
+      .filter(Boolean);
+  }
+
+  // Transcode a raw on-chain `sp_statement_store` statement (tagged
+  // `Compact<field_count>` + tag-prefixed fields) into the positional
+  // `SignedStatement` struct the product SDK decodes:
+  //   proof(enum) | Option<[u8;32]> decryptionKey | Option<u64> expiry
+  //   | Option<[u8;32]> channel | Vector<[u8;32]> topics | Option<Bytes> data
+  // Mirrors useragent-kit's transcode_onchain_to_signed_statement (PR #1548);
+  // a stopgap until the rebuilt wasm's onchainToSignedStatement is vendored.
+  // Statements from People Next use the LegacyExpiry dialect (tag 2 = u64,
+  // timestamp in the high 32 bits). Returns null on a malformed statement.
+  static #toPositionalSignedStatement(raw) {
+    let pos = 0;
+    const need = n => {
+      if (pos + n > raw.length) {
+        throw new Error("truncated statement");
+      }
+    };
+    // SCALE Compact<u32> decode.
+    const compact = () => {
+      need(1);
+      const b0 = raw[pos];
+      const mode = b0 & 0b11;
+      if (mode === 0) {
+        pos += 1;
+        return b0 >> 2;
+      }
+      if (mode === 1) {
+        need(2);
+        const v = (b0 | (raw[pos + 1] << 8)) >>> 2;
+        pos += 2;
+        return v;
+      }
+      if (mode === 2) {
+        need(4);
+        const v =
+          ((b0 |
+            (raw[pos + 1] << 8) |
+            (raw[pos + 2] << 16) |
+            (raw[pos + 3] << 24)) >>>
+            2) >>>
+          0;
+        pos += 4;
+        return v;
+      }
+      throw new Error("unsupported compact big-integer length");
+    };
+    const encodeCompact = v => {
+      if (v < 0x40) {
+        return [v << 2];
+      }
+      if (v < 0x4000) {
+        const x = (v << 2) | 0b01;
+        return [x & 0xff, (x >> 8) & 0xff];
+      }
+      const x = ((v << 2) | 0b10) >>> 0;
+      return [x & 0xff, (x >> 8) & 0xff, (x >> 16) & 0xff, (x >> 24) & 0xff];
+    };
+    try {
+      const numFields = compact();
+      let proof = null;
+      let decryptionKey = null;
+      let expiry = null; // Uint8Array(8), verbatim LE
+      let channel = null;
+      const topics = [];
+      let data = null;
+      const slice = n => {
+        need(n);
+        const out = raw.slice(pos, pos + n);
+        pos += n;
+        return out;
+      };
+      for (let f = 0; f < numFields; f++) {
+        need(1);
+        const tag = raw[pos++];
+        switch (tag) {
+          case 0: {
+            need(1);
+            const variant = raw[pos];
+            const bodyLen =
+              variant === 0 || variant === 1
+                ? 96 // Sr25519/Ed25519: sig[64]+signer[32]
+                : variant === 2
+                ? 98 // Ecdsa: sig[65]+signer[33]
+                : variant === 3
+                ? 72 // OnChain: who[32]+block[32]+event u64[8]
+                : -1;
+            if (bodyLen < 0) {
+              throw new Error(`unknown proof variant ${variant}`);
+            }
+            proof = slice(1 + bodyLen); // discriminant + body, verbatim
+            break;
+          }
+          case 1:
+            decryptionKey = slice(32);
+            break;
+          case 2:
+            expiry = slice(8); // LegacyExpiry u64 LE, full width
+            break;
+          case 3:
+            channel = slice(32);
+            break;
+          case 4:
+          case 5:
+          case 6:
+          case 7:
+            topics.push(slice(32));
+            break;
+          case 8: {
+            const len = compact();
+            data = slice(len);
+            break;
+          }
+          default:
+            throw new Error(`unknown field tag ${tag}`);
+        }
+      }
+      if (!proof) {
+        throw new Error("statement has no proof");
+      }
+      const out = [];
+      const opt = bytes => {
+        if (bytes) {
+          out.push(1, ...bytes);
+        } else {
+          out.push(0);
+        }
+      };
+      out.push(...proof); // non-optional enum
+      opt(decryptionKey);
+      opt(expiry);
+      opt(channel);
+      out.push(...encodeCompact(topics.length));
+      for (const t of topics) {
+        out.push(...t);
+      }
+      if (data) {
+        out.push(1, ...encodeCompact(data.length), ...data);
+      } else {
+        out.push(0);
+      }
+      return new Uint8Array(out);
+    } catch (e) {
+      console.warn("EpocaProduct: statement transcode failed", e);
+      return null;
+    }
   }
 
   static #hexToBytes(hex) {
