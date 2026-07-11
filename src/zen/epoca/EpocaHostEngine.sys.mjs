@@ -202,6 +202,18 @@ export const EpocaHostEngine = {
    *
    * @returns {Promise<Uint8Array>} the SCALE response frame.
    */
+  /**
+   * A shared StatementHandle for building/assembling statement-store payloads
+   * (buildSigningPayload, assembleStatement). Distinct from HostApiHandle.
+   */
+  async statementHandle() {
+    if (!this._statementHandle) {
+      const glue = await this.glue();
+      this._statementHandle = new glue.StatementHandle();
+    }
+    return this._statementHandle;
+  },
+
   async encodeResponse(method, ...args) {
     const engine = await this._ensure();
     return engine[method](...args);

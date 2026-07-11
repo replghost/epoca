@@ -251,6 +251,29 @@ export class EpocaProductParent extends JSWindowActorParent {
         await this.#handleStatementStoreSubscription(outcome);
         break;
 
+      case "NeedsStatementStoreCreateProof":
+        await this.#handleStatementProof(
+          outcome,
+          "encodeStatementProofResponse",
+          "encodeStatementProofError"
+        );
+        break;
+
+      case "NeedsStatementStoreCreateProofAuthorized":
+        // Authorized (delegated) proof: no per-message account/prompt. Same
+        // sr25519 //wallet signature as CreateProof; only the response tag
+        // differs. The onboarding StatementSubmit grant is what authorizes it.
+        await this.#handleStatementProof(
+          outcome,
+          "encodeStatementProofAuthorizedResponse",
+          "encodeStatementProofAuthorizedError"
+        );
+        break;
+
+      case "NeedsStatementStoreSubmit":
+        await this.#handleStatementSubmit(outcome);
+        break;
+
       case "NeedsStatementStoreUnsubscribe": {
         const stop = this.#statementSubs.get(outcome.request_id);
         if (stop) {
@@ -648,6 +671,211 @@ export class EpocaProductParent extends JSWindowActorParent {
 
   // Active statement-store subscriptions: request id -> stop function.
   #statementSubs = new Map();
+
+  // Assembled (chain-ready) statements from create-proof, keyed by
+  // hex(sig)+hex(signer), so submit resubmits the exact bytes epoca signed
+  // rather than the product's re-assembly (avoids expiry non-determinism).
+  #preparedStatements = new Map();
+
+  // Produce an sr25519 //wallet proof for a statement and return the 97-byte
+  // StatementProof (Sr25519): [0x00, signature[64], signer[32]]. Also caches
+  // the assembled chain binary for the matching submit. Shared by the plain
+  // and authorized create-proof outcomes (People Next authenticates every
+  // statement with the allowance-holding //wallet key, not a ring-VRF proof).
+  async #handleStatementProof(outcome, okMethod, errMethod) {
+    try {
+      const fields = EpocaProductParent.#decodeStatementFields(
+        Uint8Array.from(outcome.statement_data)
+      );
+      const stmt = await lazy.EpocaHostEngine.statementHandle();
+      const now = Math.floor(Date.now() / 1000);
+      const priority = fields.expiry
+        ? Number(fields.expiry & 0xffffffffn)
+        : 0;
+      const payload = stmt.buildSigningPayload(
+        now,
+        fields.decryptionKey,
+        fields.channel,
+        priority,
+        fields.topicsFlat,
+        fields.data
+      );
+      const signer = await lazy.EpocaWallet.walletPublicKey();
+      const signature = await lazy.EpocaWallet.signWallet(payload);
+      const assembled = stmt.assembleStatement(payload, signer, signature);
+      this.#preparedStatements.set(
+        EpocaProductParent.#proofKey(signature, signer),
+        Uint8Array.from(assembled)
+      );
+
+      const proof = new Uint8Array(97);
+      proof[0] = 0x00; // Sr25519 variant
+      proof.set(signature, 1);
+      proof.set(signer, 65);
+      await this.#reply(okMethod, outcome.request_id, proof);
+    } catch (e) {
+      console.error("EpocaProduct: statement proof failed", e);
+      // kind 2 = Unknown (reason string honored for this variant).
+      await this.#reply(errMethod, outcome.request_id, 2, String(e?.message || e));
+    }
+  }
+
+  async #handleStatementSubmit(outcome) {
+    try {
+      const sent = Uint8Array.from(outcome.signed_statement);
+      // Prefer the chain-ready bytes epoca assembled at proof time (keyed by
+      // the proof's sig+signer, which the product's SignedStatement carries at
+      // bytes [1..97)); fall back to the product's bytes if not cached.
+      let toSubmit = sent;
+      if (sent.length >= 97 && sent[0] === 0x00) {
+        const key = EpocaProductParent.#proofKey(
+          sent.subarray(1, 65),
+          sent.subarray(65, 97)
+        );
+        const cached = this.#preparedStatements.get(key);
+        if (cached) {
+          toSubmit = cached;
+          this.#preparedStatements.delete(key);
+        }
+      }
+      const hex =
+        "0x" +
+        Array.from(toSubmit, b => b.toString(16).padStart(2, "0")).join("");
+      const raw = await lazy.EpocaChainService.ssRpc("statement_submit", [hex]);
+      // ssRpc resolves even on a JSON-RPC error or a rejection status, so
+      // inspect the body: throw on `.error`, and treat only the accepted
+      // statuses as success (mirrors host-chain's rpc_submit — "noAllowance"
+      // and other statuses are rejections, not acks).
+      const body = JSON.parse(raw);
+      if (body.error) {
+        throw new Error(`statement_submit: ${JSON.stringify(body.error)}`);
+      }
+      const status = String(body.result ?? "").toLowerCase();
+      const ok = ["ok", "accepted", "submitted", "new", "known", "knownexpired"];
+      if (!ok.includes(status)) {
+        throw new Error(`statement_submit rejected: ${body.result}`);
+      }
+      await this.#reply("encodeStatementSubmitResponse", outcome.request_id);
+    } catch (e) {
+      console.error("EpocaProduct: statement submit failed", e);
+      await this.#reply(
+        "encodeStatementSubmitError",
+        outcome.request_id,
+        String(e?.message || e)
+      );
+    }
+  }
+
+  static #proofKey(sig, signer) {
+    const hex = u8 =>
+      Array.from(u8, b => b.toString(16).padStart(2, "0")).join("");
+    return hex(sig) + hex(signer);
+  }
+
+  // Decode the SCALE `Statement` struct carried in create-proof outcomes:
+  //   Option(Proof) | Option(dk[32]) | Option(expiry u64 LE) |
+  //   Option(channel[32]) | Vector(Topic[32]) | Option(data)
+  // Proof is None on a proof request. Returns the pieces buildSigningPayload
+  // needs. topicsFlat is the 32*n concatenation.
+  static #decodeStatementFields(raw) {
+    let pos = 0;
+    const need = n => {
+      if (pos + n > raw.length) {
+        throw new Error("truncated statement_data");
+      }
+    };
+    const optBytes = n => {
+      need(1);
+      const flag = raw[pos++];
+      if (flag === 0) {
+        return null;
+      }
+      if (flag !== 1) {
+        throw new Error("bad Option flag");
+      }
+      need(n);
+      const out = raw.slice(pos, pos + n);
+      pos += n;
+      return out;
+    };
+    const compact = () => {
+      need(1);
+      const b0 = raw[pos];
+      const mode = b0 & 0b11;
+      if (mode === 0) {
+        pos += 1;
+        return b0 >> 2;
+      }
+      if (mode === 1) {
+        need(2);
+        const v = (b0 | (raw[pos + 1] << 8)) >>> 2;
+        pos += 2;
+        return v;
+      }
+      need(4);
+      const v =
+        ((b0 |
+          (raw[pos + 1] << 8) |
+          (raw[pos + 2] << 16) |
+          (raw[pos + 3] << 24)) >>>
+          2) >>>
+        0;
+      pos += 4;
+      return v;
+    };
+    // proof: Option(Proof) — expected None (0x00) on a proof request; if
+    // present, skip its enum body by variant.
+    need(1);
+    const proofFlag = raw[pos++];
+    if (proofFlag === 1) {
+      need(1);
+      const variant = raw[pos];
+      const body = variant <= 1 ? 96 : variant === 2 ? 98 : variant === 3 ? 72 : -1;
+      if (body < 0) {
+        throw new Error("bad proof variant in statement_data");
+      }
+      pos += 1 + body;
+    }
+    const decryptionKey = optBytes(32);
+    let expiry = null;
+    {
+      need(1);
+      const flag = raw[pos++];
+      if (flag === 1) {
+        need(8);
+        let v = 0n;
+        for (let i = 0; i < 8; i++) {
+          v |= BigInt(raw[pos + i]) << BigInt(8 * i);
+        }
+        pos += 8;
+        expiry = v;
+      } else if (flag !== 0) {
+        throw new Error("bad expiry Option flag");
+      }
+    }
+    const channel = optBytes(32);
+    const topicCount = compact();
+    const topicsFlat = new Uint8Array(topicCount * 32);
+    for (let i = 0; i < topicCount; i++) {
+      need(32);
+      topicsFlat.set(raw.slice(pos, pos + 32), i * 32);
+      pos += 32;
+    }
+    let data = new Uint8Array(0);
+    {
+      need(1);
+      const flag = raw[pos++];
+      if (flag === 1) {
+        const len = compact();
+        need(len);
+        data = raw.slice(pos, pos + len);
+        pos += len;
+      } else if (flag !== 0) {
+        throw new Error("bad data Option flag");
+      }
+    }
+    return { decryptionKey, expiry, channel, topicsFlat, data };
+  }
 
   // Statement-store subscription (Bulletin statements on the People Next
   // chain): translate the product's TopicFilter to statement_subscribeStatement
