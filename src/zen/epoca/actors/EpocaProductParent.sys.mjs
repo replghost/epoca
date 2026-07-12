@@ -251,6 +251,32 @@ export class EpocaProductParent extends JSWindowActorParent {
         await this.#handleStatementStoreSubscription(outcome);
         break;
 
+      case "NeedsRemotePermission":
+        // RFC 0002 remote-operation grants (StatementSubmit, PreimageSubmit).
+        // The product only requests these after the user drives the grant UI
+        // ("Allow all"), and the real gate on submission is the on-chain
+        // statement-store allowance — so grant. encodeRemotePermissionResponse
+        // is all-or-nothing (single boolean for the batch).
+        await this.#reply(
+          "encodeRemotePermissionResponse",
+          outcome.request_id,
+          true
+        );
+        break;
+
+      case "NeedsResourceAllocation":
+        // RFC 0010 batched allowance slots (StatementStoreAllowance,
+        // BulletinAllowance). Grant every requested slot (Allocated) — the
+        // on-chain allowance is the real backing; mirrors the reference host.
+        // No wasm binding for this response yet, so hand-roll the frame.
+        this.#sendFrame(
+          EpocaProductParent.#encodeResourceAllocationResponse(
+            outcome.request_id,
+            (outcome.resources || []).length
+          )
+        );
+        break;
+
       case "NeedsStatementStoreCreateProof":
         await this.#handleStatementProof(
           outcome,
@@ -764,6 +790,36 @@ export class EpocaProductParent extends JSWindowActorParent {
         String(e?.message || e)
       );
     }
+  }
+
+  // Hand-rolled TrUAPI resource-allocation response (no wasm binding for it in
+  // @useragent-kit/wasm yet). Frame: compact-str request_id, tag 131
+  // (RESOURCE_ALLOCATION_RESP), version 0, Result::Ok (0), vector length, then
+  // one outcome tag per resource — 0 = Allocated (grant all).
+  static #encodeResourceAllocationResponse(requestId, count) {
+    const out = [];
+    // compact-length-prefixed UTF-8 request id.
+    const idBytes = new TextEncoder().encode(requestId);
+    const compact = v => {
+      if (v < 0x40) {
+        return [v << 2];
+      }
+      if (v < 0x4000) {
+        const x = (v << 2) | 0b01;
+        return [x & 0xff, (x >> 8) & 0xff];
+      }
+      const x = ((v << 2) | 0b10) >>> 0;
+      return [x & 0xff, (x >> 8) & 0xff, (x >> 16) & 0xff, (x >> 24) & 0xff];
+    };
+    out.push(...compact(idBytes.length), ...idBytes);
+    out.push(131); // TAG_REQUEST_RESOURCE_ALLOCATION_RESP
+    out.push(0); // version v1
+    out.push(0); // Result::Ok
+    out.push(...compact(count));
+    for (let i = 0; i < count; i++) {
+      out.push(0); // AllocationOutcome::Allocated
+    }
+    return new Uint8Array(out);
   }
 
   static #proofKey(sig, signer) {

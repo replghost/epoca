@@ -71,6 +71,32 @@ export class ChainClientHandle {
         }
     }
     /**
+     * Get chain specs for a smoldot chain from an environment bundle JSON document.
+     * Returns [relaySpec, paraSpec] or null.
+     * @param {string} environment_bundle_json
+     * @param {string} chain_name
+     * @returns {any}
+     */
+    chainSpecsForEnvironmentBundle(environment_bundle_json, chain_name) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(environment_bundle_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(chain_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.chainclienthandle_chainSpecsForEnvironmentBundle(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            if (r2) {
+                throw takeObject(r1);
+            }
+            return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
      * Create a handle backed by a custom JS store (e.g. IndexedDB).
      *
      * The `store` object must implement `load(key: string): string | null | undefined` and
@@ -268,6 +294,28 @@ export class ChainClientHandle {
             const ptr0 = passStringToWasm0(chain_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len0 = WASM_VECTOR_LEN;
             wasm.chainclienthandle_registerChain(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Register a chain using the chain entry from an environment bundle JSON document.
+     * @param {string} environment_bundle_json
+     * @param {string} chain_name
+     */
+    registerChainFromEnvironmentBundle(environment_bundle_json, chain_name) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(environment_bundle_json, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(chain_name, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.chainclienthandle_registerChainFromEnvironmentBundle(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
             if (r1) {
@@ -1415,6 +1463,55 @@ export class HostApiHandle {
             wasm.hostapihandle_encodeCreateTxNonProductResponse(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
             var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
             var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode a typed error for `NeedsDeriveEntropy`.
+     * @param {string} request_id
+     * @returns {Uint8Array}
+     */
+    encodeDeriveEntropyError(request_id) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeDeriveEntropyError(retptr, this.__wbg_ptr, ptr0, len0);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var v2 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v2;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Encode derived entropy for `NeedsDeriveEntropy`. `entropy` must be
+     * exactly 32 bytes (see `WalletHandle.deriveProductEntropy`).
+     * @param {string} request_id
+     * @param {Uint8Array} entropy
+     * @returns {Uint8Array}
+     */
+    encodeDeriveEntropyResponse(request_id, entropy) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(request_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(entropy, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_encodeDeriveEntropyResponse(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
             var v3 = getArrayU8FromWasm0(r0, r1).slice();
             wasm.__wbindgen_export5(r0, r1 * 1, 1);
             return v3;
@@ -2718,6 +2815,42 @@ export class QrHandle {
         }
     }
     /**
+     * Encode a 32-byte public key as an SS58 address for the given prefix.
+     *
+     * The inverse of `decodeSs58Address`. Exposed so wasm/browser hosts can
+     * produce the SS58 form the DotSpark backend expects for account ids
+     * without reimplementing the blake2b + base58 encoding (see issue #1522).
+     * @param {Uint8Array} public_key
+     * @param {number} prefix
+     * @returns {string}
+     */
+    encodeSs58Address(public_key, prefix) {
+        let deferred3_0;
+        let deferred3_1;
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(public_key, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            wasm.qrhandle_encodeSs58Address(retptr, this.__wbg_ptr, ptr0, len0, prefix);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            var ptr2 = r0;
+            var len2 = r1;
+            if (r3) {
+                ptr2 = 0; len2 = 0;
+                throw takeObject(r2);
+            }
+            deferred3_0 = ptr2;
+            deferred3_1 = len2;
+            return getStringFromWasm0(ptr2, len2);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+            wasm.__wbindgen_export5(deferred3_0, deferred3_1, 1);
+        }
+    }
+    /**
      * Encode a Substrate address into a QR-friendly URI string.
      *
      * Format: `substrate:{address}[?genesis_hash={hex}&amount={planck}]`
@@ -3209,6 +3342,45 @@ export class StatementHandle {
         this.__wbg_ptr = ret;
         StatementHandleFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * Transcode a raw on-chain statement into the positional `SignedStatement`
+     * bytes the product SDK expects.
+     *
+     * Hosts receive each statement from `statement_subscribeStatement` as the
+     * tagged on-chain `sp_statement_store` form. The product decodes a positional
+     * `SignedStatement` struct instead, so call this on each raw statement before
+     * `encodeStatementStoreReceive`.
+     *
+     * `dialect` accepts the same strings as the transport layer
+     * (`"legacy"`/`"legacy-expiry"`/`"expiry"` → LegacyExpiry,
+     * `"upstream"`/`"upstream-priority"`/`"priority"` → UpstreamPriority);
+     * anything else defaults to LegacyExpiry.
+     * @param {Uint8Array} raw
+     * @param {string} dialect
+     * @returns {Uint8Array}
+     */
+    onchainToSignedStatement(raw, dialect) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passArray8ToWasm0(raw, wasm.__wbindgen_export);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passStringToWasm0(dialect, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.statementhandle_onchainToSignedStatement(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
     }
     /**
      * Hash a string into a 32-byte Topic (blake2b-256).
@@ -3739,6 +3911,41 @@ export class WalletHandle {
                 throw takeObject(r1);
             }
             return takeObject(r0);
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
+    /**
+     * Derive deterministic, product-scoped entropy for `NeedsDeriveEntropy`.
+     *
+     * Mirrors `derive_product_entropy` in the reference host: a keyed blake2b
+     * chain over the BIP-39 root entropy, the product id, and the
+     * caller-supplied context `key` (max 32 bytes). The same mnemonic +
+     * product + key yields the same 32 bytes on any host, so product
+     * identities are portable. Errors if the wallet is locked or `key` is too
+     * long. The root entropy never leaves WASM.
+     * @param {string} product_id
+     * @param {Uint8Array} key
+     * @returns {Uint8Array}
+     */
+    deriveProductEntropy(product_id, key) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(product_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(key, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.wallethandle_deriveProductEntropy(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            var r2 = getDataViewMemory0().getInt32(retptr + 4 * 2, true);
+            var r3 = getDataViewMemory0().getInt32(retptr + 4 * 3, true);
+            if (r3) {
+                throw takeObject(r2);
+            }
+            var v3 = getArrayU8FromWasm0(r0, r1).slice();
+            wasm.__wbindgen_export5(r0, r1 * 1, 1);
+            return v3;
         } finally {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
@@ -5022,7 +5229,7 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).length;
             return ret;
         },
-        __wbg_load_3c14b2ab29900868: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+        __wbg_load_98b181554c2f10b2: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             const ret = getObject(arg1).load(getStringFromWasm0(arg2, arg3));
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
@@ -5072,7 +5279,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_8937(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_9181(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -5140,7 +5347,7 @@ function __wbg_get_imports() {
             const ret = Promise.resolve(getObject(arg0));
             return addHeapObject(ret);
         },
-        __wbg_save_35772d0fd05f807a: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+        __wbg_save_c792203c156bd720: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
             getObject(arg0).save(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
         }, arguments); },
         __wbg_setItem_bb1a692eb19d66d0: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
@@ -5241,13 +5448,13 @@ function __wbg_get_imports() {
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 785, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_8934);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 808, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_9178);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 587, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6736);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 606, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6961);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -5294,14 +5501,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_6736(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_6736(arg0, arg1);
+function __wasm_bindgen_func_elem_6961(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_6961(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_8934(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_9178(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_8934(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_9178(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -5312,8 +5519,8 @@ function __wasm_bindgen_func_elem_8934(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_8937(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_8937(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_9181(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_9181(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

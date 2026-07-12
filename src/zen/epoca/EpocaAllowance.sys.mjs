@@ -113,6 +113,7 @@ export const EpocaAllowance = {
     }
 
     const memberKey = await lazy.EpocaWallet.ringVrfMemberKey();
+    await this._diagnoseRings(glue, memberKey);
     let ring = await this._findCommittedRing(glue, memberKey);
     console.info(
       `[epoca:allowance] committed ring lookup: ${
@@ -218,6 +219,61 @@ export const EpocaAllowance = {
       await delay(RING_WAIT_DELAY_MS);
     }
     return null;
+  },
+
+  /**
+   * Diagnostic: scan a wide window of ring indices (well past the claim
+   * window) and report whether our member key appears in ANY ring — as a
+   * committed member (pos < included), a pending building-ring member
+   * (pos >= included, attestation landed but not yet committed), or nowhere
+   * (attestation never made it on-chain). Read-only; logs its finding.
+   */
+  async _diagnoseRings(glue, memberKey) {
+    try {
+      const current = await this._currentRingIndex(glue);
+      const lo = Math.max(0, current - 24);
+      console.info(`[epoca:allowance:diag] currentRingIndex=${current}`);
+      let populated = 0;
+      let totalMembers = 0;
+      for (let ri = current; ri >= lo; ri--) {
+        const page0 = await storageGet(glue.allowanceRingKeysKey(ri, 0));
+        if (!page0) {
+          continue;
+        }
+        const statusValue = await storageGet(glue.allowanceRingStatusKey(ri));
+        const included = statusValue
+          ? glue.allowanceDecodeRingIncluded(statusValue)
+          : 0;
+        const members = await this._readAllRingPages(glue, ri, page0);
+        populated++;
+        totalMembers += members.length;
+        // Per-ring population: are OTHER accounts landing (commitment alive)?
+        console.info(
+          `[epoca:allowance:diag] ring=${ri} members=${members.length} included=${included}`
+        );
+        const pos = members.findIndex(
+          m => m.toLowerCase() === memberKey.toLowerCase()
+        );
+        if (pos >= 0) {
+          const committed = pos < included;
+          console.info(
+            `[epoca:allowance:diag] member=${memberKey.slice(0, 14)}… ` +
+              `FOUND ring=${ri} pos=${pos}/${members.length} included=${included} ` +
+              `${committed ? "COMMITTED" : "BUILDING (attested, not yet committed)"} ` +
+              `(currentRing=${current})`
+          );
+          return;
+        }
+      }
+      console.info(
+        `[epoca:allowance:diag] member=${memberKey.slice(0, 14)}… NOT in any ` +
+          `ring [${lo}..${current}] — populatedRings=${populated} ` +
+          `totalMembers=${totalMembers} (rings growing with OTHERS but not us => ` +
+          `bravo not landing our attestation; empty rings => commitment stalled)`
+      );
+    } catch (e) {
+      console.warn("[epoca:allowance:diag] scan failed", e);
+    }
   },
 
   /** True if any `StmtStoreAllowanceByAccount` entry exists for the account. */
