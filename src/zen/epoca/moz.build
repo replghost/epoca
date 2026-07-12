@@ -31,6 +31,10 @@ FINAL_TARGET_FILES.modules.epoca += [
     "vendor/useragent-wasm/useragent_wasm_bg.wasm",
 ]
 
+FINAL_TARGET_FILES.modules.epoca.environments += [
+    "vendor/environments/paseo-next-v2.json",
+]
+
 FINAL_TARGET_FILES.actors += [
     "actors/EpocaDotAppChild.sys.mjs",
     "actors/EpocaDotAppParent.sys.mjs",

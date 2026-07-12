@@ -111,7 +111,7 @@ export class EpocaProductParent extends JSWindowActorParent {
     }
   }
 
-  async #handleOutcome(outcome, productId) {
+  async #handleOutcome(outcome, productId, allowReplay = true) {
     switch (outcome?.type) {
       case "Response":
         // The engine returns response bytes as a plain number[]; convert
@@ -263,6 +263,39 @@ export class EpocaProductParent extends JSWindowActorParent {
           true
         );
         break;
+
+      case "NeedsPermissionPrompt": {
+        // A submit (statement/preimage/chain) was blocked by an unresolved
+        // just-in-time permission gate. The onboarding grant flow authorizes
+        // these and the on-chain allowance is the real backing — so record the
+        // grant, then replay the original message so it proceeds. store +
+        // replay mirrors the reference host (see useragent-api jit_store).
+        if (!allowReplay) {
+          console.warn(
+            "EpocaProduct: permission prompt re-fired after grant; not replaying"
+          );
+          break;
+        }
+        try {
+          await lazy.EpocaHostEngine.storePermissionDecision(
+            productId,
+            outcome.payload,
+            true
+          );
+        } catch (e) {
+          console.error("EpocaProduct: store permission decision failed", e);
+          break;
+        }
+        const pending = outcome.pending_raw_message;
+        if (pending) {
+          const replay = await lazy.EpocaHostEngine.handleMessage(
+            Uint8Array.from(pending),
+            productId
+          );
+          await this.#handleOutcome(replay, productId, false);
+        }
+        break;
+      }
 
       case "NeedsResourceAllocation":
         // RFC 0010 batched allowance slots (StatementStoreAllowance,
@@ -727,7 +760,13 @@ export class EpocaProductParent extends JSWindowActorParent {
         fields.data
       );
       const signer = await lazy.EpocaWallet.walletPublicKey();
-      const signature = await lazy.EpocaWallet.signWallet(payload);
+      // buildSigningPayload prepends a 4-byte num_fields header that
+      // assembleStatement consumes but the statement store does NOT include in
+      // the verified signature material — so sign payload[4..], while still
+      // handing the full payload (with header) to assembleStatement. Matches
+      // the reference chat-v2/v3 hosts; signing the whole buffer yields a
+      // `badProof` rejection from the node.
+      const signature = await lazy.EpocaWallet.signWallet(payload.subarray(4));
       const assembled = stmt.assembleStatement(payload, signer, signature);
       this.#preparedStatements.set(
         EpocaProductParent.#proofKey(signature, signer),
@@ -773,13 +812,22 @@ export class EpocaProductParent extends JSWindowActorParent {
       // statuses as success (mirrors host-chain's rpc_submit — "noAllowance"
       // and other statuses are rejections, not acks).
       const body = JSON.parse(raw);
+      console.debug(`EpocaProduct: statement_submit result ${raw}`);
       if (body.error) {
         throw new Error(`statement_submit: ${JSON.stringify(body.error)}`);
       }
-      const status = String(body.result ?? "").toLowerCase();
+      // The node returns the SubmitResult as `{ status, reason? }` (e.g.
+      // { "status": "new" } on success, { "status": "invalid", "reason":
+      // "badProof" } on failure), or occasionally a bare status string.
+      const result = body.result;
+      const status = (
+        typeof result === "object" && result !== null
+          ? String(result.status ?? "")
+          : String(result ?? "")
+      ).toLowerCase();
       const ok = ["ok", "accepted", "submitted", "new", "known", "knownexpired"];
       if (!ok.includes(status)) {
-        throw new Error(`statement_submit rejected: ${body.result}`);
+        throw new Error(`statement_submit rejected: ${JSON.stringify(result)}`);
       }
       await this.#reply("encodeStatementSubmitResponse", outcome.request_id);
     } catch (e) {

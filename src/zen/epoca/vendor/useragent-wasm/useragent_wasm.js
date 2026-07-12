@@ -2329,6 +2329,35 @@ export class HostApiHandle {
             wasm.__wbindgen_add_to_stack_pointer(16);
         }
     }
+    /**
+     * Record a JIT decision for the remote permission described by a
+     * `NeedsPermissionPrompt` outcome's `payload`, so the host can then replay
+     * the prompt's `pending_raw_message` and have the originally-blocked
+     * submit (statement/preimage/chain) pass the permission gate.
+     *
+     * `allow = true` stores `AllowAlways`; `false` stores `Never`. Throws if
+     * the payload does not describe a gateable submit permission.
+     * @param {string} app_id
+     * @param {Uint8Array} payload
+     * @param {boolean} allow
+     */
+    storeRemotePermissionDecision(app_id, payload, allow) {
+        try {
+            const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+            const ptr0 = passStringToWasm0(app_id, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+            const len0 = WASM_VECTOR_LEN;
+            const ptr1 = passArray8ToWasm0(payload, wasm.__wbindgen_export);
+            const len1 = WASM_VECTOR_LEN;
+            wasm.hostapihandle_storeRemotePermissionDecision(retptr, this.__wbg_ptr, ptr0, len0, ptr1, len1, allow);
+            var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+            var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+            if (r1) {
+                throw takeObject(r0);
+            }
+        } finally {
+            wasm.__wbindgen_add_to_stack_pointer(16);
+        }
+    }
 }
 if (Symbol.dispose) HostApiHandle.prototype[Symbol.dispose] = HostApiHandle.prototype.free;
 
@@ -5279,7 +5308,7 @@ function __wbg_get_imports() {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_9181(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_9188(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -5449,12 +5478,12 @@ function __wbg_get_imports() {
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 808, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_9178);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_9185);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
             // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 606, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6961);
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_6968);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0) {
@@ -5501,14 +5530,14 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_6961(arg0, arg1) {
-    wasm.__wasm_bindgen_func_elem_6961(arg0, arg1);
+function __wasm_bindgen_func_elem_6968(arg0, arg1) {
+    wasm.__wasm_bindgen_func_elem_6968(arg0, arg1);
 }
 
-function __wasm_bindgen_func_elem_9178(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_9185(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_9178(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_9185(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -5519,8 +5548,8 @@ function __wasm_bindgen_func_elem_9178(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_9181(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_9181(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_9188(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_9188(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 

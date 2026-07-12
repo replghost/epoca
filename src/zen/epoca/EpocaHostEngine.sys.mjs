@@ -174,6 +174,9 @@ export const EpocaHostEngine = {
     api.setAccounts("[]");
     // Chains the host can reach; the engine answers featureSupported(Chain)
     // from this set and routes chainHead requests as NeedsChain* outcomes.
+    // The chain list is derived from the vendored useragent-kit environment
+    // bundle, so ensure it is loaded before querying supported genesis hashes.
+    await lazy.EpocaChainService.ensureEnvironment();
     const genesisHashes = lazy.EpocaChainService.supportedGenesisHashes();
     if (genesisHashes.length) {
       api.setSupportedChains(genesisHashes);
@@ -217,5 +220,23 @@ export const EpocaHostEngine = {
   async encodeResponse(method, ...args) {
     const engine = await this._ensure();
     return engine[method](...args);
+  },
+
+  /**
+   * Record a just-in-time remote-permission decision so a replayed message
+   * (a `NeedsPermissionPrompt`'s pending bytes) passes the engine's permission
+   * gate. `payload` is the prompt outcome's `payload` (a RemotePermission tag).
+   *
+   * @param {string} productId
+   * @param {Uint8Array|number[]} payload
+   * @param {boolean} allow
+   */
+  async storePermissionDecision(productId, payload, allow) {
+    const engine = await this._ensure();
+    engine.storeRemotePermissionDecision(
+      productId,
+      Uint8Array.from(payload || []),
+      allow
+    );
   },
 };

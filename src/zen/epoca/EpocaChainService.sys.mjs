@@ -9,6 +9,28 @@
 // and re-encodes them (mirrors useragent-kit's runtime-chain-service).
 
 const NETWORKS_PREF = "epoca.chain.networks";
+const ENVIRONMENT_PREF = "epoca.chain.environment";
+const DEFAULT_ENVIRONMENT = "paseo-next-v2";
+const ENVIRONMENT_URL = name =>
+  `resource:///modules/epoca/environments/${name}.json`;
+
+// Read a resource: URL as text. Mirrors EpocaHostEngine.readBinaryResource:
+// prefer fetch, fall back to resolving the resource to a file (unpackaged
+// local builds where fetch is unavailable in the system global).
+async function readTextResource(url) {
+  if (typeof fetch === "function") {
+    const response = await fetch(url);
+    return response.text();
+  }
+  const resHandler = Services.io
+    .getProtocolHandler("resource")
+    .QueryInterface(Ci.nsIResProtocolHandler);
+  const fileUrl = resHandler.resolveURI(Services.io.newURI(url));
+  const path = Services.io
+    .newURI(fileUrl)
+    .QueryInterface(Ci.nsIFileURL).file.path;
+  return new TextDecoder().decode(await IOUtils.read(path));
+}
 
 const STOP_METHODS = new Map([
   ["chainHead_v1_follow", "chainHead_v1_unfollow"],
@@ -198,12 +220,68 @@ export const EpocaChainService = {
   // genesis hex -> ChainConnection
   _connections: new Map(),
 
-  _networks() {
+  // Chains + statement-store endpoint derived from the vendored useragent-kit
+  // environment bundle (the canonical network registry). Populated by
+  // ensureEnvironment(); the epoca.chain.networks pref merges on top as an
+  // override. Null until the bundle has loaded.
+  _bundleNetworks: null,
+  _bundleSsEndpoint: null,
+  _envPromise: null,
+
+  /**
+   * Load the environment bundle (once) and derive the supported chains +
+   * statement-store endpoint from it. The bundle is the canonical source of
+   * genesis→RPC mappings (see useragent-kit host-chain-core/environments);
+   * epoca no longer hand-maintains the full chain list.
+   */
+  ensureEnvironment() {
+    if (!this._envPromise) {
+      this._envPromise = (async () => {
+        const name = Services.prefs.getStringPref(
+          ENVIRONMENT_PREF,
+          DEFAULT_ENVIRONMENT
+        );
+        try {
+          const bundle = JSON.parse(
+            await readTextResource(ENVIRONMENT_URL(name))
+          );
+          const nets = {};
+          for (const chain of Object.values(bundle.chains || {})) {
+            const urls = chain.rpc_urls || [];
+            if (chain.genesis_hash && urls.length) {
+              const hex =
+                "0x" + chain.genesis_hash.replace(/^0x/, "").toLowerCase();
+              nets[hex] = urls;
+            }
+          }
+          this._bundleNetworks = nets;
+          this._bundleSsEndpoint =
+            bundle.services?.statement_store?.endpoints?.[0] ?? null;
+          console.debug(
+            `EpocaChain: environment '${name}' → ${
+              Object.keys(nets).length
+            } chain(s)`
+          );
+        } catch (e) {
+          console.error("EpocaChain: failed to load environment bundle", e);
+          this._bundleNetworks = {};
+        }
+      })();
+    }
+    return this._envPromise;
+  },
+
+  _prefNetworks() {
     try {
       return JSON.parse(Services.prefs.getStringPref(NETWORKS_PREF, "{}"));
     } catch {
       return {};
     }
+  },
+
+  // Bundle chains (canonical base) with the pref merged on top as an override.
+  _networks() {
+    return { ...(this._bundleNetworks || {}), ...this._prefNetworks() };
   },
 
   /** @returns {Uint8Array[]} genesis hashes of all configured networks. */
@@ -283,10 +361,11 @@ export const EpocaChainService = {
   _ssConnection: null,
 
   _ssConn() {
-    const url = Services.prefs.getStringPref(
-      "epoca.chain.statement-store-endpoint",
-      ""
-    );
+    const url =
+      Services.prefs.getStringPref(
+        "epoca.chain.statement-store-endpoint",
+        ""
+      ) || this._bundleSsEndpoint;
     if (!url) {
       throw new Error("no statement-store endpoint configured");
     }
