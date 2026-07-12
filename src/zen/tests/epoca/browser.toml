@@ -29,6 +29,11 @@ prefs = [
 
 ["browser_epoca_dotns.js"]
 
+# Guards the fork's total-blank-chrome regression: the en-US zen-*.ftl files
+# referenced by browser.xhtml's localization links must be packaged, or the
+# whole window's document.l10n goes empty. See src/browser/locales/en-US/.
+["browser_epoca_l10n.js"]
+
 ["browser_epoca_ss58.js"]
 
 ["browser_epoca_storage.js"]
