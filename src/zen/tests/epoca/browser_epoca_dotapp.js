@@ -24,6 +24,7 @@ const PRODUCT_A_HTML = `<!DOCTYPE html>
   </head>
   <body>
     <h1 id="title">alpha</h1>
+    <a id="product-link" href="dot://product-b.dot/">product-b</a>
     <script src="/app.js"></script>
   </body>
 </html>`;
@@ -193,3 +194,40 @@ add_task(async function test_dotapp_gets_truapi_bridge() {
   });
   await SpecialPowers.popPrefEnv();
 });
+
+add_task(async function test_dotapp_link_context_menu_has_zen_items() {
+  await BrowserTestUtils.withNewTab("dot://product-a.dot/", async browser => {
+    const menu = document.getElementById("contentAreaContextMenu");
+    const shown = BrowserTestUtils.waitForEvent(menu, "popupshown");
+
+    await BrowserTestUtils.synthesizeMouse(
+      "#product-link",
+      0,
+      0,
+      { type: "contextmenu", button: 2, centered: true },
+      browser
+    );
+    await shown;
+
+    const openInTab = document.getElementById("context-openlinkintab");
+    ok(!openInTab.hidden, "dot links get the normal browser link menu");
+    is(openInTab.label, "Open Link in New Tab", "browser link text is present");
+
+    const splitLink = document.getElementById("context-zenSplitLink");
+    ok(!splitLink.hidden, "dot links get the Zen split-link menu item");
+    is(splitLink.label, "Split link to new tab", "Zen split-link text is present");
+
+    const glanceLink = document.getElementById("context-zenOpenLinkInGlance");
+    ok(!glanceLink.hidden, "dot links get the Zen glance menu item");
+    is(
+      glanceLink.label,
+      "Open Link in Glance",
+      "Zen glance-link text is present"
+    );
+
+    const hidden = BrowserTestUtils.waitForEvent(menu, "popuphidden");
+    menu.hidePopup();
+    await hidden;
+  });
+});
+
