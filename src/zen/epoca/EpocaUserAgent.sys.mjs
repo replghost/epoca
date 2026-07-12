@@ -71,7 +71,17 @@ export let gEpocaUserAgent = {
     // Attach the identity panel (toolbar button + popup) to every browser
     // window. Unlike the urlbar registration above this observer persists, so
     // each new window gets its own panel instance.
+    //
+    // Off by default: the urlbar "pink dot" toolbar button is being retired in
+    // favour of an Arc-style account/identity surface (profile card + a
+    // settings section). Flip `epoca.identity.toolbar-button` to true to
+    // restore the legacy button while that lands.
     Services.obs.addObserver(subject => {
+      if (
+        !Services.prefs.getBoolPref("epoca.identity.toolbar-button", false)
+      ) {
+        return;
+      }
       try {
         const { EpocaIdentityPanel } = ChromeUtils.importESModule(
           "resource:///modules/EpocaIdentityPanel.sys.mjs"

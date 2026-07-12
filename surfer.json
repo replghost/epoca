@@ -45,6 +45,26 @@
           "repo": "zen-browser/desktop"
         }
       }
+    },
+    "epoca": {
+      "backgroundColor": "#282A33",
+      "brandShorterName": "Epoca",
+      "brandShortName": "Epoca",
+      "brandFullName": "Epoca",
+      "release": {
+        "displayVersion": "0.1a",
+        "github": {
+          "repo": "replghost/epoca"
+        },
+        "archives": {
+          "windows": "windows.mar",
+          "macos-aarch64": "macos-aarch64.mar",
+          "linux": "linux.mar",
+          "macos-x64": "macos-x64.mar",
+          "windows-arm64": "windows-arm64.mar",
+          "linux-aarch64": "linux-aarch64.mar"
+        }
+      }
     }
   },
   "license": {
