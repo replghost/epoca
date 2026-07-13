@@ -51,10 +51,11 @@
       "brandShorterName": "Epoca",
       "brandShortName": "Epoca",
       "brandFullName": "Epoca",
+      "brandingGenericName": "Epoca",
       "release": {
         "displayVersion": "0.1a",
         "github": {
-          "repo": "replghost/epoca"
+          "repo": "paritytech/epoca"
         },
         "archives": {
           "windows": "windows.mar",
@@ -73,5 +74,5 @@
     ],
     "licenseType": "MPL-2.0"
   },
-  "updateHostname": "updates.zen-browser.app"
+  "updateHostname": "updates.epoca.invalid"
 }
