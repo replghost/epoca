@@ -15,7 +15,9 @@ ChromeUtils.defineESModuleGetters(lazy, {
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   EpocaPermissions: "resource:///modules/EpocaPermissions.sys.mjs",
   EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
+  EpocaRegistration: "resource:///modules/EpocaRegistration.sys.mjs",
   EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
+  setTimeout: "resource://gre/modules/Timer.sys.mjs",
 });
 
 const AUTO_APPROVE_PREF = "epoca.useragent.auto-approve";
@@ -212,7 +214,43 @@ export class EpocaProductParent extends JSWindowActorParent {
         // report not-connected for now. Registration is gated by the same
         // auto-provision pref as the statement-store allowance, since it
         // creates a persistent on-chain identity.
-        const username = await lazy.EpocaWallet.getUsername();
+        let username = await lazy.EpocaWallet.getUsername();
+        if (
+          !username &&
+          Services.prefs.getBoolPref("epoca.identity.resolve-onchain", true)
+        ) {
+          // Nothing cached locally — but the account may already own a name
+          // on-chain (wallet restored from a recovery phrase, name registered
+          // on another device, or a re-derived //wallet account). Fall back to
+          // the authoritative record (Resources.Consumers), the same lookup the
+          // Polkadot settings pane uses, and cache it so later reads are
+          // instant. Pref-gated so offline tests stay offline.
+          //
+          // Retry with backoff: on a cold start the chain light-client may not
+          // have synced far enough to answer yet, and an unsynced read returns
+          // empty (not an error) — a single attempt would spuriously report
+          // "NotConnected" on first load.
+          for (let attempt = 0; attempt < 3 && !username; attempt++) {
+            try {
+              const onchain = await lazy.EpocaRegistration.resolveUsername();
+              if (onchain?.display) {
+                username = onchain.display;
+                await lazy.EpocaWallet.setUsername(username);
+                break;
+              }
+            } catch (e) {
+              console.error(
+                "EpocaProduct: on-chain username resolve failed",
+                e
+              );
+            }
+            if (!username && attempt < 2) {
+              await new Promise(r =>
+                lazy.setTimeout(r, 800 * (attempt + 1))
+              );
+            }
+          }
+        }
         if (username) {
           await this.#reply(
             "encodeGetUserIdResponse",
@@ -220,10 +258,9 @@ export class EpocaProductParent extends JSWindowActorParent {
             username
           );
         } else {
-          // No identity yet. We deliberately do NOT auto-register here: the
-          // user picks their handle explicitly in the epoca identity panel
-          // (toolbar), which registers on-chain and persists the username.
-          // Once provisioned, a retry of this call resolves.
+          // Still nothing: the account has no registered name. The user picks
+          // their handle in the Polkadot settings pane, which registers
+          // on-chain and persists it; a retry then resolves.
           await this.#reply(
             "encodeGetUserIdError",
             outcome.request_id,
