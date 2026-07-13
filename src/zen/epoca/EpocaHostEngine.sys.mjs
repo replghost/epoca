@@ -81,6 +81,9 @@ export const EpocaHostEngine = {
         lazy.EpocaCrdtRelay.start();
         return registry;
       })();
+      this._extRegistryPromise.catch(() => {
+        this._extRegistryPromise = null;
+      });
     }
     return this._extRegistryPromise;
   },
@@ -155,6 +158,14 @@ export const EpocaHostEngine = {
         await glue.default({ module_or_path: wasmBytes });
         return glue;
       })();
+      // Never cache a rejection: a transient instantiation failure (e.g. a
+      // resource fetch that returned early) would otherwise poison every
+      // future wasm op — wallet unlock, signing, restore — until restart.
+      // Drop it so the next caller re-attempts from scratch.
+      this._gluePromise.catch(e => {
+        console.error("EpocaHostEngine: wasm glue instantiation failed", e);
+        this._gluePromise = null;
+      });
     }
     return this._gluePromise;
   },
@@ -162,6 +173,9 @@ export const EpocaHostEngine = {
   _ensure() {
     if (!this._enginePromise) {
       this._enginePromise = this._create();
+      this._enginePromise.catch(() => {
+        this._enginePromise = null;
+      });
     }
     return this._enginePromise;
   },
