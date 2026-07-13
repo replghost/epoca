@@ -13,15 +13,18 @@ _Living checklist. Kept in the repo so it's visible/durable; not necessarily com
 - **[C] Sync Zen `dev`** — clean merge (16 commits; only `src/zen/moz.build` overlaps, auto-merges). Do as a reviewed local merge (NOT the GitHub button). May fix [B] if it's an upstream bug.
 - **[Accounts + pink dot]** — remove the urlbar pink-dot (`EpocaIdentityPanel`); design the account/identity UX (Arc-style profile card + a settings section).
 
-## 📦 Distribution (later)
-- Package: `surfer package` → DMG (mac) / installer (win) / tar (linux).
-- Signing: macOS Developer ID + notarize (Parity has certs), Windows Authenticode (needs a cert), MAR signing + an update host. Unsigned works only for you/technical testers.
-- Consider moving repo to `paritytech/epoca` for signing certs + org/CI.
+## 📦 Distribution
+- Plan + handoff: see `DISTRIBUTION.md`. Decisions: publish from `paritytech/epoca`, target macOS+Linux first, auto-update OFF for v1 (ship via GitHub Releases).
+- `npm run package` → standalone `.dmg` verified working (omni.ja, dot:// with sandbox on, l10n baked in).
+- Remaining gate: **macOS notarization is net-new** (not in the inherited workflow) — needs Parity's Apple Developer ID + added codesign/notarize/staple steps. Until then the `.dmg` is unsigned (recipients right-click→Open).
 
 ## 🧵 Follow-ups
-- Re-vendor **official** `@useragent-kit/wasm@0.4.50` once useragent-kit publishes (blocked on their release infra: `release.yml` Swift-dist step fails + no `v0.4.50` tag). epoca currently ships a local 0.4.50 build.
-- Open the **changeset-status CI guardrail** PR for useragent-kit (`pnpm exec changeset status` in the PR check).
 - Send the drafted **message to useragent-kit maintainers** re: the Swift-dist release failure.
+
+## ✅ Recently done
+- Visible-text rebrand → Epoca (`-brand-product-name` via per-brand `brandingGenericName`; chrome strings de-Zen'd). Internals stay `zen`.
+- Re-vendored official `@useragent-kit/wasm@0.4.50` (byte-for-byte, bridge+ss58 12/12).
+- useragent-kit changeset guardrail merged (PR #1557 — name-check in `verify-changeset.mjs`).
 
 ## 🛠 Workflow notes
 - `dev` = epoca integration branch. Sync Zen via **reviewed local merges**, not the fork "Sync" button (diverged fork → Discard trap).
