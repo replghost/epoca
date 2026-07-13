@@ -360,3 +360,22 @@ zen-close-all-unpinned-tabs-shortcut = Close All Unpinned Tabs
 zen-new-unsynced-window-shortcut = New Blank Window
 zen-duplicate-tab-shortcut = Duplicate Tab
 zen-key-find-selection = Find Selection
+
+## Epoca account pane
+
+pane-epoca-account-title = Polkadot
+    .tooltiptext = { pane-epoca-account-title }
+epoca-account-header = Epoca identity
+epoca-account-description = Your headless wallet identity, used to sign in to and sign for dot:// products.
+epoca-account-username-label = Username
+epoca-account-address-label = Wallet address
+epoca-account-allowance-label = Statement-store allowance
+epoca-account-copy-address =
+    .label = Copy address
+epoca-account-provision =
+    .label = Register & claim
+epoca-account-provisioned =
+    .value = Provisioned
+epoca-account-not-provisioned =
+    .value = Not provisioned
+epoca-account-registering = Registering on-chain… this continues in the background if you leave.

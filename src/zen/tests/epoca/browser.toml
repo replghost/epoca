@@ -17,6 +17,8 @@ prefs = [
   "security.sandbox.content.level=0",
 ]
 
+["browser_epoca_account_pane.js"]
+
 ["browser_epoca_accounts.js"]
 
 ["browser_epoca_bridge.js"]

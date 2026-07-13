@@ -1,0 +1,50 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+<script type="text/javascript" src="chrome://browser/content/preferences/epoca-account-settings.js"/>
+<html:template id="template-paneEpocaAccount">
+
+<hbox id="epocaAccountCategory"
+      class="subcategory"
+      hidden="true"
+      data-category="paneEpocaAccount">
+<html:h1 data-l10n-id="pane-epoca-account-title"/>
+</hbox>
+
+<groupbox id="epocaAccountGroup"
+          data-category="paneEpocaAccount"
+          hidden="true"
+          class="highlighting-group">
+  <label><html:h2 data-l10n-id="epoca-account-header"/></label>
+  <description class="description-deemphasized"
+               data-l10n-id="epoca-account-description"/>
+
+  <vbox style="gap: 4px; margin-top: 8px;">
+    <label class="text-deemphasized" data-l10n-id="epoca-account-username-label"/>
+    <label id="epocaAccountUsername" style="margin-bottom: 8px;" value="—"/>
+
+    <label class="text-deemphasized" data-l10n-id="epoca-account-address-label"/>
+    <label id="epocaAccountAddress"
+           style="font-family: monospace; margin-bottom: 8px;"
+           crop="end"
+           value="—"/>
+
+    <label class="text-deemphasized" data-l10n-id="epoca-account-allowance-label"/>
+    <label id="epocaAccountAllowance" style="margin-bottom: 12px;" value="—"/>
+  </vbox>
+
+  <hbox style="gap: 8px;">
+    <button id="epocaAccountCopyAddress"
+            data-l10n-id="epoca-account-copy-address"/>
+    <button id="epocaAccountProvision"
+            data-l10n-id="epoca-account-provision"/>
+  </hbox>
+
+  <hbox id="epocaAccountBusy" hidden="true" align="center"
+        style="gap: 8px; margin-top: 10px;">
+    <html:progress style="inline-size: 160px;"/>
+    <label class="text-deemphasized" data-l10n-id="epoca-account-registering"/>
+  </hbox>
+</groupbox>
+</html:template>
