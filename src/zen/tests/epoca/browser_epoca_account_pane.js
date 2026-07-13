@@ -42,3 +42,50 @@ add_task(async function test_epoca_account_pane() {
     ok(addr.value.length > 40, `address looks like SS58: ${addr.value}`);
   });
 });
+
+add_task(async function test_permissions_list_and_revoke() {
+  const { EpocaPermissions } = ChromeUtils.importESModule(
+    "resource:///modules/EpocaPermissions.sys.mjs"
+  );
+  const pid = "pane-test-" + Date.now();
+  await EpocaPermissions.record(pid, "account");
+
+  try {
+    await BrowserTestUtils.withNewTab("about:preferences", async browser => {
+      const doc = browser.contentDocument;
+      doc.getElementById("category-epoca-account").click();
+
+      await BrowserTestUtils.waitForCondition(
+        () => doc.getElementById("epocaPermissionsList"),
+        "permissions list present"
+      );
+
+      // The recorded grant renders as a row with a Revoke button.
+      const list = doc.getElementById("epocaPermissionsList");
+      const rowFor = () =>
+        [...list.children].find(r =>
+          (r.querySelector("label")?.value ?? "").includes(pid)
+        );
+      let row;
+      await BrowserTestUtils.waitForCondition(() => {
+        row = rowFor();
+        return !!row;
+      }, "granted product appears in the list");
+      ok(row, `permission row for ${pid} rendered`);
+
+      // Revoking removes it from the list and the store.
+      row.querySelector("button").click();
+      await BrowserTestUtils.waitForCondition(
+        () => !rowFor(),
+        "row removed after revoke"
+      );
+      is(
+        await EpocaPermissions.has(pid, "account"),
+        false,
+        "grant revoked in the store"
+      );
+    });
+  } finally {
+    await EpocaPermissions.revoke(pid, "account");
+  }
+});

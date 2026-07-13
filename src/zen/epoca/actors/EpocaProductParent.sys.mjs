@@ -13,19 +13,17 @@ ChromeUtils.defineESModuleGetters(lazy, {
   EpocaAllowance: "resource:///modules/EpocaAllowance.sys.mjs",
   EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
+  EpocaPermissions: "resource:///modules/EpocaPermissions.sys.mjs",
   EpocaProductStorage: "resource:///modules/EpocaProductStorage.sys.mjs",
   EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
 });
 
 const AUTO_APPROVE_PREF = "epoca.useragent.auto-approve";
 
-// Cross-product, cross-window state: one wallet, one user.
-// Account grants are cached per product once approved; a signature request
-// while another is pending is rejected outright (no queuing, BRG-011).
-const gAccountGrants = new Set();
+// Cross-product, cross-window state: one wallet, one user. Account and device
+// grants persist in EpocaPermissions; a signature request while another is
+// pending is rejected outright (no queuing, BRG-011).
 let gSignInFlight = false;
-// "<productId>:<kind>" — device permissions granted this session.
-const gDeviceGrants = new Set();
 
 // Gecko permission type + consent wording per TrUAPI DevicePermissionKind.
 // Kinds without a Gecko permission only gate the product-side API.
@@ -373,7 +371,7 @@ export class EpocaProductParent extends JSWindowActorParent {
 
   async #handleAccountGet(outcome, productId) {
     const granted =
-      gAccountGrants.has(productId) ||
+      (await lazy.EpocaPermissions.has(productId, "account")) ||
       (await this.#confirm(
         "Account access",
         `${productId} wants to see its account address.`
@@ -386,7 +384,7 @@ export class EpocaProductParent extends JSWindowActorParent {
       );
       return;
     }
-    gAccountGrants.add(productId);
+    await lazy.EpocaPermissions.record(productId, "account");
     const publicKey = await lazy.EpocaWallet.appPublicKey(
       outcome.account.dotns_id,
       outcome.account.derivation_index
@@ -1357,15 +1355,14 @@ export class EpocaProductParent extends JSWindowActorParent {
       await this.#reply("encodeDevicePermissionError", outcome.request_id);
       return;
     }
-    const grantKey = `${productId}:${kind}`;
     const granted =
-      gDeviceGrants.has(grantKey) ||
+      (await lazy.EpocaPermissions.has(productId, "device", kind)) ||
       (await this.#confirm(
         "Device access",
         `${productId} wants to ${known.label}.`
       ));
     if (granted) {
-      gDeviceGrants.add(grantKey);
+      await lazy.EpocaPermissions.record(productId, "device", kind);
       if (known.geckoType) {
         Services.perms.addFromPrincipal(
           this.manager.documentPrincipal,

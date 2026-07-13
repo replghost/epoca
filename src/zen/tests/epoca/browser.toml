@@ -21,6 +21,8 @@ prefs = [
 
 ["browser_epoca_accounts.js"]
 
+["browser_epoca_permissions.js"]
+
 ["browser_epoca_bridge.js"]
 
 # Network test: talks to the live Paseo Asset Hub next RPC. Guards the chain

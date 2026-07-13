@@ -20,6 +20,7 @@ var gEpocaAccount = {
       this.__modules = {};
       ChromeUtils.defineESModuleGetters(this.__modules, {
         EpocaAllowance: "resource:///modules/EpocaAllowance.sys.mjs",
+        EpocaPermissions: "resource:///modules/EpocaPermissions.sys.mjs",
         EpocaSs58: "resource:///modules/EpocaSs58.sys.mjs",
         EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
       });
@@ -39,6 +40,7 @@ var gEpocaAccount = {
       this.provision()
     );
     this.refresh();
+    this.refreshPermissions();
     // A claim runs in the shared parent module, so it survives navigating away
     // from this pane. If one is already in flight (e.g. started, left, and
     // reopened), re-attach so the spinner + result show here too.
@@ -156,5 +158,49 @@ var gEpocaAccount = {
       await this.refresh();
     }
     await this._driveClaim(EpocaAllowance.ensure({ provision: true }));
+  },
+
+  _grantSummary(grant) {
+    const what = grant.type === "account" ? "Account access" : grant.kind;
+    return `${grant.productId} — ${what}`;
+  },
+
+  async refreshPermissions() {
+    const { EpocaPermissions } = this._modules;
+    const list = this._field("epocaPermissionsList");
+    const empty = this._field("epocaPermissionsEmpty");
+    let grants;
+    try {
+      grants = await EpocaPermissions.list();
+    } catch (e) {
+      console.error("gEpocaAccount: list permissions failed", e);
+      return;
+    }
+    while (list.firstChild) {
+      list.firstChild.remove();
+    }
+    empty.hidden = grants.length > 0;
+    for (const grant of grants) {
+      const row = document.createXULElement("hbox");
+      row.setAttribute("align", "center");
+      row.style.gap = "8px";
+
+      const label = document.createXULElement("label");
+      label.setAttribute("flex", "1");
+      label.setAttribute("crop", "end");
+      label.value = this._grantSummary(grant);
+      row.appendChild(label);
+
+      const revoke = document.createXULElement("button");
+      document.l10n.setAttributes(revoke, "epoca-permissions-revoke");
+      revoke.addEventListener("command", async () => {
+        revoke.disabled = true;
+        await EpocaPermissions.revoke(grant.productId, grant.type, grant.kind);
+        await this.refreshPermissions();
+      });
+      row.appendChild(revoke);
+
+      list.appendChild(row);
+    }
   },
 };

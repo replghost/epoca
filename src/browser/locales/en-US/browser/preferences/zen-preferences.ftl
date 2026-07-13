@@ -379,3 +379,9 @@ epoca-account-provisioned =
 epoca-account-not-provisioned =
     .value = Not provisioned
 epoca-account-registering = Registering on-chain… this continues in the background if you leave.
+
+epoca-permissions-header = Product permissions
+epoca-permissions-description = Products you have allowed to use your account or device features.
+epoca-permissions-empty = No permissions granted yet.
+epoca-permissions-revoke =
+    .label = Revoke
