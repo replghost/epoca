@@ -86,13 +86,20 @@ var gEpocaAccount = {
     // from a recovery phrase (no local handle) and prefers the full handle.
     let display = await EpocaWallet.getUsername();
     nameField.value = display || "resolving…";
-    try {
-      const onchain = await EpocaRegistration.resolveUsername();
-      if (onchain?.display) {
-        display = onchain.display;
+    // The authoritative name lives on-chain (Resources.Consumers), which needs
+    // a live People-chain RPC. Gated by a pref so tests (which forbid non-local
+    // connections) can stay offline; on by default in real use.
+    if (
+      Services.prefs.getBoolPref("epoca.identity.resolve-onchain", true)
+    ) {
+      try {
+        const onchain = await EpocaRegistration.resolveUsername();
+        if (onchain?.display) {
+          display = onchain.display;
+        }
+      } catch (e) {
+        console.error("gEpocaAccount: on-chain username resolve failed", e);
       }
-    } catch (e) {
-      console.error("gEpocaAccount: on-chain username resolve failed", e);
     }
     nameField.value = display || "not registered";
     const status = this._field("epocaAccountAllowance");
@@ -100,6 +107,18 @@ var gEpocaAccount = {
       document.l10n.setAttributes(
         status,
         display ? "epoca-account-provisioned" : "epoca-account-not-provisioned"
+      );
+    }
+    // Reflect state on the action button: "Register & claim" when there's no
+    // handle yet, "Claim allowance" once the handle is registered (the
+    // register half is done). Left enabled — a claim is idempotent (returns
+    // "already-granted" if the allowance is already held). Don't relabel while
+    // a claim is in flight.
+    const action = this._field("epocaAccountProvision");
+    if (!action.disabled) {
+      document.l10n.setAttributes(
+        action,
+        display ? "epoca-account-claim" : "epoca-account-provision"
       );
     }
   },

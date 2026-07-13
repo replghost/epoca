@@ -4,6 +4,14 @@
 
 "use strict";
 
+// Keep the pane offline: on-chain username resolution needs a live People-chain
+// RPC, which the mochitest harness forbids (non-local connections). The live
+// path is exercised manually / in test:contract.
+Services.prefs.setBoolPref("epoca.identity.resolve-onchain", false);
+registerCleanupFunction(() =>
+  Services.prefs.clearUserPref("epoca.identity.resolve-onchain")
+);
+
 // The Epoca "Account" preferences pane (paneEpocaAccount) is the identity
 // surface that replaced the retired urlbar pink-dot popup. Verify it registers
 // in about:preferences and that its controller populates the wallet address.
