@@ -65,6 +65,67 @@ export const EpocaWallet = {
     return mnemonic;
   },
 
+  _walletFilePath() {
+    return PathUtils.join(PathUtils.profileDir, "epoca", "wallet.json");
+  },
+
+  /**
+   * Decrypt and return the wallet's BIP-39 recovery phrase for backup. Reading
+   * it goes through OSKeyStore, which reauthenticates the user (OS keychain
+   * prompt) before releasing the secret. Never log or persist the result.
+   *
+   * @returns {Promise<string>} the space-separated mnemonic.
+   */
+  async exportMnemonic() {
+    const override = Services.prefs.getStringPref(MNEMONIC_PREF, "");
+    if (override) {
+      return override;
+    }
+    // Guarantees wallet.json exists and holds an encrypted mnemonic.
+    await this._ensure();
+    const file = new lazy.JSONFile({ path: this._walletFilePath() });
+    await file.load();
+    if (!file.data.mnemonicEnc) {
+      throw new Error("No wallet recovery phrase to export.");
+    }
+    return lazy.OSKeyStore.decrypt(file.data.mnemonicEnc);
+  },
+
+  /**
+   * Restore the wallet from a recovery phrase. Destructive: replaces the
+   * current account and drops the persisted username (it belonged to the
+   * previous account). The next wallet use loads the imported phrase.
+   *
+   * @param {string} mnemonic - a 12/15/18/21/24-word BIP-39 phrase.
+   */
+  async importMnemonic(mnemonic) {
+    const trimmed = (mnemonic || "").trim().replace(/\s+/g, " ").toLowerCase();
+    const words = trimmed ? trimmed.split(" ") : [];
+    if (![12, 15, 18, 21, 24].includes(words.length)) {
+      throw new Error("A recovery phrase is 12, 15, 18, 21, or 24 words.");
+    }
+    // Reject a malformed phrase (bad word / checksum) before we overwrite
+    // anything: loading it into a throwaway wallet throws on an invalid phrase.
+    const glue = await lazy.EpocaHostEngine.glue();
+    const probe = new glue.WalletHandle();
+    probe.loadMnemonic(trimmed);
+
+    const file = new lazy.JSONFile({ path: this._walletFilePath() });
+    await file.load();
+    file.data.mnemonicEnc = await lazy.OSKeyStore.encrypt(trimmed);
+    delete file.data.mnemonic;
+    await file._save();
+
+    // The old username maps to the previous account; drop it so the restored
+    // identity re-provisions cleanly.
+    const idFile = await this._identityFile();
+    delete idFile.data.username;
+    await idFile._save();
+
+    // Force the next _ensure() to rebuild from the imported phrase.
+    this._walletPromise = null;
+  },
+
   /**
    * @returns {Promise<Uint8Array>} 32-byte sr25519 public key for the
    *   product's derived account.

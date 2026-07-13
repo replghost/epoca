@@ -39,6 +39,20 @@ var gEpocaAccount = {
     this._field("epocaAccountProvision").addEventListener("command", () =>
       this.provision()
     );
+    this._field("epocaRevealPhrase").addEventListener("command", () =>
+      this.revealPhrase()
+    );
+    this._field("epocaRestorePhrase").addEventListener("command", () =>
+      this.restorePhrase()
+    );
+    this._field("epocaCopyPhrase").addEventListener("command", () =>
+      this.copyPhrase()
+    );
+    this._field("epocaHidePhrase").addEventListener("command", () =>
+      this.hidePhrase()
+    );
+    // Never leave the decrypted phrase in the DOM once the pane goes away.
+    window.addEventListener("unload", () => this.hidePhrase());
     this.refresh();
     this.refreshPermissions();
     // A claim runs in the shared parent module, so it survives navigating away
@@ -201,6 +215,80 @@ var gEpocaAccount = {
       row.appendChild(revoke);
 
       list.appendChild(row);
+    }
+  },
+
+  async revealPhrase() {
+    const { EpocaWallet } = this._modules;
+    const ok = Services.prompt.confirm(
+      window,
+      "Reveal recovery phrase",
+      "Your recovery phrase gives full control of this account. Make sure no " +
+        "one can see your screen. Reveal it now?"
+    );
+    if (!ok) {
+      return;
+    }
+    try {
+      // Decrypt goes through OSKeyStore, which reauthenticates the user.
+      const phrase = await EpocaWallet.exportMnemonic();
+      this._field("epocaPhraseField").value = phrase;
+      this._field("epocaPhraseBox").hidden = false;
+    } catch (e) {
+      console.error("gEpocaAccount: reveal phrase failed", e);
+    }
+  },
+
+  copyPhrase() {
+    const value = this._field("epocaPhraseField").value;
+    if (!value) {
+      return;
+    }
+    Cc["@mozilla.org/widget/clipboardhelper;1"]
+      .getService(Ci.nsIClipboardHelper)
+      .copyString(value);
+  },
+
+  hidePhrase() {
+    this._field("epocaPhraseField").value = "";
+    this._field("epocaPhraseBox").hidden = true;
+  },
+
+  async restorePhrase() {
+    const { EpocaWallet } = this._modules;
+    const input = { value: "" };
+    const entered = Services.prompt.prompt(
+      window,
+      "Restore from recovery phrase",
+      "Enter your 12–24 word recovery phrase. This replaces the current " +
+        "account on this device.",
+      input,
+      null,
+      { value: false }
+    );
+    if (!entered || !input.value.trim()) {
+      return;
+    }
+    const confirmed = Services.prompt.confirm(
+      window,
+      "Replace this account?",
+      "Restoring will replace the account currently on this device. Make sure " +
+        "you have its recovery phrase backed up first. Continue?"
+    );
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await EpocaWallet.importMnemonic(input.value);
+      this.hidePhrase();
+      await this.refresh();
+    } catch (e) {
+      console.error("gEpocaAccount: restore phrase failed", e);
+      Services.prompt.alert(
+        window,
+        "Restore failed",
+        e.message || String(e)
+      );
     }
   },
 };

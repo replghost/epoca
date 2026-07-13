@@ -60,4 +60,25 @@
          class="text-deemphasized"
          data-l10n-id="epoca-permissions-empty"/>
 </groupbox>
+
+<groupbox id="epocaBackupGroup"
+          data-category="paneEpocaAccount"
+          hidden="true"
+          class="highlighting-group">
+  <label><html:h2 data-l10n-id="epoca-backup-header"/></label>
+  <description class="description-deemphasized"
+               data-l10n-id="epoca-backup-description"/>
+  <hbox style="gap: 8px; margin-top: 8px;">
+    <button id="epocaRevealPhrase" data-l10n-id="epoca-backup-reveal"/>
+    <button id="epocaRestorePhrase" data-l10n-id="epoca-backup-restore"/>
+  </hbox>
+  <vbox id="epocaPhraseBox" hidden="true" style="margin-top: 8px; gap: 8px;">
+    <html:textarea id="epocaPhraseField" readonly="readonly" rows="2"
+                   style="font-family: monospace; resize: none;"/>
+    <hbox style="gap: 8px;">
+      <button id="epocaCopyPhrase" data-l10n-id="epoca-backup-copy"/>
+      <button id="epocaHidePhrase" data-l10n-id="epoca-backup-hide"/>
+    </hbox>
+  </vbox>
+</groupbox>
 </html:template>

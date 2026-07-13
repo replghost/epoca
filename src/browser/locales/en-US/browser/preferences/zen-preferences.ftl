@@ -385,3 +385,14 @@ epoca-permissions-description = Products you have allowed to use your account or
 epoca-permissions-empty = No permissions granted yet.
 epoca-permissions-revoke =
     .label = Revoke
+
+epoca-backup-header = Recovery phrase
+epoca-backup-description = Your recovery phrase restores this account on another device. Anyone who has it controls your account — never share it.
+epoca-backup-reveal =
+    .label = Reveal recovery phrase
+epoca-backup-restore =
+    .label = Restore from phrase
+epoca-backup-copy =
+    .label = Copy
+epoca-backup-hide =
+    .label = Hide
