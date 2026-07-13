@@ -12,7 +12,13 @@ const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
   EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
+  setTimeout: "resource://gre/modules/Timer.sys.mjs",
 });
+
+// Retry budget for a transient resolve/fetch failure (chain light-client still
+// syncing, gateway timeout). Backoff between tries, in ms.
+const RESOLVE_ATTEMPTS = 4;
+const RESOLVE_BACKOFF_MS = 400;
 
 // A dotNS label as accepted by the resolver, without the .dot suffix.
 export const DOT_LABEL_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -45,12 +51,36 @@ export const EpocaDotNs = {
     }
     let pending = this._resolutions.get(name);
     if (!pending) {
-      pending = this._handle().then(handle =>
-        handle.resolveAndFetch(`${name}.dot`)
-      );
+      pending = this._resolveWithRetry(name);
+      // Only successes stay cached for the session; a failed resolution is
+      // dropped so the next navigation re-attempts from scratch.
       pending.catch(() => this._resolutions.delete(name));
       this._resolutions.set(name, pending);
     }
     return pending;
+  },
+
+  // resolveAndFetch is a live on-chain state_call + IPFS gateway fetch; either
+  // can blip transiently (chain still syncing on a cold start, gateway
+  // timeout). A one-shot failure dead-ends the navigation at "File not found",
+  // so retry a few times with backoff. Drop the handle between tries so a
+  // wedged DotnsHandle/chain client is rebuilt fresh on the next attempt.
+  async _resolveWithRetry(name) {
+    let lastErr;
+    for (let attempt = 0; attempt < RESOLVE_ATTEMPTS; attempt++) {
+      try {
+        const handle = await this._handle();
+        return await handle.resolveAndFetch(`${name}.dot`);
+      } catch (e) {
+        lastErr = e;
+        this._handlePromise = null;
+        if (attempt < RESOLVE_ATTEMPTS - 1) {
+          await new Promise(resolve =>
+            lazy.setTimeout(resolve, RESOLVE_BACKOFF_MS * 2 ** attempt)
+          );
+        }
+      }
+    }
+    throw lastErr;
   },
 };
