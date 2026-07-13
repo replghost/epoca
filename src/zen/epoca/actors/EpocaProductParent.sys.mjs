@@ -385,10 +385,28 @@ export class EpocaProductParent extends JSWindowActorParent {
       return;
     }
     await lazy.EpocaPermissions.record(productId, "account");
-    const publicKey = await lazy.EpocaWallet.appPublicKey(
-      outcome.account.dotns_id,
-      outcome.account.derivation_index
-    );
+    // Deriving the account unlocks the wallet (OSKeyStore-decrypts the stored
+    // mnemonic). That decrypt can fail or block — e.g. a macOS keychain-ACL
+    // prompt after the app is re-signed with a different code signature. Never
+    // let it throw unanswered: an account request with no reply hangs the
+    // product forever (it boots, waits for its account, and blanks). Surface a
+    // clean error instead so the product can show a failure / retry.
+    let publicKey;
+    try {
+      publicKey = await lazy.EpocaWallet.appPublicKey(
+        outcome.account.dotns_id,
+        outcome.account.derivation_index
+      );
+    } catch (e) {
+      console.error("EpocaProduct: account get failed (wallet unlock)", e);
+      await this.#reply(
+        "encodeAccountGetError",
+        outcome.request_id,
+        "Unavailable",
+        e?.message ? String(e.message) : "wallet unlock failed"
+      );
+      return;
+    }
     await this.#reply(
       "encodeAccountGetResponse",
       outcome.request_id,
