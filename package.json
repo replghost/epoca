@@ -34,7 +34,9 @@
     "lc": "surfer license-check",
     "lc:fix": "surfer license-check --fix",
     "use-moz-src": "cd engine && ./mach use-moz-src",
-    "ci": "surfer ci --brand release --display-version"
+    "ci": "surfer ci --brand release --display-version",
+    "sign:dev": "bash scripts/sign-dev.sh",
+    "postpackage": "bash scripts/package-dev.sh"
   },
   "repository": {
     "type": "git",
