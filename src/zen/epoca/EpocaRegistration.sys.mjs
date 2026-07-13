@@ -25,6 +25,8 @@
 const lazy = {};
 
 ChromeUtils.defineESModuleGetters(lazy, {
+  EpocaChainService: "resource:///modules/EpocaChainService.sys.mjs",
+  EpocaHostEngine: "resource:///modules/EpocaHostEngine.sys.mjs",
   EpocaSs58: "resource:///modules/EpocaSs58.sys.mjs",
   EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
 });
@@ -175,6 +177,58 @@ export const EpocaRegistration = {
       submitted: true,
       assigned,
     };
+  },
+
+  /**
+   * Resolve this wallet's on-chain personhood username from the People chain's
+   * `Resources.Consumers` map (keyed by account). This is the reverse lookup
+   * (account -> username) and is authoritative: it returns both the lite
+   * handle (`name.NN`) and, once the person has upgraded, the full handle
+   * (`name`). Prefer `full` for display, falling back to `lite`.
+   *
+   * @returns {Promise<{lite: string|null, full: string|null, display:
+   *   string|null, isPerson: boolean}|null>} null if the account has no
+   *   Consumers entry (never registered).
+   */
+  async resolveUsername() {
+    const accountId = await lazy.EpocaWallet.walletPublicKey();
+    const accountHex =
+      "0x" +
+      Array.from(accountId, b => b.toString(16).padStart(2, "0")).join("");
+    const glue = await lazy.EpocaHostEngine.glue();
+    const identity = new glue.IdentityHandle();
+    try {
+      const keyHex = identity.consumersKey(accountHex);
+      const raw = await lazy.EpocaChainService.ssRpc("state_getStorage", [
+        keyHex,
+      ]);
+      const body = JSON.parse(raw);
+      if (body.error) {
+        throw new Error(
+          `state_getStorage rejected: ${JSON.stringify(body.error)}`
+        );
+      }
+      const hex = body.result;
+      if (typeof hex !== "string" || !hex) {
+        return null; // no Consumers entry for this account
+      }
+      const bytes = Uint8Array.from(
+        hex.replace(/^0x/, "").match(/../g) ?? [],
+        b => parseInt(b, 16)
+      );
+      const info = identity.decodeConsumerInfo(bytes);
+      if (!info) {
+        return null;
+      }
+      return {
+        lite: info.liteUsername ?? null,
+        full: info.fullUsername ?? null,
+        display: info.fullUsername || info.liteUsername || null,
+        isPerson: info.credibility?.type === "Person",
+      };
+    } finally {
+      identity.free?.();
+    }
   },
 
   async _authenticate(backend, publicKeyHex) {

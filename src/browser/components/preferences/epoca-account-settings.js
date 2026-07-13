@@ -21,6 +21,7 @@ var gEpocaAccount = {
       ChromeUtils.defineESModuleGetters(this.__modules, {
         EpocaAllowance: "resource:///modules/EpocaAllowance.sys.mjs",
         EpocaPermissions: "resource:///modules/EpocaPermissions.sys.mjs",
+        EpocaRegistration: "resource:///modules/EpocaRegistration.sys.mjs",
         EpocaSs58: "resource:///modules/EpocaSs58.sys.mjs",
         EpocaWallet: "resource:///modules/EpocaWallet.sys.mjs",
       });
@@ -69,27 +70,37 @@ var gEpocaAccount = {
   },
 
   async refresh() {
-    const { EpocaWallet, EpocaSs58 } = this._modules;
+    const { EpocaWallet, EpocaSs58, EpocaRegistration } = this._modules;
+    const nameField = this._field("epocaAccountUsername");
     try {
-      const [username, publicKey] = await Promise.all([
-        EpocaWallet.getUsername(),
-        EpocaWallet.walletPublicKey(),
-      ]);
+      const publicKey = await EpocaWallet.walletPublicKey();
       this._address = EpocaSs58.encodeSs58(publicKey, 42);
-      this._field("epocaAccountUsername").value = username || "—";
       this._field("epocaAccountAddress").value = this._address;
-      const status = this._field("epocaAccountAllowance");
-      if (!status.hasAttribute("data-pending")) {
-        document.l10n.setAttributes(
-          status,
-          username
-            ? "epoca-account-provisioned"
-            : "epoca-account-not-provisioned"
-        );
+    } catch (e) {
+      console.error("gEpocaAccount: wallet load failed", e);
+      nameField.value = "error";
+      return;
+    }
+    // Show the locally-cached handle immediately, then override with the
+    // authoritative on-chain name — which resolves even for a wallet restored
+    // from a recovery phrase (no local handle) and prefers the full handle.
+    let display = await EpocaWallet.getUsername();
+    nameField.value = display || "resolving…";
+    try {
+      const onchain = await EpocaRegistration.resolveUsername();
+      if (onchain?.display) {
+        display = onchain.display;
       }
     } catch (e) {
-      console.error("gEpocaAccount: refresh failed", e);
-      this._field("epocaAccountUsername").value = "error";
+      console.error("gEpocaAccount: on-chain username resolve failed", e);
+    }
+    nameField.value = display || "not registered";
+    const status = this._field("epocaAccountAllowance");
+    if (!status.hasAttribute("data-pending")) {
+      document.l10n.setAttributes(
+        status,
+        display ? "epoca-account-provisioned" : "epoca-account-not-provisioned"
+      );
     }
   },
 
